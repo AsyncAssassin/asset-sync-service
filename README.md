@@ -7,6 +7,7 @@
 ![jOOQ](https://img.shields.io/badge/jOOQ-SQL-009FE3)
 ![Liquibase](https://img.shields.io/badge/Liquibase-migrations-2962FF)
 ![Testcontainers](https://img.shields.io/badge/Testcontainers-PostgreSQL-2496ED)
+[![CI](https://github.com/AsyncAssassin/asset-sync-service/actions/workflows/ci.yml/badge.svg)](https://github.com/AsyncAssassin/asset-sync-service/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/badge/release-v0.1.0-blue)](https://github.com/AsyncAssassin/asset-sync-service/releases/tag/v0.1.0)
 
 `asset-sync-service` is a backend MVP for synchronizing public account, watched-address, and observed transaction lifecycle state. It accepts observed chain events through a REST API or a fake provider sync path, applies an idempotent domain state machine, stores the result in PostgreSQL, and emits lifecycle changes through a transactional outbox with a local structured-log publisher.

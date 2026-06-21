@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Ensure Gradle wrapper is executable
+        run: chmod +x ./gradlew
+
+      - name: Run checks
+        run: ./gradlew clean check
+
+      - name: Build boot jar
+        run: ./gradlew clean bootJar
+
+      - name: Validate Docker Compose config
+        run: docker compose config
+
+      - name: Verify generated jOOQ sources are not tracked
+        run: test -z "$(git ls-files build/generated/sources/jooq/main/kotlin)"
