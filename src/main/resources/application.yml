@@ -1,0 +1,50 @@
+spring:
+  application:
+    name: asset-sync-service
+  profiles:
+    default: local
+  jooq:
+    sql-dialect: postgres
+  liquibase:
+    enabled: false
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+asset-sync:
+  outbox:
+    batch-size: ${ASSET_SYNC_OUTBOX_BATCH_SIZE:50}
+    retry-backoff-base-delay: ${ASSET_SYNC_OUTBOX_RETRY_BACKOFF_BASE_DELAY:30s}
+    max-error-length: ${ASSET_SYNC_OUTBOX_MAX_ERROR_LENGTH:1024}
+    scheduler:
+      enabled: ${ASSET_SYNC_OUTBOX_SCHEDULER_ENABLED:true}
+      fixed-delay: ${ASSET_SYNC_OUTBOX_SCHEDULER_FIXED_DELAY:5s}
+      initial-delay: ${ASSET_SYNC_OUTBOX_SCHEDULER_INITIAL_DELAY:10s}

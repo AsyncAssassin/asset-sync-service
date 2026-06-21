@@ -1,0 +1,55 @@
+databaseChangeLog:
+  - changeSet:
+      id: 003-create-observed-transactions
+      author: codex
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            sql: |
+              CREATE TABLE observed_transactions (
+                  id uuid NOT NULL,
+                  chain_id text NOT NULL,
+                  tx_hash text NOT NULL,
+                  event_index integer NOT NULL,
+                  watched_address_id uuid NOT NULL,
+                  address text NOT NULL,
+                  asset text NOT NULL,
+                  direction text NOT NULL,
+                  amount numeric(38, 18) NOT NULL,
+                  block_height bigint NOT NULL,
+                  confirmations integer NOT NULL,
+                  status text NOT NULL,
+                  first_seen_at timestamptz NOT NULL,
+                  last_seen_at timestamptz NOT NULL,
+                  confirmed_at timestamptz,
+                  reverted_at timestamptz,
+                  version bigint NOT NULL DEFAULT 0,
+                  created_at timestamptz NOT NULL,
+                  updated_at timestamptz NOT NULL,
+                  CONSTRAINT pk_observed_transactions PRIMARY KEY (id),
+                  CONSTRAINT fk_observed_transactions_watched_address_id
+                      FOREIGN KEY (watched_address_id) REFERENCES watched_addresses (id),
+                  CONSTRAINT uq_observed_transactions_natural_key
+                      UNIQUE (chain_id, tx_hash, event_index, address, asset),
+                  CONSTRAINT ck_observed_transactions_event_index_non_negative
+                      CHECK (event_index >= 0),
+                  CONSTRAINT ck_observed_transactions_amount_non_negative
+                      CHECK (amount >= 0),
+                  CONSTRAINT ck_observed_transactions_confirmations_non_negative
+                      CHECK (confirmations >= 0),
+                  CONSTRAINT ck_observed_transactions_direction
+                      CHECK (direction IN ('INBOUND', 'OUTBOUND')),
+                  CONSTRAINT ck_observed_transactions_status
+                      CHECK (status IN ('SEEN', 'CONFIRMED', 'REVERTED'))
+              );
+
+              CREATE INDEX idx_observed_transactions_watched_address_id_status
+                  ON observed_transactions (watched_address_id, status);
+
+              CREATE INDEX idx_observed_transactions_chain_id_tx_hash
+                  ON observed_transactions (chain_id, tx_hash);
+
+              CREATE INDEX idx_observed_transactions_chain_id_block_height
+                  ON observed_transactions (chain_id, block_height);

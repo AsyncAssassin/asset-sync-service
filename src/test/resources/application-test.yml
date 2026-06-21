@@ -1,0 +1,11 @@
+spring:
+  jooq:
+    sql-dialect: postgres
+  liquibase:
+    enabled: true
+    change-log: classpath:/db/changelog/db.changelog-master.yaml
+
+asset-sync:
+  outbox:
+    scheduler:
+      enabled: false

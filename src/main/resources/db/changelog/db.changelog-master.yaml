@@ -1,0 +1,11 @@
+databaseChangeLog:
+  - include:
+      file: db/changelog/changes/001-create-accounts-and-chain-configs.yaml
+  - include:
+      file: db/changelog/changes/002-create-watched-addresses.yaml
+  - include:
+      file: db/changelog/changes/003-create-observed-transactions.yaml
+  - include:
+      file: db/changelog/changes/004-create-outbox-and-sync-runs.yaml
+  - include:
+      file: db/changelog/changes/005-seed-local-chain-configs.yaml

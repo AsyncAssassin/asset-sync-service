@@ -1,0 +1,35 @@
+databaseChangeLog:
+  - changeSet:
+      id: 001-create-accounts-and-chain-configs
+      author: codex
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            sql: |
+              CREATE TABLE accounts (
+                  id uuid NOT NULL,
+                  external_ref text,
+                  status text NOT NULL,
+                  created_at timestamptz NOT NULL,
+                  updated_at timestamptz NOT NULL,
+                  CONSTRAINT pk_accounts PRIMARY KEY (id),
+                  CONSTRAINT ck_accounts_status CHECK (status IN ('ACTIVE', 'DISABLED'))
+              );
+
+              CREATE UNIQUE INDEX uq_accounts_external_ref_not_null
+                  ON accounts (external_ref)
+                  WHERE external_ref IS NOT NULL;
+
+              CREATE TABLE chain_configs (
+                  chain_id text NOT NULL,
+                  display_name text NOT NULL,
+                  required_confirmations integer NOT NULL,
+                  enabled boolean NOT NULL,
+                  created_at timestamptz NOT NULL,
+                  updated_at timestamptz NOT NULL,
+                  CONSTRAINT pk_chain_configs PRIMARY KEY (chain_id),
+                  CONSTRAINT ck_chain_configs_required_confirmations_non_negative
+                      CHECK (required_confirmations >= 0)
+              );

@@ -1,0 +1,26 @@
+databaseChangeLog:
+  - changeSet:
+      id: 005-seed-local-chain-configs
+      author: codex
+      changes:
+        - insert:
+            tableName: chain_configs
+            columns:
+              - column:
+                  name: chain_id
+                  value: local-evm
+              - column:
+                  name: display_name
+                  value: Local EVM
+              - column:
+                  name: required_confirmations
+                  valueNumeric: 3
+              - column:
+                  name: enabled
+                  valueBoolean: true
+              - column:
+                  name: created_at
+                  valueDate: 2026-01-01T00:00:00Z
+              - column:
+                  name: updated_at
+                  valueDate: 2026-01-01T00:00:00Z

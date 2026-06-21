@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: ${ASSET_SYNC_DB_NAME:-asset_sync}
+      POSTGRES_USER: ${ASSET_SYNC_DB_USER:-asset_sync}
+      POSTGRES_PASSWORD: ${ASSET_SYNC_DB_PASSWORD:-asset_sync}
+    ports:
+      - "${ASSET_SYNC_DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  asset-sync-service:
+    build:
+      context: .
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SERVER_PORT: 8080
+      ASSET_SYNC_DB_HOST: postgres
+      ASSET_SYNC_DB_PORT: 5432
+      ASSET_SYNC_DB_NAME: ${ASSET_SYNC_DB_NAME:-asset_sync}
+      ASSET_SYNC_DB_USER: ${ASSET_SYNC_DB_USER:-asset_sync}
+      ASSET_SYNC_DB_PASSWORD: ${ASSET_SYNC_DB_PASSWORD:-asset_sync}
+    ports:
+      - "${ASSET_SYNC_HTTP_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

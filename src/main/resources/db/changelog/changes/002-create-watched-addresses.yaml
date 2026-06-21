@@ -1,0 +1,36 @@
+databaseChangeLog:
+  - changeSet:
+      id: 002-create-watched-addresses
+      author: codex
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            sql: |
+              CREATE TABLE watched_addresses (
+                  id uuid NOT NULL,
+                  account_id uuid NOT NULL,
+                  chain_id text NOT NULL,
+                  address text NOT NULL,
+                  asset text NOT NULL,
+                  label text,
+                  status text NOT NULL,
+                  created_at timestamptz NOT NULL,
+                  updated_at timestamptz NOT NULL,
+                  CONSTRAINT pk_watched_addresses PRIMARY KEY (id),
+                  CONSTRAINT fk_watched_addresses_account_id
+                      FOREIGN KEY (account_id) REFERENCES accounts (id),
+                  CONSTRAINT fk_watched_addresses_chain_id
+                      FOREIGN KEY (chain_id) REFERENCES chain_configs (chain_id),
+                  CONSTRAINT uq_watched_addresses_chain_address_asset
+                      UNIQUE (chain_id, address, asset),
+                  CONSTRAINT ck_watched_addresses_status
+                      CHECK (status IN ('ACTIVE', 'DISABLED'))
+              );
+
+              CREATE INDEX idx_watched_addresses_account_id
+                  ON watched_addresses (account_id);
+
+              CREATE INDEX idx_watched_addresses_chain_id_address
+                  ON watched_addresses (chain_id, address);

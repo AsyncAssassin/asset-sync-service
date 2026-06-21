@@ -1,0 +1,72 @@
+databaseChangeLog:
+  - changeSet:
+      id: 004-create-outbox-and-sync-runs
+      author: codex
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            sql: |
+              CREATE TABLE outbox_events (
+                  id uuid NOT NULL,
+                  aggregate_type text NOT NULL,
+                  aggregate_id uuid NOT NULL,
+                  event_type text NOT NULL,
+                  idempotency_key text NOT NULL,
+                  payload jsonb NOT NULL,
+                  status text NOT NULL,
+                  attempts integer NOT NULL DEFAULT 0,
+                  next_attempt_at timestamptz NOT NULL,
+                  published_at timestamptz,
+                  last_error text,
+                  created_at timestamptz NOT NULL,
+                  updated_at timestamptz NOT NULL,
+                  CONSTRAINT pk_outbox_events PRIMARY KEY (id),
+                  CONSTRAINT uq_outbox_events_idempotency_key UNIQUE (idempotency_key),
+                  CONSTRAINT ck_outbox_events_status
+                      CHECK (status IN ('NEW', 'PUBLISHED', 'FAILED')),
+                  CONSTRAINT ck_outbox_events_attempts_non_negative
+                      CHECK (attempts >= 0),
+                  CONSTRAINT ck_outbox_events_event_type
+                      CHECK (event_type IN (
+                          'TRANSACTION_SEEN',
+                          'TRANSACTION_CONFIRMED',
+                          'TRANSACTION_REVERTED'
+                      ))
+              );
+
+              CREATE INDEX idx_outbox_events_status_next_attempt_at
+                  ON outbox_events (status, next_attempt_at);
+
+              CREATE INDEX idx_outbox_events_aggregate_type_aggregate_id
+                  ON outbox_events (aggregate_type, aggregate_id);
+
+              CREATE TABLE sync_runs (
+                  id uuid NOT NULL,
+                  target_type text NOT NULL,
+                  target_id uuid NOT NULL,
+                  status text NOT NULL,
+                  started_at timestamptz NOT NULL,
+                  finished_at timestamptz,
+                  events_seen integer NOT NULL DEFAULT 0,
+                  events_changed integer NOT NULL DEFAULT 0,
+                  last_error text,
+                  created_at timestamptz NOT NULL,
+                  updated_at timestamptz NOT NULL,
+                  CONSTRAINT pk_sync_runs PRIMARY KEY (id),
+                  CONSTRAINT ck_sync_runs_target_type
+                      CHECK (target_type IN ('ACCOUNT', 'ADDRESS')),
+                  CONSTRAINT ck_sync_runs_status
+                      CHECK (status IN ('STARTED', 'SUCCEEDED', 'FAILED')),
+                  CONSTRAINT ck_sync_runs_events_seen_non_negative
+                      CHECK (events_seen >= 0),
+                  CONSTRAINT ck_sync_runs_events_changed_non_negative
+                      CHECK (events_changed >= 0)
+              );
+
+              CREATE INDEX idx_sync_runs_target_type_target_id_started_at
+                  ON sync_runs (target_type, target_id, started_at DESC);
+
+              CREATE INDEX idx_sync_runs_status_started_at
+                  ON sync_runs (status, started_at DESC);
