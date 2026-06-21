@@ -294,6 +294,7 @@ Coverage highlights:
 - API tests for controllers, DTO validation, and `ProblemDetail` responses.
 - Outbox retry and concurrency tests, including `FOR UPDATE SKIP LOCKED`.
 - Observability tests for health and metrics.
+- GitHub Actions CI runs Gradle checks, `bootJar`, `docker compose config`, and a generated jOOQ tracking guard.
 
 Verification commands:
 
@@ -315,7 +316,7 @@ docker compose config
 
 ## MVP Boundaries
 
-This service does not provide custody, signing, private key storage, wallet functionality, or real funds movement. The MVP also does not include a real blockchain node/provider, Kafka, SQS, Redis, balance projection, auth, multitenancy, CI/CD, or production metrics export.
+This service does not provide custody, signing, private key storage, wallet functionality, or real funds movement. The MVP also does not include a real blockchain node/provider, Kafka, SQS, Redis, balance projection, auth, multitenancy, CD/deployment automation, release automation, or production metrics export.
 
 ## Roadmap / Deferred Scope
 
@@ -327,7 +328,7 @@ Future extensions, not implemented in `v0.1.0`:
 - External broker adapter for the outbox.
 - Balance projection read models.
 - Auth and multitenancy.
-- CI/CD.
+- CD, deployment automation, and release automation.
 - Production observability export.
 
 ## Repository Layout
