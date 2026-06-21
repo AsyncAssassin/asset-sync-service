@@ -64,6 +64,20 @@ Detailed documentation:
 - [Testing](docs/testing.md)
 - [Implementation plan](docs/implementation-plan.md)
 
+## Screenshots
+
+Swagger UI shows the generated OpenAPI surface exposed by the running service.
+
+![Swagger UI](docs/assets/swagger-ui.png)
+
+Actuator health captures show the service and readiness endpoints returning `UP`.
+
+![Health endpoint](docs/assets/health.png)
+
+The outbox smoke capture shows a real observed event reaching a `PUBLISHED` outbox row.
+
+![Outbox publishing log](docs/assets/outbox-log.png)
+
 ## API And OpenAPI
 
 When the app is running:
