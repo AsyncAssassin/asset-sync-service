@@ -3,7 +3,11 @@ package com.example.assetsync.api.error
 import com.example.assetsync.application.account.AccountNotFoundException
 import com.example.assetsync.application.account.DuplicateAccountExternalRefException
 import com.example.assetsync.application.account.DuplicateWatchedAddressException
+import com.example.assetsync.application.account.InvalidWatchedAddressPageException
 import com.example.assetsync.application.account.UnsupportedChainException
+import com.example.assetsync.application.sync.AccountSyncTooLargeException
+import com.example.assetsync.application.sync.ProviderDataMismatchException
+import com.example.assetsync.application.sync.SyncCapacityExceededException
 import com.example.assetsync.application.sync.SyncProviderUnavailableException
 import com.example.assetsync.application.sync.SyncRunNotFoundException
 import com.example.assetsync.application.sync.WatchedAddressByIdNotFoundException
@@ -14,6 +18,7 @@ import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import java.net.URI
 import org.springframework.dao.DataAccessException
+import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.http.HttpStatus
 import org.springframework.http.ProblemDetail
 import org.springframework.http.ResponseEntity
@@ -175,6 +180,25 @@ class ApiExceptionHandler {
             ),
         )
 
+    @ExceptionHandler(InvalidWatchedAddressPageException::class)
+    fun handleInvalidWatchedAddressPage(
+        exception: InvalidWatchedAddressPageException,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> =
+        problem(
+            status = HttpStatus.BAD_REQUEST,
+            type = "invalid-pagination",
+            title = "Invalid pagination",
+            detail = "Watched address pagination parameters are outside the supported bounds.",
+            request = request,
+            properties = mapOf(
+                "page" to exception.page,
+                "size" to exception.size,
+                "maxPage" to exception.maxPage,
+                "maxSize" to exception.maxPageSize,
+            ),
+        )
+
     @ExceptionHandler(ObservedTransactionConflictException::class)
     fun handleObservedTransactionConflict(
         exception: ObservedTransactionConflictException,
@@ -227,6 +251,73 @@ class ApiExceptionHandler {
             ),
         )
 
+    @ExceptionHandler(AccountSyncTooLargeException::class)
+    fun handleAccountSyncTooLarge(
+        exception: AccountSyncTooLargeException,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> =
+        problem(
+            status = HttpStatus.BAD_REQUEST,
+            type = "sync-account-too-large",
+            title = "Account sync too large",
+            detail = "Account has more active watched addresses than this synchronous sync endpoint allows.",
+            request = request,
+            properties = mapOf(
+                "accountId" to exception.accountId,
+                "maxAddresses" to exception.maxAddresses,
+            ),
+        )
+
+    @ExceptionHandler(ProviderDataMismatchException::class)
+    fun handleProviderDataMismatch(
+        exception: ProviderDataMismatchException,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> =
+        // The upstream provider returned data that doesn't fit the watched target — a bad-gateway
+        // condition, not a client 404/409.
+        problem(
+            status = HttpStatus.BAD_GATEWAY,
+            type = "provider-data-invalid",
+            title = "Provider returned invalid data",
+            detail = "The provider returned an event that could not be reconciled with tracked state.",
+            request = request,
+        )
+
+    @ExceptionHandler(SyncCapacityExceededException::class)
+    fun handleSyncCapacityExceeded(
+        exception: SyncCapacityExceededException,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> =
+        // Pool saturation is a client-retryable capacity limit — distinct from provider-unavailable.
+        problem(
+            status = HttpStatus.TOO_MANY_REQUESTS,
+            type = "sync-capacity-exceeded",
+            title = "Sync capacity exceeded",
+            detail = "Too many concurrent syncs are in flight; retry shortly.",
+            request = request,
+            properties = mapOf("maxConcurrentSyncs" to exception.maxConcurrentSyncs),
+        )
+
+    @ExceptionHandler(DataIntegrityViolationException::class)
+    fun handleDatabaseIntegrityFailure(
+        exception: DataIntegrityViolationException,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> {
+        logger.warn(
+            "database_integrity_violation path={} exceptionClass={} causeClass={}",
+            request.requestURI,
+            exception.javaClass.simpleName,
+            exception.mostSpecificCause.javaClass.simpleName,
+        )
+        return problem(
+            status = HttpStatus.BAD_REQUEST,
+            type = "database-constraint-violation",
+            title = "Database constraint violation",
+            detail = "Request violates a database constraint.",
+            request = request,
+        )
+    }
+
     @ExceptionHandler(DataAccessException::class)
     fun handleDatabaseFailure(
         exception: DataAccessException,
@@ -261,6 +352,7 @@ class ApiExceptionHandler {
         problem.type = URI.create("https://asset-sync-service/errors/$type")
         problem.title = title
         problem.instance = URI.create(request.requestURI)
+        request.getAttribute(REQUEST_ID_ATTRIBUTE)?.let { problem.setProperty("requestId", it) }
         properties.forEach(problem::setProperty)
         return ResponseEntity.status(status).body(problem)
     }

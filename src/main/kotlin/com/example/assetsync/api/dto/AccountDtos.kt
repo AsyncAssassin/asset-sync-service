@@ -4,11 +4,16 @@ import com.example.assetsync.application.account.Account
 import com.example.assetsync.application.account.WatchedAddress
 import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.Pattern
+import jakarta.validation.constraints.Size
 import java.time.Instant
 import java.util.UUID
 
+const val MAX_EXTERNAL_REF_LENGTH = 255
+const val MAX_LABEL_LENGTH = 255
+
 data class CreateAccountRequest(
     @field:Pattern(regexp = ".*\\S.*", message = "externalRef must be non-blank when provided")
+    @field:Size(max = MAX_EXTERNAL_REF_LENGTH, message = "externalRef must be at most $MAX_EXTERNAL_REF_LENGTH characters")
     val externalRef: String? = null,
 )
 
@@ -22,12 +27,16 @@ data class AccountResponse(
 
 data class RegisterWatchedAddressRequest(
     @field:NotBlank(message = "chainId is required")
+    @field:Size(max = MAX_CHAIN_ID_LENGTH, message = "chainId must be at most $MAX_CHAIN_ID_LENGTH characters")
     val chainId: String = "",
     @field:NotBlank(message = "address is required")
+    @field:Size(max = MAX_ADDRESS_LENGTH, message = "address must be at most $MAX_ADDRESS_LENGTH characters")
     val address: String = "",
     @field:NotBlank(message = "asset is required")
+    @field:Size(max = MAX_ASSET_LENGTH, message = "asset must be at most $MAX_ASSET_LENGTH characters")
     val asset: String = "",
     @field:Pattern(regexp = ".*\\S.*", message = "label must be non-blank when provided")
+    @field:Size(max = MAX_LABEL_LENGTH, message = "label must be at most $MAX_LABEL_LENGTH characters")
     val label: String? = null,
 )
 
@@ -45,6 +54,9 @@ data class WatchedAddressResponse(
 
 data class WatchedAddressListResponse(
     val items: List<WatchedAddressResponse>,
+    val page: Int,
+    val size: Int,
+    val hasNext: Boolean,
 )
 
 fun Account.toResponse(): AccountResponse =

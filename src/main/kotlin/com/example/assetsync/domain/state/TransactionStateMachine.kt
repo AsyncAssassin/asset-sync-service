@@ -56,7 +56,7 @@ class TransactionStateMachine {
     ): TransactionTransitionResult =
         when (effectiveIncomingStatus) {
             TransactionStatus.SEEN -> {
-                if (incoming.confirmations > current.confirmations) {
+                if (incoming.shouldUpdateLifecycle(current)) {
                     TransactionTransitionResult.Updated(
                         state = incoming.lifecycleState(TransactionStatus.SEEN),
                         effectiveIncomingStatus = effectiveIncomingStatus,
@@ -95,7 +95,7 @@ class TransactionStateMachine {
             )
 
             TransactionStatus.CONFIRMED -> {
-                if (incoming.confirmations > current.confirmations) {
+                if (incoming.shouldUpdateLifecycle(current)) {
                     TransactionTransitionResult.Updated(
                         state = incoming.lifecycleState(TransactionStatus.CONFIRMED),
                         effectiveIncomingStatus = effectiveIncomingStatus,
@@ -116,12 +116,19 @@ class TransactionStateMachine {
             )
         }
 
+    private fun IncomingObservedTransaction.shouldUpdateLifecycle(current: CurrentTransactionSnapshot): Boolean =
+        confirmations > current.confirmations ||
+            (confirmations == current.confirmations && blockHeight != current.blockHeight)
+
     private fun CurrentTransactionSnapshot.updatedLifecycleState(
         incoming: IncomingObservedTransaction,
         status: TransactionStatus,
     ): TransactionLifecycleState =
         TransactionLifecycleState(
-            blockHeight = incoming.blockHeight,
+            blockHeight = when {
+                incoming.confirmations >= confirmations -> incoming.blockHeight
+                else -> blockHeight
+            },
             confirmations = maxOf(confirmations, incoming.confirmations),
             status = status,
         )

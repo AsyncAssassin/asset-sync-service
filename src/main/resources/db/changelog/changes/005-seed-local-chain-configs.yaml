@@ -1,7 +1,7 @@
 databaseChangeLog:
   - changeSet:
       id: 005-seed-local-chain-configs
-      author: codex
+      author: AsyncAssassin
       changes:
         - insert:
             tableName: chain_configs

@@ -1,7 +1,11 @@
 package com.example.assetsync.integration
 
 import com.example.assetsync.TestcontainersConfiguration
+import com.example.assetsync.api.error.REQUEST_ID_HEADER
+import com.example.assetsync.api.dto.MAX_TX_HASH_LENGTH
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
+import com.example.assetsync.application.sync.ChainProviderUnavailableException
+import com.example.assetsync.application.sync.SyncProviderUnavailableException
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
 import com.example.assetsync.infrastructure.provider.FakeChainProvider
@@ -11,9 +15,12 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import java.math.BigDecimal
 import java.sql.Timestamp
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -33,7 +40,14 @@ import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 
 @ActiveProfiles("test")
 @Import(TestcontainersConfiguration::class)
-@SpringBootTest
+@SpringBootTest(
+    properties = [
+        "asset-sync.sync.provider-timeout=100ms",
+        "asset-sync.sync.provider-max-threads=2",
+        "asset-sync.sync.account-sync-batch-size=1",
+        "asset-sync.sync.max-account-sync-addresses=2",
+    ],
+)
 @AutoConfigureMockMvc
 class SyncApiIntegrationTests(
     @Autowired private val mockMvc: MockMvc,
@@ -69,7 +83,7 @@ class SyncApiIntegrationTests(
         )
 
         mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
-            .andExpect(status().isAccepted)
+            .andExpect(status().isOk)
             .andExpect(jsonPath("$.id").exists())
             .andExpect(jsonPath("$.targetType").value("ADDRESS"))
             .andExpect(jsonPath("$.targetId").value(addressId))
@@ -115,7 +129,7 @@ class SyncApiIntegrationTests(
         )
 
         mockMvc.perform(post("/api/v1/accounts/$accountId/sync"))
-            .andExpect(status().isAccepted)
+            .andExpect(status().isOk)
             .andExpect(jsonPath("$.targetType").value("ACCOUNT"))
             .andExpect(jsonPath("$.targetId").value(accountId))
             .andExpect(jsonPath("$.status").value("SUCCEEDED"))
@@ -149,7 +163,7 @@ class SyncApiIntegrationTests(
         )
 
         mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
-            .andExpect(status().isAccepted)
+            .andExpect(status().isOk)
             .andExpect(jsonPath("$.status").value("SUCCEEDED"))
             .andExpect(jsonPath("$.eventsSeen").value(2))
             .andExpect(jsonPath("$.eventsChanged").value(1))
@@ -189,6 +203,179 @@ class SyncApiIntegrationTests(
     }
 
     @Test
+    fun `provider timeout marks sync run failed and returns service unavailable`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-provider-timeout")
+        val addressId = watchedAddress["id"].asText()
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-provider-timeout",
+            asset = "USDC",
+            steps = listOf(FakeChainProviderStep.Delay(Duration.ofSeconds(5))),
+        )
+
+        val result = mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
+            .andExpect(status().isServiceUnavailable)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/provider-unavailable"))
+            .andExpect(jsonPath("$.syncRunId").exists())
+            .andReturn()
+
+        val syncRunId = objectMapper.readTree(result.response.contentAsString)["syncRunId"].asText()
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", UUID.fromString(syncRunId)))
+        assertEquals(0, singleInt("SELECT events_seen FROM sync_runs WHERE id = ?", UUID.fromString(syncRunId)))
+        assertEquals(0, tableCount("observed_transactions"))
+        assertProviderCallsOutsideTransactions()
+    }
+
+    @Test
+    fun `provider timeout is an absolute deadline and cannot be bypassed by slow trickle events`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-slow-trickle")
+        val addressId = watchedAddress["id"].asText()
+        val steps = (1..20).flatMap { index ->
+            listOf(
+                FakeChainProviderStep.Delay(Duration.ofMillis(90)),
+                FakeChainProviderStep.Event(
+                    providerEvent(
+                        txHash = "0xsync-slow-trickle-$index",
+                        address = "0xsync-slow-trickle",
+                        eventIndex = index,
+                    ),
+                ),
+            )
+        }
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-slow-trickle",
+            asset = "USDC",
+            steps = steps,
+        )
+
+        val startedAt = System.nanoTime()
+        val result = mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
+            .andExpect(status().isServiceUnavailable)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/provider-unavailable"))
+            .andExpect(jsonPath("$.syncRunId").exists())
+            .andReturn()
+        val elapsed = Duration.ofNanos(System.nanoTime() - startedAt)
+
+        assertTrue(elapsed < Duration.ofSeconds(1), "Expected absolute deadline near 100ms, elapsed=$elapsed")
+        val syncRunId = UUID.fromString(objectMapper.readTree(result.response.contentAsString)["syncRunId"].asText())
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertTrue(
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId).startsWith("Provider timeout"),
+        )
+        assertTrue(singleInt("SELECT count(*) FROM observed_transactions") < 20)
+    }
+
+    @Test
+    fun `request id is propagated into provider executor work`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-request-id")
+        val addressId = watchedAddress["id"].asText()
+        val requestId = "sync-request-id-${UUID.randomUUID()}"
+
+        fakeChainProvider.setEvents(
+            chainId = "local-evm",
+            address = "0xsync-request-id",
+            asset = "USDC",
+            events = listOf(providerEvent(txHash = "0xsync-request-id-tx", address = "0xsync-request-id")),
+        )
+
+        mockMvc.perform(post("/api/v1/addresses/$addressId/sync").header(REQUEST_ID_HEADER, requestId))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("SUCCEEDED"))
+
+        assertTrue(fakeChainProvider.requestIdSnapshots().isNotEmpty())
+        assertEquals(setOf(requestId), fakeChainProvider.requestIdSnapshots().toSet())
+    }
+
+    @Test
+    fun `provider failure remains the API error cause when mark failed update fails`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-markfailed-failure")
+        val addressId = watchedAddress["id"].asText()
+        installSyncRunMarkFailedTrigger()
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-markfailed-failure",
+            asset = "USDC",
+            steps = listOf(FakeChainProviderStep.Failure("Provider timeout")),
+        )
+
+        val result = mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
+            .andExpect(status().isServiceUnavailable)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/provider-unavailable"))
+            .andExpect(jsonPath("$.syncRunId").exists())
+            .andReturn()
+
+        val exception = assertIs<SyncProviderUnavailableException>(result.resolvedException)
+        val providerCause = assertIs<ChainProviderUnavailableException>(exception.cause)
+        assertEquals("Provider timeout", providerCause.message)
+        assertTrue(providerCause.suppressed.isNotEmpty(), "Expected markFailed failure to be suppressed")
+        assertEquals("STARTED", singleString("SELECT status FROM sync_runs WHERE id = ?", exception.syncRun.id))
+    }
+
+    @Test
+    fun `non runtime provider failure preserves root cause`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-non-runtime-root-cause")
+        val addressId = watchedAddress["id"].asText()
+        val rootCause = ProviderRootCause("provider cursor checksum failed")
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-non-runtime-root-cause",
+            asset = "USDC",
+            steps = listOf(FakeChainProviderStep.ThrowableFailure(rootCause)),
+        )
+
+        val result = mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
+            .andExpect(status().isServiceUnavailable)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/provider-unavailable"))
+            .andExpect(jsonPath("$.syncRunId").exists())
+            .andReturn()
+
+        val exception = assertIs<SyncProviderUnavailableException>(result.resolvedException)
+        val providerCause = assertIs<ChainProviderUnavailableException>(exception.cause)
+        assertSame(rootCause, providerCause.cause)
+        assertEquals("provider cursor checksum failed", providerCause.message)
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", exception.syncRun.id))
+        assertEquals("provider cursor checksum failed", singleString("SELECT last_error FROM sync_runs WHERE id = ?", exception.syncRun.id))
+    }
+
+    @Test
+    fun `non runtime provider failure remains root cause when mark failed update fails`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-non-runtime-markfailed")
+        val addressId = watchedAddress["id"].asText()
+        val rootCause = ProviderRootCause("provider cursor checksum failed")
+        installSyncRunMarkFailedTrigger()
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-non-runtime-markfailed",
+            asset = "USDC",
+            steps = listOf(FakeChainProviderStep.ThrowableFailure(rootCause)),
+        )
+
+        val result = mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
+            .andExpect(status().isServiceUnavailable)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/provider-unavailable"))
+            .andExpect(jsonPath("$.syncRunId").exists())
+            .andReturn()
+
+        val exception = assertIs<SyncProviderUnavailableException>(result.resolvedException)
+        val providerCause = assertIs<ChainProviderUnavailableException>(exception.cause)
+        assertSame(rootCause, providerCause.cause)
+        assertTrue(providerCause.suppressed.isNotEmpty(), "Expected markFailed failure to be suppressed")
+        assertEquals("STARTED", singleString("SELECT status FROM sync_runs WHERE id = ?", exception.syncRun.id))
+    }
+
+    @Test
     fun `provider failure after an event keeps earlier committed ingestion`() {
         val accountId = createAccount()
         val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-partial")
@@ -218,13 +405,43 @@ class SyncApiIntegrationTests(
     }
 
     @Test
+    fun `provider event database constraint violation maps to bad request`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-db-constraint")
+        val addressId = watchedAddress["id"].asText()
+
+        fakeChainProvider.setEvents(
+            chainId = "local-evm",
+            address = "0xsync-db-constraint",
+            asset = "USDC",
+            events = listOf(
+                providerEvent(
+                    txHash = "x".repeat(MAX_TX_HASH_LENGTH + 1),
+                    address = "0xsync-db-constraint",
+                ),
+            ),
+        )
+
+        mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/database-constraint-violation"))
+            .andExpect(jsonPath("$.title").value("Database constraint violation"))
+
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs"))
+        assertEquals(1, singleInt("SELECT events_seen FROM sync_runs"))
+        assertEquals(0, singleInt("SELECT events_changed FROM sync_runs"))
+        assertEquals(0, tableCount("observed_transactions"))
+        assertEquals(0, tableCount("outbox_events"))
+    }
+
+    @Test
     fun `get sync run succeeds and missing sync run returns not found`() {
         val accountId = createAccount()
         val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-get")
         val addressId = watchedAddress["id"].asText()
 
         val syncResult = mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
-            .andExpect(status().isAccepted)
+            .andExpect(status().isOk)
             .andReturn()
         val syncRunId = objectMapper.readTree(syncResult.response.contentAsString)["id"].asText()
 
@@ -277,7 +494,7 @@ class SyncApiIntegrationTests(
         )
 
         mockMvc.perform(post("/api/v1/accounts/$accountId/sync"))
-            .andExpect(status().isAccepted)
+            .andExpect(status().isOk)
             .andExpect(jsonPath("$.status").value("SUCCEEDED"))
             .andExpect(jsonPath("$.eventsSeen").value(1))
             .andExpect(jsonPath("$.eventsChanged").value(1))
@@ -288,6 +505,23 @@ class SyncApiIntegrationTests(
             listOf(FakeChainProviderKey("local-evm", "0xsync-active", "USDC")),
             fakeChainProvider.requestedKeys(),
         )
+    }
+
+    @Test
+    fun `account sync rejects accounts over the synchronous address cap`() {
+        val accountId = createAccount()
+        registerAddress(accountId = accountId, address = "0xsync-cap-one", asset = "USDC")
+        registerAddress(accountId = accountId, address = "0xsync-cap-two", asset = "ETH")
+        registerAddress(accountId = accountId, address = "0xsync-cap-three", asset = "DAI")
+
+        mockMvc.perform(post("/api/v1/accounts/$accountId/sync"))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/sync-account-too-large"))
+            .andExpect(jsonPath("$.maxAddresses").value(2))
+
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs"))
+        assertEquals(0, tableCount("observed_transactions"))
+        assertEquals(0, tableCount("outbox_events"))
     }
 
     private fun createAccount(): String {
@@ -367,6 +601,8 @@ class SyncApiIntegrationTests(
 
     private fun cleanDatabase() {
         fakeChainProvider.clear()
+        jdbcTemplate.execute("DROP TRIGGER IF EXISTS fail_sync_run_mark_failed ON sync_runs")
+        jdbcTemplate.execute("DROP FUNCTION IF EXISTS fail_sync_run_mark_failed()")
         jdbcTemplate.update("DELETE FROM outbox_events")
         jdbcTemplate.update("DELETE FROM sync_runs")
         jdbcTemplate.update("DELETE FROM observed_transactions")
@@ -384,4 +620,30 @@ class SyncApiIntegrationTests(
             Timestamp.from(Instant.now()),
         )
     }
+
+    private fun installSyncRunMarkFailedTrigger() {
+        jdbcTemplate.execute(
+            """
+            CREATE OR REPLACE FUNCTION fail_sync_run_mark_failed()
+            RETURNS trigger AS $$
+            BEGIN
+                IF NEW.status = 'FAILED' THEN
+                    RAISE EXCEPTION 'forced sync mark failed failure';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """.trimIndent(),
+        )
+        jdbcTemplate.execute(
+            """
+            CREATE TRIGGER fail_sync_run_mark_failed
+            BEFORE UPDATE ON sync_runs
+            FOR EACH ROW
+            EXECUTE FUNCTION fail_sync_run_mark_failed()
+            """.trimIndent(),
+        )
+    }
+
+    private class ProviderRootCause(message: String) : Throwable(message)
 }

@@ -1,16 +1,22 @@
 spring:
   application:
     name: asset-sync-service
-  profiles:
-    default: local
   jooq:
     sql-dialect: postgres
+  datasource:
+    hikari:
+      connection-init-sql: "SET statement_timeout TO '30s'; SET lock_timeout TO '5s'"
   liquibase:
     enabled: false
 
 server:
   port: ${SERVER_PORT:8080}
   shutdown: graceful
+
+logging:
+  pattern:
+    # Surfaces the per-request correlation id (set by RequestIdFilter) on every log line.
+    level: "%5p [req=%X{requestId:-}]"
 
 management:
   endpoint:
@@ -26,7 +32,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
   health:
     livenessstate:
       enabled: true
@@ -40,10 +46,30 @@ springdoc:
     path: /swagger-ui.html
 
 asset-sync:
+  sync:
+    provider-timeout: ${ASSET_SYNC_SYNC_PROVIDER_TIMEOUT:10s}
+    provider-max-threads: ${ASSET_SYNC_SYNC_PROVIDER_MAX_THREADS:4}
+    account-sync-batch-size: ${ASSET_SYNC_ACCOUNT_SYNC_BATCH_SIZE:100}
+    max-account-sync-addresses: ${ASSET_SYNC_MAX_ACCOUNT_SYNC_ADDRESSES:1000}
+    stale-run-timeout: ${ASSET_SYNC_STALE_RUN_TIMEOUT:30m}
+    recovery:
+      enabled: ${ASSET_SYNC_RECOVERY_ENABLED:true}
+      batch-size: ${ASSET_SYNC_RECOVERY_BATCH_SIZE:100}
+      fixed-delay: ${ASSET_SYNC_RECOVERY_FIXED_DELAY:5m}
+      initial-delay: ${ASSET_SYNC_RECOVERY_INITIAL_DELAY:5m}
   outbox:
     batch-size: ${ASSET_SYNC_OUTBOX_BATCH_SIZE:50}
     retry-backoff-base-delay: ${ASSET_SYNC_OUTBOX_RETRY_BACKOFF_BASE_DELAY:30s}
+    retry-backoff-max-delay: ${ASSET_SYNC_OUTBOX_RETRY_BACKOFF_MAX_DELAY:15m}
+    processing-lease: ${ASSET_SYNC_OUTBOX_PROCESSING_LEASE:5m}
+    max-attempts: ${ASSET_SYNC_OUTBOX_MAX_ATTEMPTS:10}
     max-error-length: ${ASSET_SYNC_OUTBOX_MAX_ERROR_LENGTH:1024}
+    retention:
+      enabled: ${ASSET_SYNC_OUTBOX_RETENTION_ENABLED:false}
+      published-retention: ${ASSET_SYNC_OUTBOX_PUBLISHED_RETENTION:7d}
+      batch-size: ${ASSET_SYNC_OUTBOX_RETENTION_BATCH_SIZE:1000}
+      fixed-delay: ${ASSET_SYNC_OUTBOX_RETENTION_FIXED_DELAY:1h}
+      initial-delay: ${ASSET_SYNC_OUTBOX_RETENTION_INITIAL_DELAY:5m}
     scheduler:
       enabled: ${ASSET_SYNC_OUTBOX_SCHEDULER_ENABLED:true}
       fixed-delay: ${ASSET_SYNC_OUTBOX_SCHEDULER_FIXED_DELAY:5s}

@@ -12,6 +12,7 @@ import com.example.assetsync.domain.model.TransactionLifecycleState
 import com.example.assetsync.domain.model.TransactionStatus
 import com.example.assetsync.domain.model.TransactionTransitionResult
 import com.example.assetsync.domain.model.TransitionOutcome
+import com.example.assetsync.domain.policy.ChainIdentityNormalizer
 import com.example.assetsync.domain.state.TransactionStateMachine
 import java.time.Clock
 import java.time.Instant
@@ -286,19 +287,25 @@ class ObservedEventApplicationService(
         )
     }
 
-    private fun IngestObservedEventCommand.toIncomingObservedTransaction(): IncomingObservedTransaction =
-        IncomingObservedTransaction(
-            chainId = chainId.trim(),
-            txHash = txHash.trim(),
+    private fun IngestObservedEventCommand.toIncomingObservedTransaction(): IncomingObservedTransaction {
+        val identity = ChainIdentityNormalizer.normalize(
+            chainId = chainId,
+            address = address,
+            asset = asset,
+        )
+        return IncomingObservedTransaction(
+            chainId = identity.chainId,
+            txHash = ChainIdentityNormalizer.normalizeTxHash(identity.chainId, txHash),
             eventIndex = eventIndex,
-            address = address.trim(),
-            asset = asset.trim(),
+            address = identity.address,
+            asset = identity.asset,
             direction = direction,
             amount = amount,
             blockHeight = blockHeight,
             confirmations = confirmations,
             status = status,
         )
+    }
 
     private fun TransactionLifecycleState.confirmedAt(now: Instant): Instant? =
         now.takeIf { status == TransactionStatus.CONFIRMED }
@@ -316,7 +323,7 @@ class ObservedEventApplicationService(
             aggregateType = "OBSERVED_TRANSACTION",
             aggregateId = id,
             eventType = eventType,
-            idempotencyKey = naturalKey().outboxIdempotencyKey(status),
+            idempotencyKey = naturalKey().outboxIdempotencyKey(status = status, version = version),
             payload = ObservedTransactionOutboxPayload(
                 eventId = eventId,
                 eventType = eventType.name,

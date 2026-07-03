@@ -88,7 +88,7 @@ class TransactionStateMachineTests {
     fun `seen duplicate and lower stale confirmations are no change`() {
         val duplicate = stateMachine.evaluate(
             current = current(status = TransactionStatus.SEEN, confirmations = 2),
-            incoming = incoming(status = TransactionStatus.SEEN, confirmations = 2),
+            incoming = incoming(status = TransactionStatus.SEEN, confirmations = 2, blockHeight = 100),
             requiredConfirmations = 3,
         )
         val staleLower = stateMachine.evaluate(
@@ -112,6 +112,46 @@ class TransactionStateMachineTests {
             outcome = TransitionOutcome.NO_CHANGE,
             resultingStatus = TransactionStatus.SEEN,
             storedConfirmations = 2,
+            shouldPersist = false,
+            outboxEventType = null,
+        )
+    }
+
+    @Test
+    fun `seen row accepts equal confirmation block height correction without outbox`() {
+        val result = stateMachine.evaluate(
+            current = current(status = TransactionStatus.SEEN, confirmations = 2, blockHeight = 100),
+            incoming = incoming(status = TransactionStatus.SEEN, confirmations = 2, blockHeight = 101),
+            requiredConfirmations = 3,
+        )
+
+        assertIs<TransactionTransitionResult.Updated>(result)
+        assertTransition(
+            result = result,
+            outcome = TransitionOutcome.UPDATED,
+            resultingStatus = TransactionStatus.SEEN,
+            storedConfirmations = 2,
+            storedBlockHeight = 101,
+            shouldPersist = true,
+            outboxEventType = null,
+        )
+    }
+
+    @Test
+    fun `seen row ignores lower confirmation block height correction`() {
+        val result = stateMachine.evaluate(
+            current = current(status = TransactionStatus.SEEN, confirmations = 2, blockHeight = 100),
+            incoming = incoming(status = TransactionStatus.SEEN, confirmations = 1, blockHeight = 101),
+            requiredConfirmations = 3,
+        )
+
+        assertIs<TransactionTransitionResult.NoChange>(result)
+        assertTransition(
+            result = result,
+            outcome = TransitionOutcome.NO_CHANGE,
+            resultingStatus = TransactionStatus.SEEN,
+            storedConfirmations = 2,
+            storedBlockHeight = 100,
             shouldPersist = false,
             outboxEventType = null,
         )
@@ -151,6 +191,64 @@ class TransactionStateMachineTests {
     }
 
     @Test
+    fun `seen to confirmed lower confirmations preserves current block height`() {
+        val providerConfirmed = stateMachine.evaluate(
+            current = current(status = TransactionStatus.SEEN, confirmations = 2, blockHeight = 500),
+            incoming = incoming(status = TransactionStatus.CONFIRMED, confirmations = 1, blockHeight = 400),
+            requiredConfirmations = 3,
+        )
+        val thresholdReachedByLowerIncoming = stateMachine.evaluate(
+            current = current(status = TransactionStatus.SEEN, confirmations = 5, blockHeight = 500),
+            incoming = incoming(status = TransactionStatus.SEEN, confirmations = 3, blockHeight = 400),
+            requiredConfirmations = 3,
+        )
+
+        listOf(providerConfirmed, thresholdReachedByLowerIncoming).forEach { result ->
+            assertIs<TransactionTransitionResult.Updated>(result)
+            assertTransition(
+                result = result,
+                outcome = TransitionOutcome.UPDATED,
+                resultingStatus = TransactionStatus.CONFIRMED,
+                storedConfirmations = result.storedConfirmations,
+                storedBlockHeight = 500,
+                shouldPersist = true,
+                outboxEventType = OutboxEventType.TRANSACTION_CONFIRMED,
+            )
+        }
+        assertEquals(2, providerConfirmed.storedConfirmations)
+        assertEquals(5, thresholdReachedByLowerIncoming.storedConfirmations)
+    }
+
+    @Test
+    fun `seen to confirmed equal and higher confirmations update block height`() {
+        val equalConfirmations = stateMachine.evaluate(
+            current = current(status = TransactionStatus.SEEN, confirmations = 2, blockHeight = 500),
+            incoming = incoming(status = TransactionStatus.CONFIRMED, confirmations = 2, blockHeight = 600),
+            requiredConfirmations = 3,
+        )
+        val higherConfirmations = stateMachine.evaluate(
+            current = current(status = TransactionStatus.SEEN, confirmations = 2, blockHeight = 500),
+            incoming = incoming(status = TransactionStatus.SEEN, confirmations = 3, blockHeight = 600),
+            requiredConfirmations = 3,
+        )
+
+        listOf(equalConfirmations, higherConfirmations).forEach { result ->
+            assertIs<TransactionTransitionResult.Updated>(result)
+            assertTransition(
+                result = result,
+                outcome = TransitionOutcome.UPDATED,
+                resultingStatus = TransactionStatus.CONFIRMED,
+                storedConfirmations = result.storedConfirmations,
+                storedBlockHeight = 600,
+                shouldPersist = true,
+                outboxEventType = OutboxEventType.TRANSACTION_CONFIRMED,
+            )
+        }
+        assertEquals(2, equalConfirmations.storedConfirmations)
+        assertEquals(3, higherConfirmations.storedConfirmations)
+    }
+
+    @Test
     fun `seen row transitions to reverted`() {
         val result = stateMachine.evaluate(
             current = current(status = TransactionStatus.SEEN, confirmations = 2),
@@ -167,6 +265,64 @@ class TransactionStateMachineTests {
             shouldPersist = true,
             outboxEventType = OutboxEventType.TRANSACTION_REVERTED,
         )
+    }
+
+    @Test
+    fun `reverted transitions lower confirmations preserve current block height`() {
+        val seenToReverted = stateMachine.evaluate(
+            current = current(status = TransactionStatus.SEEN, confirmations = 2, blockHeight = 500),
+            incoming = incoming(status = TransactionStatus.REVERTED, confirmations = 1, blockHeight = 400),
+            requiredConfirmations = 3,
+        )
+        val confirmedToReverted = stateMachine.evaluate(
+            current = current(status = TransactionStatus.CONFIRMED, confirmations = 5, blockHeight = 500),
+            incoming = incoming(status = TransactionStatus.REVERTED, confirmations = 1, blockHeight = 400),
+            requiredConfirmations = 3,
+        )
+
+        listOf(seenToReverted, confirmedToReverted).forEach { result ->
+            assertIs<TransactionTransitionResult.Updated>(result)
+            assertTransition(
+                result = result,
+                outcome = TransitionOutcome.UPDATED,
+                resultingStatus = TransactionStatus.REVERTED,
+                storedConfirmations = result.storedConfirmations,
+                storedBlockHeight = 500,
+                shouldPersist = true,
+                outboxEventType = OutboxEventType.TRANSACTION_REVERTED,
+            )
+        }
+        assertEquals(2, seenToReverted.storedConfirmations)
+        assertEquals(5, confirmedToReverted.storedConfirmations)
+    }
+
+    @Test
+    fun `reverted transitions equal and higher confirmations update block height`() {
+        val seenToRevertedEqual = stateMachine.evaluate(
+            current = current(status = TransactionStatus.SEEN, confirmations = 2, blockHeight = 500),
+            incoming = incoming(status = TransactionStatus.REVERTED, confirmations = 2, blockHeight = 600),
+            requiredConfirmations = 3,
+        )
+        val confirmedToRevertedHigher = stateMachine.evaluate(
+            current = current(status = TransactionStatus.CONFIRMED, confirmations = 5, blockHeight = 500),
+            incoming = incoming(status = TransactionStatus.REVERTED, confirmations = 6, blockHeight = 600),
+            requiredConfirmations = 3,
+        )
+
+        listOf(seenToRevertedEqual, confirmedToRevertedHigher).forEach { result ->
+            assertIs<TransactionTransitionResult.Updated>(result)
+            assertTransition(
+                result = result,
+                outcome = TransitionOutcome.UPDATED,
+                resultingStatus = TransactionStatus.REVERTED,
+                storedConfirmations = result.storedConfirmations,
+                storedBlockHeight = 600,
+                shouldPersist = true,
+                outboxEventType = OutboxEventType.TRANSACTION_REVERTED,
+            )
+        }
+        assertEquals(2, seenToRevertedEqual.storedConfirmations)
+        assertEquals(6, confirmedToRevertedHigher.storedConfirmations)
     }
 
     @Test
@@ -193,7 +349,7 @@ class TransactionStateMachineTests {
     fun `confirmed duplicate and stale seen events are no change`() {
         val duplicate = stateMachine.evaluate(
             current = current(status = TransactionStatus.CONFIRMED, confirmations = 3),
-            incoming = incoming(status = TransactionStatus.CONFIRMED, confirmations = 3),
+            incoming = incoming(status = TransactionStatus.CONFIRMED, confirmations = 3, blockHeight = 100),
             requiredConfirmations = 3,
         )
         val staleSeen = stateMachine.evaluate(
@@ -221,6 +377,46 @@ class TransactionStateMachineTests {
         assertEquals(3, duplicate.storedConfirmations)
         assertEquals(3, staleSeen.storedConfirmations)
         assertEquals(5, lowerConfirmed.storedConfirmations)
+    }
+
+    @Test
+    fun `confirmed row accepts equal confirmation block height correction without outbox`() {
+        val result = stateMachine.evaluate(
+            current = current(status = TransactionStatus.CONFIRMED, confirmations = 3, blockHeight = 100),
+            incoming = incoming(status = TransactionStatus.CONFIRMED, confirmations = 3, blockHeight = 102),
+            requiredConfirmations = 3,
+        )
+
+        assertIs<TransactionTransitionResult.Updated>(result)
+        assertTransition(
+            result = result,
+            outcome = TransitionOutcome.UPDATED,
+            resultingStatus = TransactionStatus.CONFIRMED,
+            storedConfirmations = 3,
+            storedBlockHeight = 102,
+            shouldPersist = true,
+            outboxEventType = null,
+        )
+    }
+
+    @Test
+    fun `confirmed row ignores lower confirmation block height correction`() {
+        val result = stateMachine.evaluate(
+            current = current(status = TransactionStatus.CONFIRMED, confirmations = 5, blockHeight = 100),
+            incoming = incoming(status = TransactionStatus.CONFIRMED, confirmations = 4, blockHeight = 102),
+            requiredConfirmations = 3,
+        )
+
+        assertIs<TransactionTransitionResult.NoChange>(result)
+        assertTransition(
+            result = result,
+            outcome = TransitionOutcome.NO_CHANGE,
+            resultingStatus = TransactionStatus.CONFIRMED,
+            storedConfirmations = 5,
+            storedBlockHeight = 100,
+            shouldPersist = false,
+            outboxEventType = null,
+        )
     }
 
     @Test
@@ -362,7 +558,7 @@ class TransactionStateMachineTests {
     }
 
     @Test
-    fun `natural key builds status specific outbox idempotency keys`() {
+    fun `natural key builds status and version specific outbox idempotency keys`() {
         val naturalKey = ObservedTransactionNaturalKey(
             chainId = "local-evm",
             txHash = "0xdeadbeef",
@@ -372,16 +568,16 @@ class TransactionStateMachineTests {
         )
 
         assertEquals(
-            "observed-tx:local-evm:0xdeadbeef:7:0xabc123:USDC:status:SEEN",
-            naturalKey.outboxIdempotencyKey(TransactionStatus.SEEN),
+            "observed-tx:local-evm:0xdeadbeef:7:0xabc123:USDC:status:SEEN:v:0",
+            naturalKey.outboxIdempotencyKey(TransactionStatus.SEEN, version = 0),
         )
         assertEquals(
-            "observed-tx:local-evm:0xdeadbeef:7:0xabc123:USDC:status:CONFIRMED",
-            naturalKey.outboxIdempotencyKey(TransactionStatus.CONFIRMED),
+            "observed-tx:local-evm:0xdeadbeef:7:0xabc123:USDC:status:CONFIRMED:v:1",
+            naturalKey.outboxIdempotencyKey(TransactionStatus.CONFIRMED, version = 1),
         )
         assertEquals(
-            "observed-tx:local-evm:0xdeadbeef:7:0xabc123:USDC:status:REVERTED",
-            naturalKey.outboxIdempotencyKey(TransactionStatus.REVERTED),
+            "observed-tx:local-evm:0xdeadbeef:7:0xabc123:USDC:status:REVERTED:v:2",
+            naturalKey.outboxIdempotencyKey(TransactionStatus.REVERTED, version = 2),
         )
     }
 

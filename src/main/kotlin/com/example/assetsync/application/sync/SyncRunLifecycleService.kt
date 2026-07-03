@@ -1,6 +1,7 @@
 package com.example.assetsync.application.sync
 
 import com.example.assetsync.application.observability.AssetSyncMetrics
+import com.example.assetsync.config.SyncProperties
 import java.time.Clock
 import java.time.Instant
 import java.util.UUID
@@ -13,6 +14,7 @@ class SyncRunLifecycleService(
     private val syncRunRepository: SyncRunRepository,
     private val metrics: AssetSyncMetrics,
     private val clock: Clock,
+    private val syncProperties: SyncProperties,
 ) {
     private val logger = LoggerFactory.getLogger(SyncRunLifecycleService::class.java)
 
@@ -83,6 +85,34 @@ class SyncRunLifecycleService(
     @Transactional(readOnly = true)
     fun get(syncRunId: UUID): SyncRun =
         syncRunRepository.findById(syncRunId) ?: throw SyncRunNotFoundException(syncRunId)
+
+    @Transactional
+    fun markStaleStartedFailed(): Int {
+        val now = Instant.now(clock)
+        val cutoff = now.minus(syncProperties.staleRunTimeout)
+        val staleRuns = syncRunRepository.findStaleStarted(
+            cutoff = cutoff,
+            limit = syncProperties.recovery.batchSize,
+        )
+        var recovered = 0
+        staleRuns.forEach { syncRun ->
+            // Status-guarded: skips a run a real completion resolved between select and update.
+            val abandoned = syncRunRepository.markAbandoned(
+                id = syncRun.id,
+                lastError = "abandoned: no completion within ${syncProperties.staleRunTimeout}",
+                finishedAt = now,
+                updatedAt = now,
+            )
+            if (abandoned != null) {
+                recordCompleted(abandoned)
+                recovered += 1
+            }
+        }
+        if (recovered > 0) {
+            logger.warn("sync_runs_recovered_stale count={} cutoff={}", recovered, cutoff)
+        }
+        return recovered
+    }
 
     private fun recordCompleted(syncRun: SyncRun) {
         metrics.recordSyncRun(targetType = syncRun.targetType, status = syncRun.status)

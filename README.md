@@ -10,7 +10,7 @@
 [![CI](https://github.com/AsyncAssassin/asset-sync-service/actions/workflows/ci.yml/badge.svg)](https://github.com/AsyncAssassin/asset-sync-service/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/badge/release-v0.1.0-blue)](https://github.com/AsyncAssassin/asset-sync-service/releases/tag/v0.1.0)
 
-`asset-sync-service` is a backend MVP for synchronizing public account, watched-address, and observed transaction lifecycle state. It accepts observed chain events through a REST API or a fake provider sync path, applies an idempotent domain state machine, stores the result in PostgreSQL, and emits lifecycle changes through a transactional outbox with a local structured-log publisher.
+`asset-sync-service` is a backend MVP for synchronizing public account, watched-address, and observed transaction lifecycle state. It accepts observed chain events through a REST API or the active provider sync path, applies an idempotent domain state machine, stores the result in PostgreSQL, and emits lifecycle changes through a transactional outbox with a local structured-log publisher.
 
 ## At A Glance
 
@@ -20,9 +20,9 @@
 | Persistence | PostgreSQL 17, Liquibase migrations, jOOQ repositories |
 | API | Versioned REST API under `/api/v1`, Spring `ProblemDetail`, OpenAPI |
 | Reliability | Natural keys, PostgreSQL constraints, row locks, transactional outbox, retry/backoff |
-| Observability | Actuator health/readiness/metrics, structured domain logs |
+| Observability | Actuator health/readiness/metrics/Prometheus, structured domain logs |
 | Testing | Unit tests plus Testcontainers PostgreSQL integration tests |
-| External systems | Docker Compose PostgreSQL only; fake in-process chain provider |
+| External systems | Docker Compose PostgreSQL; fake provider in `local`/`test`; HTTP provider adapter in non-local/test profiles |
 
 ## Implemented Features
 
@@ -31,10 +31,10 @@
 - Observed event ingestion for `local-evm`.
 - Idempotent transaction lifecycle transitions: `SEEN`, `CONFIRMED`, and `REVERTED`.
 - Outbox event creation for meaningful transaction state changes.
-- Manual sync by watched address or account through the fake chain provider.
+- Manual sync by watched address or account through `ChainProviderPort` (`FakeChainProvider` in `local`/`test`, `HttpChainProvider` in non-local/test profiles).
 - Sync run inspection.
 - Scheduled outbox publishing to structured logs.
-- Liveness, readiness, metrics, Swagger UI, and OpenAPI JSON.
+- Liveness, readiness, metrics, Prometheus, Swagger UI, and OpenAPI JSON.
 
 ## Architecture
 
@@ -47,7 +47,8 @@ flowchart LR
     api --> services
     services --> state["Domain state machine"]
     services --> providerPort["ChainProviderPort"]
-    providerPort --> fakeProvider["Fake chain provider"]
+    providerPort --> fakeProvider["Fake chain provider<br/>local/test"]
+    providerPort --> httpProvider["HTTP chain provider<br/>non-local/test"]
     services --> repos["jOOQ repositories"]
     repos --> db[("PostgreSQL")]
     db --> outbox["Transactional outbox"]
@@ -119,7 +120,7 @@ ASSET_SYNC_DB_PORT=55432 docker compose up -d postgres
 Run the app locally against that database in another terminal:
 
 ```bash
-ASSET_SYNC_DB_PORT=55432 SERVER_PORT=18080 ./gradlew bootRun
+SPRING_PROFILES_ACTIVE=local ASSET_SYNC_DB_PORT=55432 SERVER_PORT=18080 ./gradlew bootRun
 ```
 
 Check readiness:
@@ -193,9 +194,10 @@ curl -s http://localhost:18080/actuator/health
 curl -s http://localhost:18080/actuator/health/readiness
 curl -s http://localhost:18080/actuator/metrics
 curl -s http://localhost:18080/actuator/metrics/asset.sync.outbox.backlog.total
+curl -s http://localhost:18080/actuator/prometheus
 ```
 
-Optionally trigger sync with the fake provider. With no scripted fake-provider events in a normal local run, this should complete successfully with zero provider events.
+Optionally trigger sync with the local/test fake provider. With no scripted fake-provider events in a normal local run, this should complete successfully with zero provider events.
 
 ```bash
 SYNC_JSON=$(curl -s -X POST "http://localhost:18080/api/v1/addresses/${ADDRESS_ID}/sync")
@@ -259,11 +261,16 @@ Runtime configuration:
 | --- | --- | --- |
 | `SERVER_PORT` | `8080` | HTTP port used by the Spring Boot app |
 | `ASSET_SYNC_OUTBOX_BATCH_SIZE` | `50` | Due outbox rows claimed per poll |
-| `ASSET_SYNC_OUTBOX_RETRY_BACKOFF_BASE_DELAY` | `30s` | Linear retry backoff base delay |
+| `ASSET_SYNC_OUTBOX_RETRY_BACKOFF_BASE_DELAY` | `30s` | Retry backoff base delay |
+| `ASSET_SYNC_OUTBOX_RETRY_BACKOFF_MAX_DELAY` | `15m` | Maximum retry backoff delay |
+| `ASSET_SYNC_OUTBOX_PROCESSING_LEASE` | `5m` | Outbox processing lease stored in `next_attempt_at` |
+| `ASSET_SYNC_OUTBOX_MAX_ATTEMPTS` | `10` | Attempts before an outbox row becomes `DEAD` |
 | `ASSET_SYNC_OUTBOX_MAX_ERROR_LENGTH` | `1024` | Stored publisher error limit |
 | `ASSET_SYNC_OUTBOX_SCHEDULER_ENABLED` | `true` | Enables the scheduled outbox poller |
 | `ASSET_SYNC_OUTBOX_SCHEDULER_FIXED_DELAY` | `5s` | Delay between poller runs |
 | `ASSET_SYNC_OUTBOX_SCHEDULER_INITIAL_DELAY` | `10s` | Initial delay before first poll |
+| `ASSET_SYNC_OUTBOX_RETENTION_ENABLED` | `false` | Enables published outbox retention |
+| `ASSET_SYNC_SYNC_PROVIDER_TIMEOUT` | `10s` | Absolute provider fetch deadline per watched address; not a per-event idle timeout |
 
 ## Reliability Highlights
 
@@ -272,17 +279,19 @@ Runtime configuration:
 - Observed transaction ingestion locks existing rows with row-level `FOR UPDATE` before evaluating transitions.
 - jOOQ uses `INSERT ... ON CONFLICT` for idempotent observed-transaction and outbox writes.
 - Transactional outbox rows are inserted in the same database transaction as lifecycle state changes.
-- The outbox poller claims due rows with `FOR UPDATE SKIP LOCKED`.
+- The outbox poller claims due rows with `FOR UPDATE SKIP LOCKED`, writes a lease to `next_attempt_at`, then completes each event with a fenced compare-and-set update.
 - Publishing is at-least-once; downstream consumers should deduplicate by event id or idempotency key.
-- Failed publishes store a bounded error message and use linear retry backoff.
+- Failed publishes store a bounded error message, use bounded retry backoff, and become terminal `DEAD` rows at max attempts.
+- A publish that succeeds but cannot be marked `PUBLISHED` is treated as a completion failure, not a publish failure: attempts are not incremented and the leased row is retried after the lease expires.
 
 ## Observability
 
-- Actuator endpoints: `/actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness`, `/actuator/info`, and `/actuator/metrics`.
+- Actuator endpoints: `/actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness`, `/actuator/info`, `/actuator/metrics`, and `/actuator/prometheus`.
 - Readiness includes PostgreSQL connectivity.
-- The fake provider has an Actuator health contributor.
+- Provider health indicator is profile-specific: fake in `local`/`test`, HTTP in non-local/test profiles.
 - Structured logs include account, watched-address, transaction, sync-run, provider, and outbox identifiers.
 - Micrometer meters cover observed event ingestion, transaction transitions, immutable conflicts, sync runs, provider fetches and latency, outbox batches, outbox events, and outbox backlog.
+- `local` and `test` profiles permit all endpoints. Other profiles enable HTTP Basic for API, Swagger, and Actuator endpoints except health probes.
 
 ## Testing
 
@@ -310,26 +319,25 @@ docker compose config
 ```bash
 ./gradlew test
 ./gradlew check
-./gradlew bootRun
+SPRING_PROFILES_ACTIVE=local ./gradlew bootRun
 ./gradlew generateJooq
 ```
 
 ## MVP Boundaries
 
-This service does not provide custody, signing, private key storage, wallet functionality, or real funds movement. The MVP also does not include a real blockchain node/provider, Kafka, SQS, Redis, balance projection, auth, multitenancy, CD/deployment automation, release automation, or production metrics export.
+This service does not provide custody, signing, private key storage, wallet functionality, or real funds movement. The MVP includes basic non-local HTTP Basic protection, a Prometheus scrape endpoint, and an HTTP provider adapter, but it does not bundle a real blockchain node/indexer backend, Kafka, SQS, Redis, balance projection, tenant-level authorization, CD/deployment automation, or release automation.
 
 ## Roadmap / Deferred Scope
 
 Future extensions, not implemented in `v0.1.0`:
 
 - Transaction read/list endpoints.
-- Real provider integration.
+- Provider cursors and real blockchain/indexer backend integration.
 - Provider cursors and block-range scans.
 - External broker adapter for the outbox.
 - Balance projection read models.
-- Auth and multitenancy.
+- Tenant-level authorization and account ownership.
 - CD, deployment automation, and release automation.
-- Production observability export.
 
 ## Repository Layout
 

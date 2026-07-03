@@ -8,6 +8,7 @@ enum class OutboxStatus {
     NEW,
     PUBLISHED,
     FAILED,
+    DEAD,
 }
 
 data class OutboxEvent(
@@ -28,12 +29,15 @@ data class OutboxEvent(
 
 data class OutboxPublishedUpdate(
     val id: UUID,
+    val claimedLeaseUntil: Instant,
     val publishedAt: Instant,
     val updatedAt: Instant,
 )
 
 data class OutboxFailedUpdate(
     val id: UUID,
+    val claimedLeaseUntil: Instant,
+    val status: OutboxStatus,
     val attempts: Int,
     val lastError: String,
     val nextAttemptAt: Instant,
@@ -46,14 +50,22 @@ data class OutboxProcessingResult(
     val failed: Int,
 )
 
+interface OutboxBatchProcessor {
+    fun processDueBatch(): OutboxProcessingResult
+}
+
 interface OutboxEventRepository {
-    fun claimDueEvents(limit: Int, now: Instant): List<OutboxEvent>
+    fun claimDueEvents(limit: Int, now: Instant, leaseUntil: Instant): List<OutboxEvent>
 
-    fun markPublished(update: OutboxPublishedUpdate)
+    fun markPublished(update: OutboxPublishedUpdate): Boolean
 
-    fun markFailed(update: OutboxFailedUpdate)
+    fun markFailed(update: OutboxFailedUpdate): Boolean
 
     fun countBacklog(): Int
+
+    fun countDead(): Int
+
+    fun deletePublishedBefore(cutoff: Instant, limit: Int): Int
 }
 
 interface OutboxEventPublisher {

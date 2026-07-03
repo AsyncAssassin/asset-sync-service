@@ -4,20 +4,25 @@ import com.example.assetsync.application.account.WatchedAddress
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
 import com.example.assetsync.application.sync.ChainProviderPort
 import com.example.assetsync.application.sync.ChainProviderUnavailableException
+import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import org.slf4j.LoggerFactory
+import org.slf4j.MDC
 import org.springframework.boot.actuate.health.Health
 import org.springframework.boot.actuate.health.HealthIndicator
+import org.springframework.context.annotation.Profile
 import org.springframework.stereotype.Component
 import org.springframework.transaction.support.TransactionSynchronizationManager
 
 @Component
+@Profile("local", "test")
 class FakeChainProvider : ChainProviderPort {
     private val logger = LoggerFactory.getLogger(FakeChainProvider::class.java)
     private val scripts = ConcurrentHashMap<FakeChainProviderKey, List<FakeChainProviderStep>>()
     private val requestedKeys = CopyOnWriteArrayList<FakeChainProviderKey>()
     private val transactionActiveSnapshots = CopyOnWriteArrayList<Boolean>()
+    private val requestIdSnapshots = CopyOnWriteArrayList<String?>()
 
     override fun fetchObservedEvents(watchedAddress: WatchedAddress): Sequence<ChainProviderObservedEvent> {
         val key = FakeChainProviderKey(
@@ -27,6 +32,7 @@ class FakeChainProvider : ChainProviderPort {
         )
         requestedKeys.add(key)
         recordTransactionState()
+        recordRequestId()
         val steps = scripts[key].orEmpty()
         logger.info(
             "fake_provider_fetch_started accountId={} watchedAddressId={} chainId={} address={} asset={} scriptedSteps={}",
@@ -42,6 +48,7 @@ class FakeChainProvider : ChainProviderPort {
             var eventsEmitted = 0
             steps.forEach { step ->
                 recordTransactionState()
+                recordRequestId()
                 when (step) {
                     is FakeChainProviderStep.Event -> {
                         logger.debug(
@@ -70,6 +77,27 @@ class FakeChainProvider : ChainProviderPort {
                             step.message.concise(),
                         )
                         throw ChainProviderUnavailableException(step.message)
+                    }
+                    is FakeChainProviderStep.ThrowableFailure -> {
+                        logger.warn(
+                            "fake_provider_fetch_failed accountId={} watchedAddressId={} chainId={} address={} asset={} eventsEmitted={} error={}",
+                            watchedAddress.accountId,
+                            watchedAddress.id,
+                            watchedAddress.chainId,
+                            watchedAddress.address,
+                            watchedAddress.asset,
+                            eventsEmitted,
+                            step.throwable.message?.concise() ?: step.throwable.javaClass.simpleName,
+                        )
+                        throw step.throwable
+                    }
+                    is FakeChainProviderStep.Delay -> {
+                        try {
+                            Thread.sleep(step.duration.toMillis())
+                        } catch (exception: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                            throw ChainProviderUnavailableException("Provider fetch interrupted.", exception)
+                        }
                     }
                 }
             }
@@ -107,6 +135,7 @@ class FakeChainProvider : ChainProviderPort {
         scripts.clear()
         requestedKeys.clear()
         transactionActiveSnapshots.clear()
+        requestIdSnapshots.clear()
     }
 
     fun requestedKeys(): List<FakeChainProviderKey> =
@@ -115,6 +144,9 @@ class FakeChainProvider : ChainProviderPort {
     fun transactionActiveSnapshots(): List<Boolean> =
         transactionActiveSnapshots.toList()
 
+    fun requestIdSnapshots(): List<String?> =
+        requestIdSnapshots.toList()
+
     fun scriptCount(): Int =
         scripts.size
 
@@ -122,11 +154,16 @@ class FakeChainProvider : ChainProviderPort {
         transactionActiveSnapshots.add(TransactionSynchronizationManager.isActualTransactionActive())
     }
 
+    private fun recordRequestId() {
+        requestIdSnapshots.add(MDC.get("requestId"))
+    }
+
     private fun String.concise(): String =
         replace(Regex("\\s+"), " ").take(240)
 }
 
 @Component
+@Profile("local", "test")
 class FakeChainProviderHealthIndicator(
     private val fakeChainProvider: FakeChainProvider,
 ) : HealthIndicator {
@@ -152,5 +189,13 @@ sealed interface FakeChainProviderStep {
 
     data class Failure(
         val message: String = "Provider is unavailable.",
+    ) : FakeChainProviderStep
+
+    data class ThrowableFailure(
+        val throwable: Throwable,
+    ) : FakeChainProviderStep
+
+    data class Delay(
+        val duration: Duration,
     ) : FakeChainProviderStep
 }

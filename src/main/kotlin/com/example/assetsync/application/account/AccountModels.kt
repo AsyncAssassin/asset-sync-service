@@ -72,6 +72,13 @@ data class WatchedAddress(
     val updatedAt: Instant,
 )
 
+data class WatchedAddressPage(
+    val items: List<WatchedAddress>,
+    val page: Int,
+    val size: Int,
+    val hasNext: Boolean,
+)
+
 interface AccountRepository {
     fun insert(account: NewAccount): Account
 
@@ -87,11 +94,11 @@ interface ChainConfigRepository {
 interface WatchedAddressRepository {
     fun insert(watchedAddress: NewWatchedAddress): WatchedAddress
 
-    fun findByAccountId(accountId: UUID): List<WatchedAddress>
+    fun findByAccountId(accountId: UUID, limit: Int, offset: Int): List<WatchedAddress>
 
     fun findActiveById(addressId: UUID): WatchedAddress?
 
-    fun findActiveByAccountId(accountId: UUID): List<WatchedAddress>
+    fun findActiveByAccountId(accountId: UUID, limit: Int, offset: Int): List<WatchedAddress>
 
     fun findActiveByNaturalKey(chainId: String, address: String, asset: String): WatchedAddress?
 }
@@ -113,3 +120,10 @@ class DuplicateWatchedAddressException(
 class UnsupportedChainException(
     val chainId: String,
 ) : RuntimeException("Chain configuration was not found or is disabled.")
+
+class InvalidWatchedAddressPageException(
+    val page: Int,
+    val size: Int,
+    val maxPage: Int,
+    val maxPageSize: Int,
+) : RuntimeException("Watched address page request is outside the supported bounds.")

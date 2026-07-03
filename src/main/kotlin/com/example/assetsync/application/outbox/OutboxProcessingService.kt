@@ -5,9 +5,10 @@ import com.example.assetsync.config.OutboxProperties
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
+import java.util.UUID
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Service
-import org.springframework.transaction.annotation.Transactional
+import org.springframework.transaction.support.TransactionTemplate
 
 @Service
 class OutboxProcessingService(
@@ -16,21 +17,24 @@ class OutboxProcessingService(
     private val outboxProperties: OutboxProperties,
     private val metrics: AssetSyncMetrics,
     private val clock: Clock,
-) {
+    private val transactionTemplate: TransactionTemplate,
+) : OutboxBatchProcessor {
     private val logger = LoggerFactory.getLogger(OutboxProcessingService::class.java)
 
-    @Transactional
-    fun processDueBatch(): OutboxProcessingResult =
+    override fun processDueBatch(): OutboxProcessingResult =
         processDueBatch(outboxProperties.batchSize)
 
-    @Transactional
     fun processDueBatch(batchSize: Int): OutboxProcessingResult {
         require(batchSize > 0) { "batchSize must be positive." }
 
-        val events = outboxEventRepository.claimDueEvents(
-            limit = batchSize,
-            now = Instant.now(clock),
-        )
+        val claimStartedAt = Instant.now(clock)
+        val events = inTransaction {
+            outboxEventRepository.claimDueEvents(
+                limit = batchSize,
+                now = claimStartedAt,
+                leaseUntil = claimStartedAt.plus(outboxProperties.processingLease),
+            )
+        }
         if (events.isEmpty()) {
             logger.debug("outbox_batch_claimed claimed={} batchSize={}", events.size, batchSize)
         } else {
@@ -46,16 +50,32 @@ class OutboxProcessingService(
             } catch (exception: Exception) {
                 val attempts = event.attempts + 1
                 val failedAt = Instant.now(clock)
-                outboxEventRepository.markFailed(
-                    OutboxFailedUpdate(
-                        id = event.id,
-                        attempts = attempts,
-                        lastError = exception.toBoundedError(),
-                        nextAttemptAt = failedAt.plus(backoffDelay(attempts)),
-                        updatedAt = failedAt,
-                    ),
+                val failedStatus = if (attempts >= outboxProperties.maxAttempts) {
+                    OutboxStatus.DEAD
+                } else {
+                    OutboxStatus.FAILED
+                }
+                val nextAttemptAt = if (failedStatus == OutboxStatus.DEAD) {
+                    failedAt
+                } else {
+                    failedAt.plus(backoffDelay(attempts, event.id))
+                }
+                val marked = markFailed(
+                    event = event,
+                    attempts = attempts,
+                    status = failedStatus,
+                    failedAt = failedAt,
+                    nextAttemptAt = nextAttemptAt,
+                    exception = exception,
                 )
-                metrics.recordOutboxEventFailed(event.eventType)
+                if (marked) {
+                    if (failedStatus == OutboxStatus.DEAD) {
+                        metrics.recordOutboxEventDead(event.eventType)
+                    } else {
+                        metrics.recordOutboxEventFailed(event.eventType)
+                    }
+                    failed += 1
+                }
                 logger.warn(
                     "outbox_event_publish_failed outboxEventId={} eventType={} transactionId={} chainId={} address={} asset={} txHash={} eventIndex={} transactionStatus={} outboxStatus={} attempts={} nextAttemptAt={} error={}",
                     event.id,
@@ -67,39 +87,70 @@ class OutboxProcessingService(
                     logFields.txHash,
                     logFields.eventIndex,
                     logFields.transactionStatus,
-                    OutboxStatus.FAILED,
+                    failedStatus,
                     attempts,
-                    failedAt.plus(backoffDelay(attempts)),
+                    nextAttemptAt,
                     exception.toBoundedError(),
                 )
-                failed += 1
                 return@forEach
             }
 
             val publishedAt = Instant.now(clock)
-            outboxEventRepository.markPublished(
-                OutboxPublishedUpdate(
-                    id = event.id,
-                    publishedAt = publishedAt,
-                    updatedAt = publishedAt,
-                ),
-            )
-            metrics.recordOutboxEventPublished(event.eventType)
-            logger.info(
-                "outbox_event_publish_succeeded outboxEventId={} eventType={} transactionId={} chainId={} address={} asset={} txHash={} eventIndex={} transactionStatus={} outboxStatus={} attempts={}",
-                event.id,
-                event.eventType,
-                logFields.transactionId,
-                logFields.chainId,
-                logFields.address,
-                logFields.asset,
-                logFields.txHash,
-                logFields.eventIndex,
-                logFields.transactionStatus,
-                OutboxStatus.PUBLISHED,
-                event.attempts,
-            )
-            published += 1
+            try {
+                val marked = inTransaction {
+                    outboxEventRepository.markPublished(
+                        OutboxPublishedUpdate(
+                            id = event.id,
+                            claimedLeaseUntil = event.nextAttemptAt,
+                            publishedAt = publishedAt,
+                            updatedAt = publishedAt,
+                        ),
+                    )
+                }
+                if (marked) {
+                    metrics.recordOutboxEventPublished(event.eventType)
+                    logger.info(
+                        "outbox_event_publish_succeeded outboxEventId={} eventType={} transactionId={} chainId={} address={} asset={} txHash={} eventIndex={} transactionStatus={} outboxStatus={} attempts={}",
+                        event.id,
+                        event.eventType,
+                        logFields.transactionId,
+                        logFields.chainId,
+                        logFields.address,
+                        logFields.asset,
+                        logFields.txHash,
+                        logFields.eventIndex,
+                        logFields.transactionStatus,
+                        OutboxStatus.PUBLISHED,
+                        event.attempts,
+                    )
+                    published += 1
+                } else {
+                    logger.debug(
+                        "outbox_event_publish_completion_stale outboxEventId={} eventType={} claimedLeaseUntil={}",
+                        event.id,
+                        event.eventType,
+                        event.nextAttemptAt,
+                    )
+                }
+            } catch (exception: Exception) {
+                metrics.recordOutboxEventCompletionFailed(event.eventType)
+                failed += 1
+                logger.error(
+                    "outbox_event_publish_completion_failed outboxEventId={} eventType={} transactionId={} chainId={} address={} asset={} txHash={} eventIndex={} transactionStatus={} attempts={} claimedLeaseUntil={} error={}",
+                    event.id,
+                    event.eventType,
+                    logFields.transactionId,
+                    logFields.chainId,
+                    logFields.address,
+                    logFields.asset,
+                    logFields.txHash,
+                    logFields.eventIndex,
+                    logFields.transactionStatus,
+                    event.attempts,
+                    event.nextAttemptAt,
+                    exception.toBoundedError(),
+                )
+            }
         }
 
         val result = OutboxProcessingResult(
@@ -130,8 +181,69 @@ class OutboxProcessingService(
         return result
     }
 
-    private fun backoffDelay(attempts: Int): Duration =
-        outboxProperties.retryBackoffBaseDelay.multipliedBy(attempts.coerceAtLeast(1).toLong())
+    private fun markFailed(
+        event: OutboxEvent,
+        attempts: Int,
+        status: OutboxStatus,
+        failedAt: Instant,
+        nextAttemptAt: Instant,
+        exception: Exception,
+    ): Boolean {
+        return try {
+            inTransaction {
+                outboxEventRepository.markFailed(
+                    OutboxFailedUpdate(
+                        id = event.id,
+                        claimedLeaseUntil = event.nextAttemptAt,
+                        status = status,
+                        attempts = attempts,
+                        lastError = exception.toBoundedError(),
+                        nextAttemptAt = nextAttemptAt,
+                        updatedAt = failedAt,
+                    ),
+                )
+            }.also { marked ->
+                if (!marked) {
+                    logger.debug(
+                        "outbox_event_failure_completion_stale outboxEventId={} intendedStatus={} attempts={} claimedLeaseUntil={}",
+                        event.id,
+                        status,
+                        attempts,
+                        event.nextAttemptAt,
+                    )
+                }
+            }
+        } catch (markException: Exception) {
+            logger.error(
+                "outbox_event_mark_failed_failed outboxEventId={} intendedStatus={} attempts={} error={} markError={}",
+                event.id,
+                status,
+                attempts,
+                exception.toBoundedError(),
+                markException.toBoundedError(),
+            )
+            false
+        }
+    }
+
+    private fun backoffDelay(attempts: Int, seed: UUID): Duration {
+        val base = minOf(
+            runCatching {
+                outboxProperties.retryBackoffBaseDelay.multipliedBy(
+                    1L shl (attempts - 1).coerceAtLeast(0).coerceAtMost(30),
+                )
+            }.getOrDefault(outboxProperties.retryBackoffMaxDelay),
+            outboxProperties.retryBackoffMaxDelay,
+        )
+        // Deterministic downward jitter (0..25% of base, from the event id — no Math.random, stays
+        // <= maxDelay) so a poison cohort that failed together does not all become due on one tick.
+        val jitterCeilingMillis = (base.toMillis() / 4).coerceAtLeast(1)
+        val jitterMillis = Math.floorMod(seed.leastSignificantBits, jitterCeilingMillis)
+        return base.minusMillis(jitterMillis)
+    }
+
+    private fun <T> inTransaction(block: () -> T): T =
+        requireNotNull(transactionTemplate.execute { block() })
 
     private fun Exception.toBoundedError(): String {
         val summary = "${this::class.java.simpleName}: ${message ?: "outbox publish failed"}"

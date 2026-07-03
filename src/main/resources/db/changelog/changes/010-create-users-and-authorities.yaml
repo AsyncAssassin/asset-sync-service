@@ -1,0 +1,25 @@
+databaseChangeLog:
+  - changeSet:
+      id: 010-create-users-and-authorities
+      author: AsyncAssassin
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            sql: |
+              CREATE TABLE users (
+                  username varchar(64) NOT NULL,
+                  password varchar(200) NOT NULL,
+                  enabled boolean NOT NULL,
+                  CONSTRAINT pk_users PRIMARY KEY (username)
+              );
+
+              CREATE TABLE authorities (
+                  username varchar(64) NOT NULL,
+                  authority varchar(64) NOT NULL,
+                  CONSTRAINT fk_authorities_users FOREIGN KEY (username) REFERENCES users (username),
+                  CONSTRAINT uq_authorities_username_authority UNIQUE (username, authority)
+              );
+
+              CREATE INDEX ix_authorities_username ON authorities (username);

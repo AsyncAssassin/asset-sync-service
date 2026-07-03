@@ -9,3 +9,15 @@ databaseChangeLog:
       file: db/changelog/changes/004-create-outbox-and-sync-runs.yaml
   - include:
       file: db/changelog/changes/005-seed-local-chain-configs.yaml
+  - include:
+      file: db/changelog/changes/006-add-input-length-constraints.yaml
+  - include:
+      file: db/changelog/changes/007-add-outbox-dead-status.yaml
+  - include:
+      file: db/changelog/changes/008-add-outbox-partial-indexes.yaml
+  - include:
+      file: db/changelog/changes/009-normalize-local-evm-identities.yaml
+  - include:
+      file: db/changelog/changes/010-create-users-and-authorities.yaml
+  - include:
+      file: db/changelog/changes/011-validate-length-constraints.yaml

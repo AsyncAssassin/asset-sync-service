@@ -10,7 +10,7 @@ Last updated: 2026-06-20
 - `eventIndex` is required and represents the provider-specific event discriminator inside a transaction. It covers log indexes, output indexes, or similar chain-specific positions.
 - `asset` is represented as a string asset id or symbol in the MVP.
 - A watched address is unique by `chainId + address + asset`.
-- The chain provider is fake, in-memory, or an HTTP stub in the MVP.
+- The chain provider is profile-scoped: fake/in-memory in `local` and `test`, HTTP adapter in non-local/test profiles.
 - PostgreSQL is the source of truth for accounts, watched addresses, observed transactions, sync runs, and outbox events.
 - The outbox publisher writes to a local publishing adapter or structured logs in the MVP.
 - Balance projection is not part of the first MVP.
@@ -18,7 +18,7 @@ Last updated: 2026-06-20
 
 ## 2. Non-Goals
 
-- No real blockchain node integration in the MVP.
+- No bundled real blockchain node or indexer backend in the MVP.
 - No private key, seed phrase, or signing material handling.
 - No transaction signing.
 - No custody functionality.
@@ -30,7 +30,7 @@ Last updated: 2026-06-20
 
 ## 3. Project Description
 
-`asset-sync-service` is a backend service that synchronizes public account, address, and asset state from observable transaction events. It tracks public facts such as `chainId`, `address`, `asset`, `txHash`, `eventIndex`, `amount`, `blockHeight`, `confirmations`, `direction`, and `status`. The service does not store private keys, sign transactions, provide wallet functionality, or move funds. It accepts events directly through an API or obtains them from a fake chain provider during sync. Events are processed through an idempotent state machine and persisted in PostgreSQL. Meaningful transaction state changes create transactional outbox events in the same database transaction.
+`asset-sync-service` is a backend service that synchronizes public account, address, and asset state from observable transaction events. It tracks public facts such as `chainId`, `address`, `asset`, `txHash`, `eventIndex`, `amount`, `blockHeight`, `confirmations`, `direction`, and `status`. The service does not store private keys, sign transactions, provide wallet functionality, or move funds. It accepts events directly through an API or obtains them from the active chain provider during sync (`FakeChainProvider` in `local`/`test`, `HttpChainProvider` in non-local/test profiles). Events are processed through an idempotent state machine and persisted in PostgreSQL. Meaningful transaction state changes create transactional outbox events in the same database transaction.
 
 ## 4. Main Use Cases
 
@@ -56,7 +56,8 @@ REST API / Scheduler
         v
 Application Services
         |
-        +--> ChainProviderPort -> Fake Chain Provider
+        +--> ChainProviderPort -> Fake Chain Provider (local/test)
+        |                  \-> HTTP Chain Provider (non-local/test)
         |
         +--> Domain State Machine
         |
@@ -92,7 +93,7 @@ Domain layer:
 
 Infrastructure layer:
 - Implements repositories with jOOQ.
-- Implements the fake chain provider.
+- Implements profile-specific chain providers: fake in `local`/`test`, HTTP in non-local/test profiles.
 - Implements the outbox publisher adapter.
 - Configures Liquibase, OpenAPI, metrics, logging, and health checks.
 
@@ -147,7 +148,7 @@ sequenceDiagram
     participant Client
     participant API as SyncController
     participant Sync as SyncApplicationService
-    participant Provider as FakeChainProvider
+    participant Provider as ActiveChainProvider
     participant Ingest as ObservedTransactionIngestionService
     participant DB as PostgreSQL
 
@@ -162,10 +163,10 @@ sequenceDiagram
     end
     Sync->>DB: mark sync_run SUCCEEDED
     Sync-->>API: SyncRunResponse
-    API-->>Client: 202 Accepted
+    API-->>Client: 200 OK
 ```
 
-The provider call is outside the observed event ingestion transaction. A provider timeout must not hold database locks.
+The provider call is outside the observed event ingestion transaction. `asset-sync.sync.provider-timeout` is an absolute deadline for the full provider fetch path for one watched address, not a per-item idle timeout. A provider timeout must not hold database locks.
 
 ### Observed Event Ingestion
 
@@ -237,14 +238,17 @@ sequenceDiagram
     participant DB as PostgreSQL
     participant Publisher as LocalPublisherAdapter
 
-    Poller->>DB: SELECT NEW/FAILED due events FOR UPDATE SKIP LOCKED
-    DB-->>Poller: event batch
+    Poller->>DB: SELECT due NEW/FAILED rows FOR UPDATE SKIP LOCKED
+    Poller->>DB: set next_attempt_at = leaseUntil and commit
+    DB-->>Poller: leased event batch
     loop each outbox event
         Poller->>Publisher: publish(payload)
         alt publish succeeds
-            Poller->>DB: mark PUBLISHED, set published_at
+            Poller->>DB: CAS mark PUBLISHED where next_attempt_at = claimedLeaseUntil
+        else publish succeeds but completion update fails
+            Poller-->>Poller: log completion failure; leave leased NEW/FAILED row for retry
         else publish fails
-            Poller->>DB: increment attempts, set FAILED, next_attempt_at
+            Poller->>DB: CAS mark FAILED or DEAD where next_attempt_at = claimedLeaseUntil
         end
     end
 ```
@@ -344,6 +348,7 @@ SyncRun:
 - `NEW`
 - `PUBLISHED`
 - `FAILED`
+- `DEAD`
 
 `OutboxEventType`:
 - `TRANSACTION_SEEN`
@@ -491,14 +496,17 @@ Key columns:
 Constraints and indexes:
 - `unique (idempotency_key)`
 - `index (status, next_attempt_at)`
+- partial due index on `(next_attempt_at, created_at, id) where status in ('NEW', 'FAILED')`
+- partial retention index on `(published_at, id) where status = 'PUBLISHED'`
 - `index (aggregate_type, aggregate_id)`
-- `check (status in ('NEW', 'PUBLISHED', 'FAILED'))`
+- `check (status in ('NEW', 'PUBLISHED', 'FAILED', 'DEAD'))`
 - `check (attempts >= 0)`
 - `check (event_type in ('TRANSACTION_SEEN', 'TRANSACTION_CONFIRMED', 'TRANSACTION_REVERTED'))`
 
 Rationale:
 - The unique idempotency key prevents duplicate lifecycle events.
-- The status and schedule index supports efficient poller queries.
+- `next_attempt_at` is both the retry schedule and the active processing lease token.
+- The partial due and retention indexes keep poller and cleanup queries focused on active rows.
 - JSONB payload keeps the outbox schema stable while event shapes evolve.
 
 ### `sync_runs`
@@ -750,13 +758,13 @@ Sync flow:
 Outbox events have a unique `idempotency_key`:
 
 ```text
-observed-tx:{naturalKey}:status:{newStatus}
+observed-tx:{naturalKey}:status:{newStatus}:v:{version}
 ```
 
 Example:
 
 ```text
-observed-tx:local-evm:0xdeadbeef:0:0xabc123:USDC:status:CONFIRMED
+observed-tx:local-evm:0xdeadbeef:0:0xabc123:USDC:status:CONFIRMED:v:2
 ```
 
 This prevents duplicate `TRANSACTION_SEEN`, `TRANSACTION_CONFIRMED`, and `TRANSACTION_REVERTED` events for the same transaction lifecycle stage.
@@ -803,10 +811,13 @@ Payload fields:
 - `blockHeight`
 
 Poller behavior:
-- Scheduled job selects due `NEW` or `FAILED` rows.
-- Query uses `FOR UPDATE SKIP LOCKED`.
-- Successful publish marks the row `PUBLISHED` and sets `published_at`.
-- Failed publish increments `attempts`, stores `last_error`, sets `FAILED`, and schedules `next_attempt_at` with backoff.
+- Scheduled job selects due `NEW` or `FAILED` rows with `FOR UPDATE SKIP LOCKED`.
+- Claiming immediately moves `next_attempt_at` to `now + processing lease`, then commits before publishing.
+- Successful publish marks the row `PUBLISHED` and sets `published_at` only when the row still has the claimed lease value.
+- Failed publish increments `attempts`, stores `last_error`, and sets `FAILED` with bounded backoff or terminal `DEAD` at max attempts, again fenced by the claimed lease value.
+- A completion failure after successful publish is logged and metered separately. It does not increment attempts, does not update `last_error`, and cannot move the row to `DEAD`; the leased row becomes retryable after the lease expires.
+- A stale completion update that affects zero rows is ignored because another poller owns or has already completed the row.
+- Retention can delete old `PUBLISHED` rows in bounded batches.
 
 The MVP publisher uses a local adapter, for example structured logs. Kafka or SQS can be added later by replacing the publisher adapter while preserving the outbox table and poller semantics.
 
@@ -819,7 +830,8 @@ Use Spring transactions for:
 - Watched address registration.
 - Single observed event ingestion.
 - Sync run creation and final status update.
-- Outbox poll batch claiming and status update.
+- Outbox poll batch claiming.
+- Per-event outbox completion updates.
 
 Do not keep a database transaction open while calling the chain provider.
 
@@ -827,7 +839,7 @@ Recommended sync sequence:
 
 ```text
 1. Create sync_run in a short transaction.
-2. Call fake provider outside a database transaction.
+2. Call the active chain provider outside a database transaction.
 3. Ingest each event in its own transaction.
 4. Mark sync_run as SUCCEEDED or FAILED in a short transaction.
 ```
@@ -932,6 +944,7 @@ PostgreSQL unavailable:
 Provider timeout:
 - Sync run is marked `FAILED`.
 - Already ingested committed events remain valid.
+- If `markFailed` itself fails, the provider timeout/unavailable error remains primary and the mark failure is logged as suppressed diagnostic context.
 
 App crashes after DB commit before publish:
 - Outbox poller resumes after restart and publishes pending events.
@@ -970,6 +983,7 @@ API tests:
 
 Logs:
 - Use structured log messages in production-like configuration.
+- `X-Request-Id` is echoed to clients, attached to `ProblemDetail`, stored in MDC for request logs, and copied into sync provider executor tasks. Executor threads restore their previous MDC state after each task to avoid leaking request ids between syncs.
 - Include correlation and domain fields where available:
   - `syncRunId`
   - `accountId`
@@ -995,7 +1009,7 @@ Health checks:
 - Spring Actuator liveness.
 - Spring Actuator readiness.
 - PostgreSQL connectivity.
-- Optional fake provider health indicator.
+- Provider health indicator is profile-specific: fake in `local`/`test`, HTTP in non-local/test profiles.
 
 ## 19. Docker Compose Services
 
@@ -1051,7 +1065,7 @@ asset-sync-service
 
 - Account registration.
 - Watched address registration.
-- Fake chain provider.
+- Profile-specific chain provider adapters: fake in `local`/`test`, HTTP in non-local/test profiles.
 - Manual sync by address and account.
 - Observed transaction ingestion API.
 - Idempotent transaction processing.
@@ -1069,7 +1083,7 @@ asset-sync-service
 - Balance projection as an eventually consistent read model.
 - Kafka or SQS outbox publisher.
 - Debezium CDC-based outbox publishing.
-- Real chain provider adapters.
+- Provider cursors and real blockchain/indexer backend integration.
 - Provider cursors and block range scans.
 - Multi-instance sync coordination with advisory locks or a scheduler lock.
 - Multi-tenant authorization and account ownership.

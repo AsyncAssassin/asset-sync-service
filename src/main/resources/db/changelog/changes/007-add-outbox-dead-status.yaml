@@ -1,0 +1,16 @@
+databaseChangeLog:
+  - changeSet:
+      id: 007-add-outbox-dead-status
+      author: AsyncAssassin
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            sql: |
+              ALTER TABLE outbox_events
+                  DROP CONSTRAINT ck_outbox_events_status;
+
+              ALTER TABLE outbox_events
+                  ADD CONSTRAINT ck_outbox_events_status
+                      CHECK (status IN ('NEW', 'PUBLISHED', 'FAILED', 'DEAD'));

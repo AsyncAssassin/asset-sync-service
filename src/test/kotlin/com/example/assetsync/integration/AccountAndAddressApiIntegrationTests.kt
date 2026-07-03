@@ -1,6 +1,11 @@
 package com.example.assetsync.integration
 
 import com.example.assetsync.TestcontainersConfiguration
+import com.example.assetsync.api.dto.MAX_ADDRESS_LENGTH
+import com.example.assetsync.api.dto.MAX_ASSET_LENGTH
+import com.example.assetsync.api.dto.MAX_EXTERNAL_REF_LENGTH
+import com.example.assetsync.api.dto.MAX_LABEL_LENGTH
+import com.example.assetsync.application.account.WatchedAddressApplicationService
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import java.sql.Timestamp
@@ -111,6 +116,19 @@ class AccountAndAddressApiIntegrationTests(
     }
 
     @Test
+    fun `problem responses echo request id`() {
+        mockMvc.perform(
+            post("/api/v1/accounts")
+                .header("X-Request-Id", "request-id-test")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"externalRef":"   "}"""),
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(header().string("X-Request-Id", "request-id-test"))
+            .andExpect(jsonPath("$.requestId").value("request-id-test"))
+    }
+
+    @Test
     fun `register watched address succeeds`() {
         val accountId = createAccount("address-registration")
 
@@ -138,11 +156,56 @@ class AccountAndAddressApiIntegrationTests(
         val result = mockMvc.perform(get("/api/v1/accounts/$accountId/addresses"))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.items.length()").value(2))
+            .andExpect(jsonPath("$.page").value(0))
+            .andExpect(jsonPath("$.size").value(50))
+            .andExpect(jsonPath("$.hasNext").value(false))
             .andReturn()
 
         val items = objectMapper.readTree(result.response.contentAsString)["items"]
         assertEquals(setOf("0xlist-one", "0xlist-two"), items.map { it["address"].asText() }.toSet())
         assertEquals(setOf("USDC", "ETH"), items.map { it["asset"].asText() }.toSet())
+    }
+
+    @Test
+    fun `list watched addresses supports bounded pagination`() {
+        val accountId = createAccount("address-list-page")
+        registerAddress(accountId = accountId, address = "0xlist-page-one", asset = "USDC")
+        registerAddress(accountId = accountId, address = "0xlist-page-two", asset = "ETH")
+
+        mockMvc.perform(get("/api/v1/accounts/$accountId/addresses?page=0&size=1"))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.items.length()").value(1))
+            .andExpect(jsonPath("$.page").value(0))
+            .andExpect(jsonPath("$.size").value(1))
+            .andExpect(jsonPath("$.hasNext").value(true))
+
+        mockMvc.perform(get("/api/v1/accounts/$accountId/addresses?page=1&size=1"))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.items.length()").value(1))
+            .andExpect(jsonPath("$.page").value(1))
+            .andExpect(jsonPath("$.size").value(1))
+            .andExpect(jsonPath("$.hasNext").value(false))
+    }
+
+    @Test
+    fun `list watched addresses rejects negative page`() {
+        val accountId = createAccount("address-list-negative-page")
+
+        mockMvc.perform(get("/api/v1/accounts/$accountId/addresses?page=-1&size=50"))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/invalid-pagination"))
+            .andExpect(jsonPath("$.status").value(400))
+    }
+
+    @Test
+    fun `list watched addresses rejects huge page before database offset`() {
+        val accountId = createAccount("address-list-huge-page")
+        val hugePage = WatchedAddressApplicationService.MAX_PAGE + 1
+
+        mockMvc.perform(get("/api/v1/accounts/$accountId/addresses?page=$hugePage&size=100"))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/invalid-pagination"))
+            .andExpect(jsonPath("$.maxPage").value(WatchedAddressApplicationService.MAX_PAGE))
     }
 
     @Test
@@ -186,12 +249,54 @@ class AccountAndAddressApiIntegrationTests(
     }
 
     @Test
+    fun `local evm watched address identity is normalized before uniqueness check`() {
+        val firstAccountId = createAccount("normalized-address-first")
+        val secondAccountId = createAccount("normalized-address-second")
+
+        val response = registerAddress(
+            accountId = firstAccountId,
+            address = " 0xABCDEF ",
+            asset = " usdc ",
+        )
+
+        assertEquals("0xabcdef", response["address"].asText())
+        assertEquals("USDC", response["asset"].asText())
+
+        mockMvc.perform(
+            post("/api/v1/accounts/$secondAccountId/addresses")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(addressRequestBody(address = "0xabcdef", asset = "USDC")),
+        )
+            .andExpect(status().isConflict)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/duplicate-watched-address"))
+    }
+
+    @Test
     fun `blank address asset and label validation returns bad request`() {
         val accountId = createAccount("address-validation")
 
         expectAddressValidationFailure(accountId, addressRequestBody(address = "   "))
         expectAddressValidationFailure(accountId, addressRequestBody(asset = "   "))
         expectAddressValidationFailure(accountId, addressRequestBody(label = "   "))
+    }
+
+    @Test
+    fun `oversized account and watched address fields return bad request`() {
+        mockMvc.perform(
+            post("/api/v1/accounts")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"externalRef":"${"x".repeat(MAX_EXTERNAL_REF_LENGTH + 1)}"}"""),
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/validation-failed"))
+
+        val accountId = createAccount("address-length-validation")
+        expectAddressValidationFailure(accountId, addressRequestBody(address = "x".repeat(MAX_ADDRESS_LENGTH + 1)))
+        expectAddressValidationFailure(accountId, addressRequestBody(asset = "x".repeat(MAX_ASSET_LENGTH + 1)))
+        expectAddressValidationFailure(accountId, addressRequestBody(label = "x".repeat(MAX_LABEL_LENGTH + 1)))
+
+        assertEquals(1, tableCount("accounts"))
+        assertEquals(0, tableCount("watched_addresses"))
     }
 
     private fun createAccount(externalRef: String = "account-${UUID.randomUUID()}"): String {
@@ -283,6 +388,9 @@ class AccountAndAddressApiIntegrationTests(
             now,
         )
     }
+
+    private fun tableCount(table: String): Int =
+        requireNotNull(jdbcTemplate.queryForObject("SELECT count(*) FROM $table", Int::class.java))
 
     private fun cleanDatabase() {
         jdbcTemplate.update("DELETE FROM outbox_events")

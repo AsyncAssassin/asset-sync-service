@@ -9,6 +9,14 @@ group = "com.example"
 version = "0.0.1-SNAPSHOT"
 description = "Asset sync backend service"
 
+// No jackson.version override: Spring Boot 3.5.15 manages Jackson (2.21.4) as a tested set.
+// GHSA-5jmj-h7xm-6q6v (CVE-2026-54515) patched releases (2.21.5 / 2.22.1) are not yet on Maven
+// Central (verified 2026-07-03; latest published is 2.22.0, itself in the affected range), so a
+// fixed bump is impossible today. When a fixed patch appears, override Spring Boot with the
+// jackson-bom.version BOM property, not the ineffective jackson.version property. No exploit path
+// exists in this codebase (no @JsonIgnoreProperties, no @JsonFormat case-insensitive properties,
+// no default/polymorphic typing).
+
 java {
     toolchain {
         languageVersion = JavaLanguageVersion.of(21)
@@ -30,9 +38,11 @@ sourceSets {
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter-actuator")
     implementation("org.springframework.boot:spring-boot-starter-jooq")
+    implementation("org.springframework.boot:spring-boot-starter-security")
     implementation("org.springframework.boot:spring-boot-starter-validation")
     implementation("org.springframework.boot:spring-boot-starter-web")
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
+    implementation("io.micrometer:micrometer-registry-prometheus")
     implementation("org.jetbrains.kotlin:kotlin-reflect")
     implementation("org.liquibase:liquibase-core")
     implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.16")
@@ -66,6 +76,12 @@ kotlin {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+}
+
+// Disable the plain jar so `build/libs` holds exactly one artifact (the boot jar). This keeps the
+// Dockerfile COPY and the CI `docker build --build-arg JAR_FILE=build/libs/*.jar` glob unambiguous.
+tasks.named<Jar>("jar") {
+    enabled = false
 }
 
 tasks.register<JavaExec>("generateJooq") {

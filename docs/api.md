@@ -102,6 +102,7 @@ Validation:
 - `externalRef` is optional.
 - If provided, `externalRef` must be non-blank after trimming.
 - Duplicate `externalRef` values are rejected with `409 Conflict`.
+- `externalRef = null` creates a new anonymous account on every request; deployments should quota or authenticate callers before exposing that mode.
 
 ## 4. Get Account
 
@@ -150,6 +151,8 @@ HTTP/1.1 201 Created
 Content-Type: application/json
 ```
 
+No `Location` header is returned because the MVP does not expose a canonical watched-address item read endpoint. The created address is returned in the response body and can be seen through `GET /api/v1/accounts/{accountId}/addresses`.
+
 ```json
 {
   "id": "6df29db1-96d2-4665-8945-266c7f90138e",
@@ -171,16 +174,16 @@ Validation:
 - `address` is required and must be non-blank.
 - `asset` is required and must be non-blank.
 - `label` is optional; if provided, it must be non-blank after trimming.
-- Duplicate `chainId + address + asset` registrations are rejected with `409 Conflict`.
+- Duplicate canonical `chainId + address + asset` registrations are rejected with `409 Conflict`.
 
-Address normalization is chain-specific and is not expanded in the MVP beyond trimming and preserving the exact stored string. If stronger normalization is introduced later, it must be applied before uniqueness checks.
+Address normalization is chain-specific. For `local-evm`, address identity is lower-case and asset identity is upper-case before uniqueness checks. Other chains currently trim and preserve exact strings until their policies are defined.
 
 ## 6. List Watched Addresses
 
 Request:
 
 ```http
-GET /api/v1/accounts/4f6f3d3a-40b5-46fd-86cc-7105d19f17d1/addresses
+GET /api/v1/accounts/4f6f3d3a-40b5-46fd-86cc-7105d19f17d1/addresses?page=0&size=50
 ```
 
 Response:
@@ -199,9 +202,14 @@ Response:
       "createdAt": "2026-06-19T00:00:00Z",
       "updatedAt": "2026-06-19T00:00:00Z"
     }
-  ]
+  ],
+  "page": 0,
+  "size": 50,
+  "hasNext": false
 }
 ```
+
+`page` must be between `0` and `10000`. `size` must be between `1` and `100`. Values outside those bounds return `400 Bad Request` with `invalid-pagination`.
 
 ## 7. Ingest Observed Event
 
@@ -234,6 +242,8 @@ Created response:
 ```http
 HTTP/1.1 201 Created
 ```
+
+No `Location` header is returned because transaction read endpoints are deferred in the MVP. The created transaction id is returned in the response body.
 
 ```json
 {
@@ -356,7 +366,7 @@ Response shape is the same transaction object used by the list endpoint.
 
 ## 10. Start Address Sync
 
-Starts a sync for one watched address using the MVP fake chain provider. The provider call must not run inside a database transaction.
+Starts a sync for one watched address using the active chain provider. Local/test profiles use the fake provider; non-local/test profiles use the HTTP provider. The provider call must not run inside a database transaction.
 
 Request:
 
@@ -367,7 +377,7 @@ POST /api/v1/addresses/6df29db1-96d2-4665-8945-266c7f90138e/sync
 Response:
 
 ```http
-HTTP/1.1 202 Accepted
+HTTP/1.1 200 OK
 ```
 
 ```json
@@ -389,15 +399,16 @@ HTTP/1.1 202 Accepted
 Behavior:
 
 - Create a `sync_runs` row in a short transaction.
-- Fetch events from the fake provider outside a database transaction.
+- Fetch events from the active chain provider outside a database transaction.
+- `asset-sync.sync.provider-timeout` is the absolute provider fetch deadline for each watched address. It is not a per-event idle timeout; slow trickle streams cannot extend the deadline by yielding one item just before each poll expires.
 - Ingest each event through the same observed-event ingestion path used by the API.
 - Mark the sync run `SUCCEEDED` or `FAILED` in a short transaction.
-- Return `202 Accepted` with the current sync run state. The MVP may complete the fake-provider sync before the response is returned.
+- Return `200 OK` with the final sync run state. The MVP sync contract is synchronous; a future async API should use `202 Accepted` plus a pollable run location.
 - Retrying a sync is safe because observed event ingestion is idempotent. `sync_runs` records are diagnostic and are not business idempotency keys.
 
 Failure behavior:
 
-- Provider timeout or provider unavailability marks the sync run `FAILED` and returns a `503 Service Unavailable` response.
+- Provider timeout or provider unavailability marks the sync run `FAILED` and returns a `503 Service Unavailable` response. If recording the failed state itself fails, the API still reports provider unavailability with the original provider cause preserved for logs.
 - Events committed before a provider failure remain valid.
 - The API must not report success if the final sync run state is `FAILED`.
 
@@ -414,7 +425,7 @@ POST /api/v1/accounts/4f6f3d3a-40b5-46fd-86cc-7105d19f17d1/sync
 Response:
 
 ```http
-HTTP/1.1 202 Accepted
+HTTP/1.1 200 OK
 ```
 
 ```json
@@ -435,10 +446,11 @@ HTTP/1.1 202 Accepted
 
 Behavior:
 
-- Resolve active watched addresses at the start of the sync.
-- Call the fake provider once per watched address.
+- Resolve active watched addresses in bounded pages.
+- Call the active chain provider once per watched address.
 - Ingest each provider event independently.
 - A provider failure should fail the overall sync run unless implementation explicitly records partial success in a later version.
+- Accounts over the synchronous address cap are rejected with `400`.
 
 ## 12. Get Sync Run
 
@@ -481,6 +493,8 @@ Common mappings:
 | Duplicate account `externalRef` | 409 | `https://asset-sync-service/errors/duplicate-account` |
 | Duplicate watched address | 409 | `https://asset-sync-service/errors/duplicate-watched-address` |
 | Immutable observed transaction conflict | 409 | `https://asset-sync-service/errors/immutable-field-conflict` |
+| Database constraint violation from non-HTTP ingest paths | 400 | `https://asset-sync-service/errors/database-constraint-violation` |
+| Account sync exceeds the synchronous address cap | 400 | `https://asset-sync-service/errors/sync-account-too-large` |
 | Provider timeout or unavailable | 503 | `https://asset-sync-service/errors/provider-unavailable` |
 | PostgreSQL unavailable | 503 | `https://asset-sync-service/errors/database-unavailable` |
 
@@ -495,9 +509,12 @@ Example:
   "instance": "/api/v1/observed-events",
   "chainId": "local-evm",
   "txHash": "0xdeadbeef",
-  "eventIndex": 0
+  "eventIndex": 0,
+  "requestId": "018ff4c8-4b6f-7f2e-a3aa-0c7d23f6ac4e"
 }
 ```
+
+Responses echo `X-Request-Id` when supplied, or generate and return one when absent. The request id is stored in logging MDC for the servlet request and is copied into provider executor tasks used by sync, then restored/cleared after the async provider work completes.
 
 ## 14. Future Extensions
 

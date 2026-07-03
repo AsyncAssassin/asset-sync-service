@@ -1,0 +1,102 @@
+databaseChangeLog:
+  - changeSet:
+      id: 009-normalize-local-evm-identities
+      author: AsyncAssassin
+      preConditions:
+        - onFail: HALT
+        - onError: HALT
+        - onFailMessage: "Migration 009 cannot normalize local-evm identities because case-variant duplicates or pending stale or legacy outbox rows exist. Manually clean up watched_addresses or observed_transactions, drain pending outbox rows, or perform an audited outbox cleanup before retrying."
+        - onErrorMessage: "Migration 009 precondition failed while checking local-evm identity collisions and pending outbox compatibility."
+        - sqlCheck:
+            expectedResult: "0"
+            sql: |
+              SELECT count(*)
+              FROM (
+                  SELECT chain_id, lower(address) AS normalized_address, upper(asset) AS normalized_asset
+                  FROM watched_addresses
+                  WHERE chain_id = 'local-evm'
+                  GROUP BY chain_id, lower(address), upper(asset)
+                  HAVING count(*) > 1
+              ) watched_address_collisions
+        - sqlCheck:
+            expectedResult: "0"
+            sql: |
+              SELECT count(*)
+              FROM (
+                  SELECT
+                      chain_id,
+                      tx_hash,
+                      event_index,
+                      lower(address) AS normalized_address,
+                      upper(asset) AS normalized_asset
+                  FROM observed_transactions
+                  WHERE chain_id = 'local-evm'
+                  GROUP BY chain_id, tx_hash, event_index, lower(address), upper(asset)
+                  HAVING count(*) > 1
+              ) observed_transaction_collisions
+        - sqlCheck:
+            expectedResult: "0"
+            sql: |
+              WITH pending_local_evm_outbox AS (
+                  SELECT o.*
+                  FROM outbox_events o
+                  WHERE o.status IN ('NEW', 'FAILED')
+                    AND o.aggregate_type = 'OBSERVED_TRANSACTION'
+                    AND o.event_type IN (
+                        'TRANSACTION_SEEN',
+                        'TRANSACTION_CONFIRMED',
+                        'TRANSACTION_REVERTED'
+                    )
+                    AND (
+                        (o.payload ->> 'chainId') = 'local-evm'
+                        OR o.idempotency_key LIKE 'observed-tx:local-evm:%'
+                        OR EXISTS (
+                            SELECT 1
+                            FROM observed_transactions ot
+                            WHERE ot.id = o.aggregate_id
+                              AND ot.chain_id = 'local-evm'
+                        )
+                    )
+              ),
+              pending_with_expected_key AS (
+                  SELECT
+                      *,
+                      concat(
+                          'observed-tx:',
+                          payload ->> 'chainId', ':',
+                          payload ->> 'txHash', ':',
+                          payload ->> 'eventIndex', ':',
+                          payload ->> 'address', ':',
+                          payload ->> 'asset', ':status:',
+                          payload ->> 'status', ':v:'
+                      ) AS expected_key_prefix
+                  FROM pending_local_evm_outbox
+              )
+              SELECT count(*)
+              FROM pending_with_expected_key
+              WHERE (payload ->> 'address') IS DISTINCT FROM lower(payload ->> 'address')
+                 OR (payload ->> 'asset') IS DISTINCT FROM upper(payload ->> 'asset')
+                 OR NOT (
+                     (payload ->> 'chainId') = 'local-evm'
+                     AND jsonb_exists_all(payload, ARRAY['chainId', 'txHash', 'eventIndex', 'address', 'asset', 'status'])
+                     AND (payload ->> 'status') IN ('SEEN', 'CONFIRMED', 'REVERTED')
+                     -- Build the expected key prefix from the payload instead of parsing the
+                     -- colon-delimited key; tx hashes and addresses may themselves contain colons.
+                     AND left(idempotency_key, length(expected_key_prefix)) = expected_key_prefix
+                     AND substring(idempotency_key FROM length(expected_key_prefix) + 1) ~ '^[0-9]+$'
+                 )
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            sql: |
+              UPDATE watched_addresses
+              SET address = lower(address),
+                  asset = upper(asset)
+              WHERE chain_id = 'local-evm';
+
+              UPDATE observed_transactions
+              SET address = lower(address),
+                  asset = upper(asset)
+              WHERE chain_id = 'local-evm';

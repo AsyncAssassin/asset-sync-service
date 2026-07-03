@@ -24,6 +24,12 @@ class AssetSyncMetrics(
             }
             .description("Total outbox events with NEW or FAILED status.")
             .register(meterRegistry)
+        Gauge
+            .builder("asset.sync.outbox.dead.total", outboxEventRepository) { repository ->
+                repository.countDead().toDouble()
+            }
+            .description("Total outbox events with DEAD status.")
+            .register(meterRegistry)
     }
 
     fun recordObservedEventIngested(result: TransitionOutcome, status: TransactionStatus) {
@@ -107,6 +113,20 @@ class AssetSyncMetrics(
 
     fun recordOutboxEventFailed(eventType: String) {
         recordOutboxEvent(eventType = eventType, status = "FAILED")
+    }
+
+    fun recordOutboxEventDead(eventType: String) {
+        recordOutboxEvent(eventType = eventType, status = "DEAD")
+    }
+
+    fun recordOutboxEventCompletionFailed(eventType: String) {
+        recordOutboxEvent(eventType = eventType, status = "COMPLETION_FAILED")
+    }
+
+    fun recordOutboxSchedulerTickFailed() {
+        meterRegistry
+            .counter("asset.sync.outbox.scheduler.ticks", "result", "FAILED")
+            .increment()
     }
 
     private fun recordProviderFetchResult(

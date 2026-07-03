@@ -1,0 +1,22 @@
+databaseChangeLog:
+  - changeSet:
+      id: 011-validate-length-constraints
+      author: AsyncAssassin
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            # Validates the length CHECKs added NOT VALID in 006 so they also cover any pre-existing
+            # rows (instant on an empty/small table; a full ACCESS SHARE scan on a large one).
+            sql: |
+              ALTER TABLE accounts VALIDATE CONSTRAINT ck_accounts_external_ref_length;
+              ALTER TABLE chain_configs VALIDATE CONSTRAINT ck_chain_configs_chain_id_length;
+              ALTER TABLE watched_addresses VALIDATE CONSTRAINT ck_watched_addresses_chain_id_length;
+              ALTER TABLE watched_addresses VALIDATE CONSTRAINT ck_watched_addresses_address_length;
+              ALTER TABLE watched_addresses VALIDATE CONSTRAINT ck_watched_addresses_asset_length;
+              ALTER TABLE watched_addresses VALIDATE CONSTRAINT ck_watched_addresses_label_length;
+              ALTER TABLE observed_transactions VALIDATE CONSTRAINT ck_observed_transactions_chain_id_length;
+              ALTER TABLE observed_transactions VALIDATE CONSTRAINT ck_observed_transactions_tx_hash_length;
+              ALTER TABLE observed_transactions VALIDATE CONSTRAINT ck_observed_transactions_address_length;
+              ALTER TABLE observed_transactions VALIDATE CONSTRAINT ck_observed_transactions_asset_length;

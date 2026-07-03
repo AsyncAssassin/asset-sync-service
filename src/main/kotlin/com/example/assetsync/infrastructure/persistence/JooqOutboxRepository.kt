@@ -39,11 +39,28 @@ class JooqOutboxRepository(
             .doNothing()
             .execute() == 1
 
-    override fun claimDueEvents(limit: Int, now: Instant): List<OutboxEvent> {
+    override fun claimDueEvents(limit: Int, now: Instant, leaseUntil: Instant): List<OutboxEvent> {
         require(limit > 0) { "limit must be positive." }
 
+        val dueIds = dsl
+            .select(OUTBOX_EVENTS.ID)
+            .from(OUTBOX_EVENTS)
+            .where(
+                OUTBOX_EVENTS.STATUS.eq(OutboxStatus.NEW.name)
+                    .or(OUTBOX_EVENTS.STATUS.eq(OutboxStatus.FAILED.name)),
+            )
+            .and(OUTBOX_EVENTS.NEXT_ATTEMPT_AT.le(now.toOffsetDateTime()))
+            .orderBy(OUTBOX_EVENTS.CREATED_AT.asc(), OUTBOX_EVENTS.ID.asc())
+            .limit(limit)
+            .forUpdate()
+            .skipLocked()
+
         return dsl
-            .select(
+            .update(OUTBOX_EVENTS)
+            .set(OUTBOX_EVENTS.NEXT_ATTEMPT_AT, leaseUntil.toOffsetDateTime())
+            .set(OUTBOX_EVENTS.UPDATED_AT, now.toOffsetDateTime())
+            .where(OUTBOX_EVENTS.ID.`in`(dueIds))
+            .returningResult(
                 OUTBOX_EVENTS.ID,
                 OUTBOX_EVENTS.AGGREGATE_TYPE,
                 OUTBOX_EVENTS.AGGREGATE_ID,
@@ -58,20 +75,10 @@ class JooqOutboxRepository(
                 OUTBOX_EVENTS.CREATED_AT,
                 OUTBOX_EVENTS.UPDATED_AT,
             )
-            .from(OUTBOX_EVENTS)
-            .where(
-                OUTBOX_EVENTS.STATUS.eq(OutboxStatus.NEW.name)
-                    .or(OUTBOX_EVENTS.STATUS.eq(OutboxStatus.FAILED.name)),
-            )
-            .and(OUTBOX_EVENTS.NEXT_ATTEMPT_AT.le(now.toOffsetDateTime()))
-            .orderBy(OUTBOX_EVENTS.CREATED_AT.asc(), OUTBOX_EVENTS.ID.asc())
-            .limit(limit)
-            .forUpdate()
-            .skipLocked()
             .fetch { it.toOutboxEvent() }
     }
 
-    override fun markPublished(update: OutboxPublishedUpdate) {
+    override fun markPublished(update: OutboxPublishedUpdate): Boolean =
         dsl
             .update(OUTBOX_EVENTS)
             .set(OUTBOX_EVENTS.STATUS, OutboxStatus.PUBLISHED.name)
@@ -79,20 +86,28 @@ class JooqOutboxRepository(
             .setNull(OUTBOX_EVENTS.LAST_ERROR)
             .set(OUTBOX_EVENTS.UPDATED_AT, update.updatedAt.toOffsetDateTime())
             .where(OUTBOX_EVENTS.ID.eq(update.id))
-            .execute()
-    }
+            .and(
+                OUTBOX_EVENTS.STATUS.eq(OutboxStatus.NEW.name)
+                    .or(OUTBOX_EVENTS.STATUS.eq(OutboxStatus.FAILED.name)),
+            )
+            .and(OUTBOX_EVENTS.NEXT_ATTEMPT_AT.eq(update.claimedLeaseUntil.toOffsetDateTime()))
+            .execute() == 1
 
-    override fun markFailed(update: OutboxFailedUpdate) {
+    override fun markFailed(update: OutboxFailedUpdate): Boolean =
         dsl
             .update(OUTBOX_EVENTS)
-            .set(OUTBOX_EVENTS.STATUS, OutboxStatus.FAILED.name)
+            .set(OUTBOX_EVENTS.STATUS, update.status.name)
             .set(OUTBOX_EVENTS.ATTEMPTS, update.attempts)
             .set(OUTBOX_EVENTS.LAST_ERROR, update.lastError)
             .set(OUTBOX_EVENTS.NEXT_ATTEMPT_AT, update.nextAttemptAt.toOffsetDateTime())
             .set(OUTBOX_EVENTS.UPDATED_AT, update.updatedAt.toOffsetDateTime())
             .where(OUTBOX_EVENTS.ID.eq(update.id))
-            .execute()
-    }
+            .and(
+                OUTBOX_EVENTS.STATUS.eq(OutboxStatus.NEW.name)
+                    .or(OUTBOX_EVENTS.STATUS.eq(OutboxStatus.FAILED.name)),
+            )
+            .and(OUTBOX_EVENTS.NEXT_ATTEMPT_AT.eq(update.claimedLeaseUntil.toOffsetDateTime()))
+            .execute() == 1
 
     override fun countBacklog(): Int =
         requireNotNull(
@@ -105,6 +120,32 @@ class JooqOutboxRepository(
                 )
                 .fetchOne(0, Int::class.java),
         )
+
+    override fun countDead(): Int =
+        requireNotNull(
+            dsl
+                .selectCount()
+                .from(OUTBOX_EVENTS)
+                .where(OUTBOX_EVENTS.STATUS.eq(OutboxStatus.DEAD.name))
+                .fetchOne(0, Int::class.java),
+        )
+
+    override fun deletePublishedBefore(cutoff: Instant, limit: Int): Int {
+        require(limit > 0) { "limit must be positive." }
+
+        val expiredIds = dsl
+            .select(OUTBOX_EVENTS.ID)
+            .from(OUTBOX_EVENTS)
+            .where(OUTBOX_EVENTS.STATUS.eq(OutboxStatus.PUBLISHED.name))
+            .and(OUTBOX_EVENTS.PUBLISHED_AT.lt(cutoff.toOffsetDateTime()))
+            .orderBy(OUTBOX_EVENTS.PUBLISHED_AT.asc(), OUTBOX_EVENTS.ID.asc())
+            .limit(limit)
+
+        return dsl
+            .deleteFrom(OUTBOX_EVENTS)
+            .where(OUTBOX_EVENTS.ID.`in`(expiredIds))
+            .execute()
+    }
 
     private fun Record.toOutboxEvent(): OutboxEvent =
         OutboxEvent(

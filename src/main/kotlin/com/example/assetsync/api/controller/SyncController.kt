@@ -4,7 +4,6 @@ import com.example.assetsync.api.dto.SyncRunResponse
 import com.example.assetsync.api.dto.toResponse
 import com.example.assetsync.application.sync.SyncApplicationService
 import java.util.UUID
-import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PathVariable
@@ -23,7 +22,7 @@ class SyncController(
         @PathVariable addressId: UUID,
     ): ResponseEntity<SyncRunResponse> =
         ResponseEntity
-            .status(HttpStatus.ACCEPTED)
+            .ok()
             .body(syncApplicationService.syncAddress(addressId).toResponse())
 
     @PostMapping("/accounts/{accountId}/sync")
@@ -31,7 +30,7 @@ class SyncController(
         @PathVariable accountId: UUID,
     ): ResponseEntity<SyncRunResponse> =
         ResponseEntity
-            .status(HttpStatus.ACCEPTED)
+            .ok()
             .body(syncApplicationService.syncAccount(accountId).toResponse())
 
     @GetMapping("/sync-runs/{syncRunId}")

@@ -23,6 +23,7 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.context.TestConfiguration
@@ -48,6 +49,7 @@ import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
     ],
 )
 @AutoConfigureMockMvc
+@AutoConfigureObservability
 class ObservabilityIntegrationTests(
     @Autowired private val mockMvc: MockMvc,
     @Autowired private val objectMapper: ObjectMapper,
@@ -86,6 +88,9 @@ class ObservabilityIntegrationTests(
         mockMvc.perform(get("/actuator/metrics"))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.names", hasItem("asset.sync.outbox.backlog.total")))
+
+        mockMvc.perform(get("/actuator/prometheus"))
+            .andExpect(status().isOk)
 
         assertTrue(applicationContext.getBeansOfType(FakeChainProviderHealthIndicator::class.java).isNotEmpty())
         assertTrue(applicationContext.getBeansOfType(OutboxPublisherJob::class.java).isEmpty())
@@ -198,7 +203,7 @@ class ObservabilityIntegrationTests(
         )
 
         mockMvc.perform(post("/api/v1/addresses/$successAddressId/sync"))
-            .andExpect(status().isAccepted)
+            .andExpect(status().isOk)
 
         val failureAddress = createWatchedAddress(address = "0xmetrics-sync-failure")
         val failureAddressId = failureAddress["id"].asText()
@@ -285,8 +290,8 @@ class ObservabilityIntegrationTests(
         )
 
         mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
-            .andExpect(status().isNotFound)
-            .andExpect(jsonPath("$.title").value("Watched address not found"))
+            .andExpect(status().isBadGateway)
+            .andExpect(jsonPath("$.title").value("Provider returned invalid data"))
 
         assertEquals(
             providerAttemptsBefore + 1.0,

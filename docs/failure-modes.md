@@ -20,7 +20,7 @@ Common response principles:
 
 Scenario:
 
-- The API, fake provider, or future external delivery sends the same observed event more than once.
+- The API, active chain provider, or future external delivery sends the same observed event more than once.
 
 Expected behavior:
 
@@ -119,12 +119,14 @@ Operational signal:
 
 Scenario:
 
-- The fake provider times out or is unavailable during a sync.
+- The active chain provider times out or is unavailable during a sync.
 
 Expected behavior:
 
 - Provider call is outside a database transaction.
+- `asset-sync.sync.provider-timeout` is a total deadline for the provider fetch path for one watched address, not an idle timeout between provider events.
 - The current `sync_run` is marked `FAILED` in a short transaction.
+- If the final `markFailed` write fails, the original provider timeout/unavailable error remains the primary error and the database failure is attached for logs/diagnostics.
 - API returns `503 Service Unavailable`.
 - Events already committed before the timeout remain valid.
 - No long-lived database locks are held while waiting for provider response.
@@ -145,13 +147,14 @@ Expected behavior:
 - The outbox event remains durable in PostgreSQL.
 - `attempts` is incremented.
 - `last_error` is updated with a concise failure summary.
-- `status` is set to `FAILED`.
-- `next_attempt_at` is moved forward using backoff.
+- `status` is set to `FAILED`, or `DEAD` when max attempts has been reached.
+- `next_attempt_at` is moved forward using bounded backoff for `FAILED` rows.
 - A later poller run retries due `FAILED` rows.
+- `DEAD` rows are terminal and excluded from due/backlog counts.
 
 Operational signal:
 
-- Emit outbox failure metrics when metrics are implemented.
+- Emit outbox failure/dead metrics.
 - Keep error messages bounded to avoid unbounded row growth.
 
 ## 9. Process Crash Around Outbox Publish
@@ -159,11 +162,13 @@ Operational signal:
 Scenario:
 
 - The process crashes after publishing to the local adapter but before marking the outbox row `PUBLISHED`.
+- Or the publish succeeds and the `markPublished` completion update fails.
 
 Expected behavior:
 
-- The row remains `NEW` or `FAILED`.
-- After restart, the poller may publish it again.
+- The row remains `NEW` or `FAILED` with `next_attempt_at` holding the previous processing lease deadline.
+- Completion failure after successful publish does not increment publish attempts and must not promote the row to `DEAD`.
+- After the lease expires, the poller may publish it again.
 - This is acceptable because outbox delivery is at-least-once.
 - Downstream consumers must deduplicate by outbox `id` or `idempotency_key`.
 
@@ -173,7 +178,7 @@ Scenario:
 
 Expected behavior:
 
-- The row remains due and is retried after restart.
+- The row is retried after the processing lease expires.
 
 ## 10. Concurrent Sync For Same Address
 

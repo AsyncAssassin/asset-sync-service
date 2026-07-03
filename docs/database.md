@@ -31,6 +31,12 @@ src/main/resources/db/changelog
     003-create-observed-transactions.yaml
     004-create-outbox-and-sync-runs.yaml
     005-seed-local-chain-configs.yaml
+    006-add-input-length-constraints.yaml
+    007-add-outbox-dead-status.yaml
+    008-add-outbox-partial-indexes.yaml
+    009-normalize-local-evm-identities.yaml
+    010-create-users-and-authorities.yaml
+    011-validate-length-constraints.yaml
 ```
 
 Changelog rules:
@@ -40,6 +46,10 @@ Changelog rules:
 - Migrations are forward-only during MVP development.
 - Seed data is limited to local chain configuration required for fake-provider tests and local runs.
 - No PostgreSQL enum types in the MVP; use text plus `CHECK` constraints to keep status evolution simple.
+- Data-normalization changesets must fail fast when existing rows would collide after normalization. Operators must manually clean up or backfill those rows before rerunning the migration; changesets must not silently merge or delete business rows.
+- Changeset `006` adds input-length constraints as `NOT VALID`, so new writes are protected immediately while pre-existing oversized rows are not scanned during that upgrade step. Changeset `011` validates those constraints; operators with legacy oversized rows must clean them before applying `011`.
+- Changeset `009` normalizes local EVM watched addresses and observed transactions. Historical `PUBLISHED` outbox rows are kept as audit history, but pending `NEW` or `FAILED` local-evm outbox rows must already have canonical payload casing and current `observed-tx:...:status:{status}:v:{version}` idempotency keys. If not, the migration halts and operators must drain pending outbox rows or perform an audited manual cleanup before retrying.
+- Changeset `010` creates the standard Spring Security JDBC `users` and `authorities` tables.
 
 ## 3. Tables
 
@@ -92,6 +102,39 @@ Notes:
 
 - Confirmation thresholds are data, not code constants.
 - The MVP should seed at least one local chain id for fake-provider flows.
+
+### `users`
+
+Purpose: Spring Security JDBC user store for non-local/test profiles and demo users.
+
+Key columns:
+
+| Column | Type | Nullable | Notes |
+| --- | --- | --- | --- |
+| `username` | `varchar(64)` | no | Primary key |
+| `password` | `varchar(200)` | no | Encoded password |
+| `enabled` | `boolean` | no | Whether the user can authenticate |
+
+Constraints and indexes:
+
+- `primary key (username)`
+
+### `authorities`
+
+Purpose: Spring Security JDBC authorities for role-based endpoint access.
+
+Key columns:
+
+| Column | Type | Nullable | Notes |
+| --- | --- | --- | --- |
+| `username` | `varchar(64)` | no | References `users(username)` |
+| `authority` | `varchar(64)` | no | Granted authority, such as `ROLE_READ` or `ROLE_OPERATOR` |
+
+Constraints and indexes:
+
+- `foreign key (username) references users(username)`
+- `unique (username, authority)`
+- `index (username)`
 
 ### `watched_addresses`
 
@@ -223,9 +266,9 @@ Key columns:
 | `event_type` | `text` | no | Transaction lifecycle event type |
 | `idempotency_key` | `text` | no | Unique lifecycle event key |
 | `payload` | `jsonb` | no | Event payload |
-| `status` | `text` | no | `NEW`, `PUBLISHED`, or `FAILED` |
+| `status` | `text` | no | `NEW`, `PUBLISHED`, `FAILED`, or `DEAD` |
 | `attempts` | `integer` | no | Publish attempts, default `0` |
-| `next_attempt_at` | `timestamptz` | no | Earliest retry time |
+| `next_attempt_at` | `timestamptz` | no | Earliest retry time, and the processing lease token while a row is claimed |
 | `published_at` | `timestamptz` | yes | Publish success timestamp |
 | `last_error` | `text` | yes | Last publish failure |
 | `created_at` | `timestamptz` | no | Creation timestamp |
@@ -236,15 +279,17 @@ Constraints and indexes:
 - `primary key (id)`
 - `unique (idempotency_key)`
 - `index (status, next_attempt_at)`
+- partial due index on `(next_attempt_at, created_at, id) where status in ('NEW', 'FAILED')`
+- partial retention index on `(published_at, id) where status = 'PUBLISHED'`
 - `index (aggregate_type, aggregate_id)`
-- `check (status in ('NEW', 'PUBLISHED', 'FAILED'))`
+- `check (status in ('NEW', 'PUBLISHED', 'FAILED', 'DEAD'))`
 - `check (attempts >= 0)`
 - `check (event_type in ('TRANSACTION_SEEN', 'TRANSACTION_CONFIRMED', 'TRANSACTION_REVERTED'))`
 
 Idempotency key format:
 
 ```text
-observed-tx:{chainId}:{txHash}:{eventIndex}:{address}:{asset}:status:{newStatus}
+observed-tx:{chainId}:{txHash}:{eventIndex}:{address}:{asset}:status:{newStatus}:v:{version}
 ```
 
 Poller query requirement:
@@ -262,6 +307,11 @@ FOR UPDATE SKIP LOCKED
 Notes:
 
 - The MVP publisher writes to a local adapter such as structured logs.
+- Claiming due rows happens in a short transaction that moves `next_attempt_at` to `now + processing_lease`; this releases row locks while preventing another poller from immediately reclaiming the same row.
+- Publish completion runs per event in its own short transaction and is fenced with `WHERE id = ? AND status IN ('NEW', 'FAILED') AND next_attempt_at = :claimedLeaseUntil`.
+- A completion update that affects zero rows is stale and must not overwrite the newer owner state.
+- `FAILED` rows retry with bounded backoff until max attempts; after that they become terminal `DEAD` rows and are excluded from the due/backlog set.
+- Published-row retention deletes old `PUBLISHED` rows in batches when enabled.
 - Delivery is at-least-once. Consumers must deduplicate by `id` or `idempotency_key`.
 - A process crash after publish but before marking `PUBLISHED` may produce duplicate delivery.
 
@@ -309,17 +359,19 @@ Use short Spring-managed database transactions for:
 - Single observed event ingestion.
 - Sync run creation.
 - Sync run final status update.
-- Outbox batch claiming and status updates.
+- Outbox batch claiming.
+- Per-event outbox completion updates.
 
-Provider calls must run outside database transactions. A provider timeout must not hold row locks or an open connection.
+Provider calls must run outside database transactions. `asset-sync.sync.provider-timeout` is a total provider fetch deadline for one watched address rather than an idle timeout between queue items. A provider timeout must not hold row locks or an open connection.
 
-Outbox publishing in the MVP uses a local publisher adapter and the schema has no separate `PROCESSING` or lease status. The poller therefore claims a small due batch with `FOR UPDATE SKIP LOCKED`, invokes the local publisher for each claimed row, records `PUBLISHED` or `FAILED`, and commits the batch. Keep the batch size and publisher timeout bounded so row locks are short-lived. A future real broker adapter can introduce a claim/lease status before moving network publishing outside the claim transaction.
+Outbox publishing uses `next_attempt_at` as a lease token rather than a separate `PROCESSING` status. The poller claims a small due batch with `FOR UPDATE SKIP LOCKED`, immediately updates each claimed row's `next_attempt_at` to the lease deadline, and commits. It then publishes outside the claim transaction. Each completion update records `PUBLISHED`, `FAILED`, or `DEAD` in a separate short transaction fenced by the exact claimed lease value.
+If `publish()` succeeds but `markPublished()` fails, the row remains leased in its previous `NEW` or `FAILED` status until the lease expires. That completion failure is logged and metered separately; it does not consume a publish attempt and cannot move the row to `DEAD`.
 
 Recommended sync sequence:
 
 ```text
 1. Insert sync_run with status STARTED in a short transaction.
-2. Call the fake provider outside a database transaction.
+2. Call the active provider outside a database transaction: fake in `local`/`test`, HTTP in non-local/test profiles.
 3. Ingest each observed event in its own transaction.
 4. Update sync_run to SUCCEEDED or FAILED in a short transaction.
 ```
@@ -345,10 +397,10 @@ Observed transaction ingestion:
 
 Outbox polling:
 
-- Poller claims due `NEW` or `FAILED` events with `FOR UPDATE SKIP LOCKED`.
-- Multiple poller instances may run safely without claiming the same row in the same batch.
-- Publish status updates must be idempotent.
-- MVP publishing is local and bounded while claimed rows are locked.
+- Poller claims due `NEW` or `FAILED` events with `FOR UPDATE SKIP LOCKED` and writes a lease deadline to `next_attempt_at`.
+- Multiple poller instances may run safely without claiming the same row while the lease is active.
+- Publish status updates are compare-and-set updates fenced by the exact claimed lease value.
+- `DEAD` and `PUBLISHED` rows are terminal for claiming.
 
 Concurrent sync:
 

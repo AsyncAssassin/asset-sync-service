@@ -58,6 +58,15 @@ interface SyncRunRepository {
     fun markCompleted(completion: SyncRunCompletion): SyncRun
 
     fun findById(syncRunId: UUID): SyncRun?
+
+    fun findStaleStarted(cutoff: Instant, limit: Int): List<SyncRun>
+
+    /**
+     * Marks a run FAILED only if it is still STARTED (status-guarded, tolerant of 0 rows). Returns
+     * null when the row is no longer STARTED — so the sweeper can never overwrite a run that a real
+     * completion resolved to SUCCEEDED/FAILED in the meantime.
+     */
+    fun markAbandoned(id: UUID, lastError: String, finishedAt: Instant, updatedAt: Instant): SyncRun?
 }
 
 class SyncRunNotFoundException(
@@ -70,4 +79,5 @@ class WatchedAddressByIdNotFoundException(
 
 class SyncProviderUnavailableException(
     val syncRun: SyncRun,
-) : RuntimeException("Provider is unavailable.")
+    cause: Throwable? = null,
+) : RuntimeException("Provider is unavailable.", cause)

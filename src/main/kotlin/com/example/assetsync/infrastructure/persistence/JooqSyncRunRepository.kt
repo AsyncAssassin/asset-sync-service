@@ -7,6 +7,7 @@ import com.example.assetsync.application.sync.SyncRunRepository
 import com.example.assetsync.application.sync.SyncRunStatus
 import com.example.assetsync.application.sync.SyncTargetType
 import com.example.assetsync.infrastructure.persistence.jooq.generated.tables.references.SYNC_RUNS
+import java.time.Instant
 import java.util.UUID
 import org.jooq.DSLContext
 import org.jooq.Record
@@ -57,6 +58,33 @@ class JooqSyncRunRepository(
             .select(SYNC_RUN_FIELDS)
             .from(SYNC_RUNS)
             .where(SYNC_RUNS.ID.eq(syncRunId))
+            .fetchOne { it.toSyncRun() }
+
+    override fun findStaleStarted(cutoff: Instant, limit: Int): List<SyncRun> {
+        require(limit > 0) { "limit must be positive." }
+
+        return dsl
+            .select(SYNC_RUN_FIELDS)
+            .from(SYNC_RUNS)
+            .where(SYNC_RUNS.STATUS.eq(SyncRunStatus.STARTED.name))
+            .and(SYNC_RUNS.STARTED_AT.lt(cutoff.toOffsetDateTime()))
+            .orderBy(SYNC_RUNS.STARTED_AT.asc(), SYNC_RUNS.ID.asc())
+            .limit(limit)
+            .forUpdate()
+            .skipLocked()
+            .fetch { it.toSyncRun() }
+    }
+
+    override fun markAbandoned(id: UUID, lastError: String, finishedAt: Instant, updatedAt: Instant): SyncRun? =
+        dsl
+            .update(SYNC_RUNS)
+            .set(SYNC_RUNS.STATUS, SyncRunStatus.FAILED.name)
+            .set(SYNC_RUNS.LAST_ERROR, lastError)
+            .set(SYNC_RUNS.FINISHED_AT, finishedAt.toOffsetDateTime())
+            .set(SYNC_RUNS.UPDATED_AT, updatedAt.toOffsetDateTime())
+            .where(SYNC_RUNS.ID.eq(id))
+            .and(SYNC_RUNS.STATUS.eq(SyncRunStatus.STARTED.name))
+            .returningResult(SYNC_RUN_FIELDS)
             .fetchOne { it.toSyncRun() }
 
     private fun Record.toSyncRun(): SyncRun =

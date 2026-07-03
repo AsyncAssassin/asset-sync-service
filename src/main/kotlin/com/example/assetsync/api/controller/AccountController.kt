@@ -20,6 +20,7 @@ import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RequestMapping
+import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
 
 @RestController
@@ -71,10 +72,19 @@ class AccountController(
     @GetMapping("/{accountId}/addresses")
     fun listWatchedAddresses(
         @PathVariable accountId: UUID,
-    ): WatchedAddressListResponse =
-        WatchedAddressListResponse(
-            items = watchedAddressApplicationService
-                .listWatchedAddresses(accountId)
-                .map { it.toResponse() },
+        @RequestParam(defaultValue = "0") page: Int,
+        @RequestParam(defaultValue = "50") size: Int,
+    ): WatchedAddressListResponse {
+        val result = watchedAddressApplicationService.listWatchedAddresses(
+            accountId = accountId,
+            page = page,
+            size = size,
         )
+        return WatchedAddressListResponse(
+            items = result.items.map { it.toResponse() },
+            page = result.page,
+            size = result.size,
+            hasNext = result.hasNext,
+        )
+    }
 }

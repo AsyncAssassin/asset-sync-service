@@ -51,8 +51,10 @@ data class ObservedTransactionNaturalKey(
         require(asset.isNotBlank()) { "asset must not be blank." }
     }
 
-    fun outboxIdempotencyKey(status: TransactionStatus): String =
-        "observed-tx:$chainId:$txHash:$eventIndex:$address:$asset:status:${status.name}"
+    fun outboxIdempotencyKey(status: TransactionStatus, version: Long): String {
+        require(version >= 0) { "version must be non-negative." }
+        return "observed-tx:$chainId:$txHash:$eventIndex:$address:$asset:status:${status.name}:v:$version"
+    }
 }
 
 data class TransactionImmutableFields(

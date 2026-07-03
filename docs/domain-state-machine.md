@@ -92,7 +92,8 @@ Legend:
 - `incomingEffectiveStatus` is the incoming provider status after applying the confirmation threshold rule.
 - `sameImmutableFields` means all immutable fields match the stored row.
 - `higherConfirmations` means incoming confirmations are greater than stored confirmations.
-- `sameOrLowerConfirmations` means incoming confirmations are less than or equal to stored confirmations.
+- `equalConfirmationHeightCorrection` means incoming confirmations equal stored confirmations and `blockHeight` differs.
+- `lowerConfirmations` means incoming confirmations are less than stored confirmations.
 
 | Current status | Incoming effective status | Condition | Result status | Outcome | Outbox event |
 | --- | --- | --- | --- | --- | --- |
@@ -100,11 +101,13 @@ Legend:
 | `NONE` | `CONFIRMED` | Provider says confirmed or threshold reached | `CONFIRMED` | `Created` | `TRANSACTION_CONFIRMED` |
 | `NONE` | `REVERTED` | Provider sends reorg/reverted signal before any stored event | `REVERTED` | `Created` | `TRANSACTION_REVERTED` |
 | `SEEN` | `SEEN` | Immutable fields match and confirmations increase below threshold | `SEEN` | `Updated` | none |
+| `SEEN` | `SEEN` | Immutable fields match and equal-confirmation block-height correction arrives | `SEEN` | `Updated` | none |
 | `SEEN` | `SEEN` | Immutable fields match and event is duplicate or stale | `SEEN` | `NoChange` | none |
 | `SEEN` | `CONFIRMED` | Immutable fields match and threshold reached or provider says confirmed | `CONFIRMED` | `Updated` | `TRANSACTION_CONFIRMED` |
 | `SEEN` | `REVERTED` | Immutable fields match and provider says reverted | `REVERTED` | `Updated` | `TRANSACTION_REVERTED` |
 | `CONFIRMED` | `SEEN` | Immutable fields match and event is older or stale | `CONFIRMED` | `NoChange` | none |
 | `CONFIRMED` | `CONFIRMED` | Immutable fields match and confirmations increase | `CONFIRMED` | `Updated` | none |
+| `CONFIRMED` | `CONFIRMED` | Immutable fields match and equal-confirmation block-height correction arrives | `CONFIRMED` | `Updated` | none |
 | `CONFIRMED` | `CONFIRMED` | Immutable fields match and duplicate confirmation | `CONFIRMED` | `NoChange` | none |
 | `CONFIRMED` | `REVERTED` | Immutable fields match and provider says reverted | `REVERTED` | `Updated` | `TRANSACTION_REVERTED` |
 | `REVERTED` | `SEEN` | Immutable fields match | `REVERTED` | `NoChange` | none |
@@ -151,7 +154,9 @@ Rules:
 - Stored confirmations are monotonic for non-reverted rows.
 - Lower incoming confirmations do not reduce stored confirmations.
 - Higher confirmations on an existing `SEEN` row may update `confirmations`, `blockHeight`, `lastSeenAt`, and `updatedAt` even when status remains `SEEN`.
-- Higher confirmations on a `CONFIRMED` row may update `confirmations`, `lastSeenAt`, and `updatedAt` but must not emit another `TRANSACTION_CONFIRMED` event.
+- Higher confirmations on a `CONFIRMED` row may update `confirmations`, `blockHeight`, `lastSeenAt`, and `updatedAt` but must not emit another `TRANSACTION_CONFIRMED` event.
+- Equal-confirmation block-height corrections are `Updated` lifecycle writes with no outbox event.
+- Lower-confirmation status transitions such as `SEEN -> CONFIRMED`, `SEEN -> REVERTED`, or `CONFIRMED -> REVERTED` may update `status`, but they preserve the current `blockHeight` while keeping confirmations monotonic.
 
 ## 7. Reorg Handling
 
@@ -241,7 +246,7 @@ No outbox event is created for:
 Outbox idempotency key:
 
 ```text
-observed-tx:{chainId}:{txHash}:{eventIndex}:{address}:{asset}:status:{newStatus}
+observed-tx:{chainId}:{txHash}:{eventIndex}:{address}:{asset}:status:{newStatus}:v:{version}
 ```
 
 The observed transaction change and outbox insertion must happen in the same database transaction.

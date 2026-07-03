@@ -11,6 +11,19 @@ jobs:
   build:
     runs-on: ubuntu-latest
 
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: asset_sync
+          POSTGRES_USER: asset_sync
+          POSTGRES_PASSWORD: asset_sync
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U asset_sync -d asset_sync"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,7 +44,36 @@ jobs:
         run: ./gradlew clean check
 
       - name: Build boot jar
-        run: ./gradlew clean bootJar
+        run: ./gradlew bootJar
+
+      - name: Boot smoke (real java -jar — catches startup regressions the MOCK-env tests miss)
+        run: |
+          JAR=$(ls build/libs/asset-sync-service-*.jar | grep -v plain | head -1)
+          SPRING_PROFILES_ACTIVE=local SERVER_PORT=8080 \
+          ASSET_SYNC_DB_HOST=localhost ASSET_SYNC_DB_PORT=5432 ASSET_SYNC_DB_NAME=asset_sync \
+          ASSET_SYNC_DB_USER=asset_sync ASSET_SYNC_DB_PASSWORD=asset_sync \
+          java -jar "$JAR" > boot-smoke.log 2>&1 &
+          JPID=$!
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8080/actuator/health >/dev/null 2>&1; then
+              echo "Boot smoke OK: application became healthy under a real servlet container."
+              kill "$JPID" 2>/dev/null || true
+              exit 0
+            fi
+            if ! kill -0 "$JPID" 2>/dev/null; then
+              echo "Boot smoke FAILED: application exited during startup."
+              tail -60 boot-smoke.log
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "Boot smoke FAILED: application did not become healthy in time."
+          tail -60 boot-smoke.log
+          kill -9 "$JPID" 2>/dev/null || true
+          exit 1
+
+      - name: Build Docker image
+        run: docker build --build-arg JAR_FILE=build/libs/*.jar -t asset-sync-service:ci .
 
       - name: Validate Docker Compose config
         run: docker compose config

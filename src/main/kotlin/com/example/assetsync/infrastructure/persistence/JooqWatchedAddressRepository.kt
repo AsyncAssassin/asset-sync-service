@@ -51,7 +51,7 @@ class JooqWatchedAddressRepository(
             )
     }
 
-    override fun findByAccountId(accountId: UUID): List<WatchedAddress> =
+    override fun findByAccountId(accountId: UUID, limit: Int, offset: Int): List<WatchedAddress> =
         dsl
             .select(
                 WATCHED_ADDRESSES.ID,
@@ -67,6 +67,8 @@ class JooqWatchedAddressRepository(
             .from(WATCHED_ADDRESSES)
             .where(WATCHED_ADDRESSES.ACCOUNT_ID.eq(accountId))
             .orderBy(WATCHED_ADDRESSES.CREATED_AT.asc(), WATCHED_ADDRESSES.ID.asc())
+            .limit(limit)
+            .offset(offset)
             .fetch { it.toWatchedAddress() }
 
     override fun findActiveById(addressId: UUID): WatchedAddress? =
@@ -87,7 +89,7 @@ class JooqWatchedAddressRepository(
             .and(WATCHED_ADDRESSES.STATUS.eq(WatchedAddressStatus.ACTIVE.name))
             .fetchOne { it.toWatchedAddress() }
 
-    override fun findActiveByAccountId(accountId: UUID): List<WatchedAddress> =
+    override fun findActiveByAccountId(accountId: UUID, limit: Int, offset: Int): List<WatchedAddress> =
         dsl
             .select(
                 WATCHED_ADDRESSES.ID,
@@ -104,6 +106,8 @@ class JooqWatchedAddressRepository(
             .where(WATCHED_ADDRESSES.ACCOUNT_ID.eq(accountId))
             .and(WATCHED_ADDRESSES.STATUS.eq(WatchedAddressStatus.ACTIVE.name))
             .orderBy(WATCHED_ADDRESSES.CREATED_AT.asc(), WATCHED_ADDRESSES.ID.asc())
+            .limit(limit)
+            .offset(offset)
             .fetch { it.toWatchedAddress() }
 
     override fun findActiveByNaturalKey(chainId: String, address: String, asset: String): WatchedAddress? =

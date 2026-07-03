@@ -1,0 +1,24 @@
+spring:
+  datasource:
+    # Env-only, no defaults: the app fails fast at startup if a secret is missing.
+    url: ${ASSET_SYNC_DB_URL}
+    username: ${ASSET_SYNC_DB_USER}
+    password: ${ASSET_SYNC_DB_PASSWORD}
+    hikari:
+      maximum-pool-size: ${ASSET_SYNC_DB_MAX_POOL_SIZE:10}
+      minimum-idle: ${ASSET_SYNC_DB_MIN_IDLE:2}
+      pool-name: asset-sync-hikari
+  liquibase:
+    enabled: true
+    change-log: classpath:/db/changelog/db.changelog-master.yaml
+    # N5: Liquibase gets a dedicated bare connection so the app pool's statement_timeout /
+    # lock_timeout (base application.yml connection-init-sql) never aborts a long migration.
+    url: ${ASSET_SYNC_DB_URL}
+    user: ${ASSET_SYNC_DB_USER}
+    password: ${ASSET_SYNC_DB_PASSWORD}
+
+asset-sync:
+  provider:
+    base-url: ${ASSET_SYNC_PROVIDER_BASE_URL}
+    connect-timeout: ${ASSET_SYNC_PROVIDER_CONNECT_TIMEOUT:2s}
+    read-timeout: ${ASSET_SYNC_PROVIDER_READ_TIMEOUT:5s}

@@ -1,0 +1,17 @@
+databaseChangeLog:
+  - changeSet:
+      id: 008-add-outbox-partial-indexes
+      author: AsyncAssassin
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            sql: |
+              CREATE INDEX idx_outbox_events_due_partial
+                  ON outbox_events (next_attempt_at, created_at, id)
+                  WHERE status IN ('NEW', 'FAILED');
+
+              CREATE INDEX idx_outbox_events_published_retention_partial
+                  ON outbox_events (published_at, id)
+                  WHERE status = 'PUBLISHED';

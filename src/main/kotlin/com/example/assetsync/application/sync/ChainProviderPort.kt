@@ -4,6 +4,7 @@ import com.example.assetsync.application.account.WatchedAddress
 import com.example.assetsync.application.transaction.IngestObservedEventCommand
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
+import com.example.assetsync.domain.policy.ChainIdentityNormalizer
 import java.math.BigDecimal
 
 interface ChainProviderPort {
@@ -22,21 +23,28 @@ data class ChainProviderObservedEvent(
     val direction: Direction,
     val status: TransactionStatus,
 ) {
-    fun toIngestCommand(): IngestObservedEventCommand =
-        IngestObservedEventCommand(
+    fun toIngestCommand(): IngestObservedEventCommand {
+        val identity = ChainIdentityNormalizer.normalize(
             chainId = chainId,
-            txHash = txHash,
-            eventIndex = eventIndex,
             address = address,
             asset = asset,
+        )
+        return IngestObservedEventCommand(
+            chainId = identity.chainId,
+            txHash = ChainIdentityNormalizer.normalizeTxHash(identity.chainId, txHash),
+            eventIndex = eventIndex,
+            address = identity.address,
+            asset = identity.asset,
             amount = amount,
             blockHeight = blockHeight,
             confirmations = confirmations,
             direction = direction,
             status = status,
         )
+    }
 }
 
 class ChainProviderUnavailableException(
-    override val message: String = "Provider is unavailable.",
-) : RuntimeException(message)
+    message: String = "Provider is unavailable.",
+    cause: Throwable? = null,
+) : RuntimeException(message, cause)

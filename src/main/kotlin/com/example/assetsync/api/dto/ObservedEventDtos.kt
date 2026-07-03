@@ -8,26 +8,42 @@ import com.example.assetsync.domain.model.TransactionStatus
 import jakarta.validation.constraints.AssertTrue
 import jakarta.validation.constraints.Min
 import jakarta.validation.constraints.NotBlank
+import jakarta.validation.constraints.NotNull
+import jakarta.validation.constraints.Size
 import java.math.BigDecimal
 import java.util.UUID
 
+const val MAX_CHAIN_ID_LENGTH = 64
+const val MAX_TX_HASH_LENGTH = 128
+const val MAX_ADDRESS_LENGTH = 128
+const val MAX_ASSET_LENGTH = 32
+const val MAX_AMOUNT_LENGTH = 80
+
 data class IngestObservedEventRequest(
     @field:NotBlank(message = "chainId is required")
+    @field:Size(max = MAX_CHAIN_ID_LENGTH, message = "chainId must be at most $MAX_CHAIN_ID_LENGTH characters")
     val chainId: String = "",
     @field:NotBlank(message = "txHash is required")
+    @field:Size(max = MAX_TX_HASH_LENGTH, message = "txHash must be at most $MAX_TX_HASH_LENGTH characters")
     val txHash: String = "",
+    @field:NotNull(message = "eventIndex is required")
     @field:Min(value = 0, message = "eventIndex must be greater than or equal to 0")
-    val eventIndex: Int = -1,
+    val eventIndex: Int? = null,
     @field:NotBlank(message = "address is required")
+    @field:Size(max = MAX_ADDRESS_LENGTH, message = "address must be at most $MAX_ADDRESS_LENGTH characters")
     val address: String = "",
     @field:NotBlank(message = "asset is required")
+    @field:Size(max = MAX_ASSET_LENGTH, message = "asset must be at most $MAX_ASSET_LENGTH characters")
     val asset: String = "",
     @field:NotBlank(message = "amount is required")
+    @field:Size(max = MAX_AMOUNT_LENGTH, message = "amount must be at most $MAX_AMOUNT_LENGTH characters")
     val amount: String = "",
+    @field:NotNull(message = "blockHeight is required")
     @field:Min(value = 0, message = "blockHeight must be greater than or equal to 0")
-    val blockHeight: Long = -1,
+    val blockHeight: Long? = null,
+    @field:NotNull(message = "confirmations is required")
     @field:Min(value = 0, message = "confirmations must be greater than or equal to 0")
-    val confirmations: Int = -1,
+    val confirmations: Int? = null,
     @field:NotBlank(message = "direction is required")
     val direction: String = "",
     @field:NotBlank(message = "status is required")
@@ -57,15 +73,15 @@ fun IngestObservedEventRequest.toCommand(): IngestObservedEventCommand =
     IngestObservedEventCommand(
         chainId = chainId,
         txHash = txHash,
-        eventIndex = eventIndex,
+        eventIndex = eventIndex ?: throw InvalidObservedEventRequestException("eventIndex is required."),
         address = address,
         asset = asset,
         amount = parseAmountOrNull(amount)?.takeIf { it.fitsNumeric38_18() }
             ?: throw InvalidObservedEventRequestException(
                 "amount must be a non-negative decimal string that fits numeric(38,18).",
             ),
-        blockHeight = blockHeight,
-        confirmations = confirmations,
+        blockHeight = blockHeight ?: throw InvalidObservedEventRequestException("blockHeight is required."),
+        confirmations = confirmations ?: throw InvalidObservedEventRequestException("confirmations is required."),
         direction = parseEnum<Direction>("direction", direction),
         status = parseEnum<TransactionStatus>("status", status),
     )

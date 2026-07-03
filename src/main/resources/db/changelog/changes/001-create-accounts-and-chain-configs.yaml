@@ -1,7 +1,7 @@
 databaseChangeLog:
   - changeSet:
       id: 001-create-accounts-and-chain-configs
-      author: codex
+      author: AsyncAssassin
       changes:
         - sql:
             dbms: postgresql

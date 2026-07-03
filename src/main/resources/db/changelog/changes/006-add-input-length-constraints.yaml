@@ -1,0 +1,37 @@
+databaseChangeLog:
+  - changeSet:
+      id: 006-add-input-length-constraints
+      author: AsyncAssassin
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            sql: |
+              ALTER TABLE accounts
+                  ADD CONSTRAINT ck_accounts_external_ref_length
+                      CHECK (external_ref IS NULL OR char_length(external_ref) <= 255) NOT VALID;
+
+              ALTER TABLE chain_configs
+                  ADD CONSTRAINT ck_chain_configs_chain_id_length
+                      CHECK (char_length(chain_id) <= 64) NOT VALID;
+
+              ALTER TABLE watched_addresses
+                  ADD CONSTRAINT ck_watched_addresses_chain_id_length
+                      CHECK (char_length(chain_id) <= 64) NOT VALID,
+                  ADD CONSTRAINT ck_watched_addresses_address_length
+                      CHECK (char_length(address) <= 128) NOT VALID,
+                  ADD CONSTRAINT ck_watched_addresses_asset_length
+                      CHECK (char_length(asset) <= 32) NOT VALID,
+                  ADD CONSTRAINT ck_watched_addresses_label_length
+                      CHECK (label IS NULL OR char_length(label) <= 255) NOT VALID;
+
+              ALTER TABLE observed_transactions
+                  ADD CONSTRAINT ck_observed_transactions_chain_id_length
+                      CHECK (char_length(chain_id) <= 64) NOT VALID,
+                  ADD CONSTRAINT ck_observed_transactions_tx_hash_length
+                      CHECK (char_length(tx_hash) <= 128) NOT VALID,
+                  ADD CONSTRAINT ck_observed_transactions_address_length
+                      CHECK (char_length(address) <= 128) NOT VALID,
+                  ADD CONSTRAINT ck_observed_transactions_asset_length
+                      CHECK (char_length(asset) <= 32) NOT VALID;

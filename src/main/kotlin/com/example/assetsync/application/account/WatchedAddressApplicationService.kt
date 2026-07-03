@@ -1,5 +1,6 @@
 package com.example.assetsync.application.account
 
+import com.example.assetsync.domain.policy.ChainIdentityNormalizer
 import java.time.Clock
 import java.time.Instant
 import java.util.UUID
@@ -13,6 +14,11 @@ class WatchedAddressApplicationService(
     private val watchedAddressRepository: WatchedAddressRepository,
     private val clock: Clock,
 ) {
+    companion object {
+        const val DEFAULT_PAGE_SIZE = 50
+        const val MAX_PAGE_SIZE = 100
+        const val MAX_PAGE = 10_000
+    }
 
     @Transactional
     fun registerWatchedAddress(command: RegisterWatchedAddressCommand): WatchedAddress {
@@ -20,17 +26,21 @@ class WatchedAddressApplicationService(
             throw AccountNotFoundException(command.accountId)
         }
 
-        val chainId = command.chainId.trim()
-        chainConfigRepository.findEnabledByChainId(chainId) ?: throw UnsupportedChainException(chainId)
+        val identity = ChainIdentityNormalizer.normalize(
+            chainId = command.chainId,
+            address = command.address,
+            asset = command.asset,
+        )
+        chainConfigRepository.findEnabledByChainId(identity.chainId) ?: throw UnsupportedChainException(identity.chainId)
 
         val now = Instant.now(clock)
         return watchedAddressRepository.insert(
             NewWatchedAddress(
                 id = UUID.randomUUID(),
                 accountId = command.accountId,
-                chainId = chainId,
-                address = command.address.trim(),
-                asset = command.asset.trim(),
+                chainId = identity.chainId,
+                address = identity.address,
+                asset = identity.asset,
                 label = command.label.trimToNull(),
                 status = WatchedAddressStatus.ACTIVE,
                 createdAt = now,
@@ -40,12 +50,42 @@ class WatchedAddressApplicationService(
     }
 
     @Transactional(readOnly = true)
-    fun listWatchedAddresses(accountId: UUID): List<WatchedAddress> {
+    fun listWatchedAddresses(accountId: UUID, page: Int, size: Int): WatchedAddressPage {
         if (!accountRepository.existsById(accountId)) {
             throw AccountNotFoundException(accountId)
         }
 
-        return watchedAddressRepository.findByAccountId(accountId)
+        if (page < 0 || page > MAX_PAGE || size < 1 || size > MAX_PAGE_SIZE) {
+            throw InvalidWatchedAddressPageException(
+                page = page,
+                size = size,
+                maxPage = MAX_PAGE,
+                maxPageSize = MAX_PAGE_SIZE,
+            )
+        }
+
+        val offset = page.toLong() * size.toLong()
+        if (offset > Int.MAX_VALUE) {
+            throw InvalidWatchedAddressPageException(
+                page = page,
+                size = size,
+                maxPage = MAX_PAGE,
+                maxPageSize = MAX_PAGE_SIZE,
+            )
+        }
+
+        val rows = watchedAddressRepository.findByAccountId(
+            accountId = accountId,
+            limit = size + 1,
+            offset = offset.toInt(),
+        )
+
+        return WatchedAddressPage(
+            items = rows.take(size),
+            page = page,
+            size = size,
+            hasNext = rows.size > size,
+        )
     }
 }
 
