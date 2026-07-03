@@ -37,6 +37,7 @@ src/main/resources/db/changelog
     009-normalize-local-evm-identities.yaml
     010-create-users-and-authorities.yaml
     011-validate-length-constraints.yaml
+    012-add-observed-transaction-block-height-check.yaml
 ```
 
 Changelog rules:
@@ -50,6 +51,15 @@ Changelog rules:
 - Changeset `006` adds input-length constraints as `NOT VALID`, so new writes are protected immediately while pre-existing oversized rows are not scanned during that upgrade step. Changeset `011` validates those constraints; operators with legacy oversized rows must clean them before applying `011`.
 - Changeset `009` normalizes local EVM watched addresses and observed transactions. Historical `PUBLISHED` outbox rows are kept as audit history, but pending `NEW` or `FAILED` local-evm outbox rows must already have canonical payload casing and current `observed-tx:...:status:{status}:v:{version}` idempotency keys. If not, the migration halts and operators must drain pending outbox rows or perform an audited manual cleanup before retrying.
 - Changeset `010` creates the standard Spring Security JDBC `users` and `authorities` tables.
+- Changeset `012` adds `observed_transactions.block_height >= 0` as `NOT VALID`, then validates it immediately. Legacy databases with negative block heights must be cleaned before applying `012`; operators can preflight with:
+
+```sql
+SELECT id, chain_id, tx_hash, event_index, block_height
+FROM observed_transactions
+WHERE block_height < 0;
+```
+
+If the query returns rows, perform an audited cleanup or backfill before running the migration.
 
 ## 3. Tables
 
@@ -214,6 +224,7 @@ Constraints and indexes:
 - `index (chain_id, block_height)`
 - `check (event_index >= 0)`
 - `check (amount >= 0)`
+- `check (block_height >= 0)`
 - `check (confirmations >= 0)`
 - `check (direction in ('INBOUND', 'OUTBOUND'))`
 - `check (status in ('SEEN', 'CONFIRMED', 'REVERTED'))`

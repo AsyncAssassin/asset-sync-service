@@ -9,3 +9,8 @@ asset-sync:
   outbox:
     scheduler:
       enabled: false
+    retention:
+      enabled: false
+  sync:
+    recovery:
+      enabled: false

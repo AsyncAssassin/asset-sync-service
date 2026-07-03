@@ -1,0 +1,18 @@
+databaseChangeLog:
+  - changeSet:
+      id: 012-add-observed-transaction-block-height-check
+      author: AsyncAssassin
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            # Add NOT VALID first to avoid blocking older deployments on constraint creation, then
+            # validate immediately so migrated test/clean databases enforce the invariant fully.
+            sql: |
+              ALTER TABLE observed_transactions
+                  ADD CONSTRAINT ck_observed_transactions_block_height_non_negative
+                      CHECK (block_height >= 0) NOT VALID;
+
+              ALTER TABLE observed_transactions
+                  VALIDATE CONSTRAINT ck_observed_transactions_block_height_non_negative;

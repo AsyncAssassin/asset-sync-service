@@ -27,7 +27,14 @@ import org.springframework.test.context.ActiveProfiles
 @ActiveProfiles("local")
 @Import(TestcontainersConfiguration::class)
 @AutoConfigureObservability
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+    webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+    properties = [
+        "asset-sync.outbox.scheduler.enabled=false",
+        "asset-sync.outbox.retention.enabled=false",
+        "asset-sync.sync.recovery.enabled=false",
+    ],
+)
 class RealBootStartupSmokeTest(
     @Autowired private val restTemplate: TestRestTemplate,
 ) {

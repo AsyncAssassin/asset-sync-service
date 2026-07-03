@@ -66,9 +66,9 @@ class RequestIdLoggingIntegrationTests(
                 .header("X-Request-Id", hostile),
         ).andReturn().response.getHeader("X-Request-Id")
 
-        assertNotNull(echoed)
+        val boundedRequestId = assertNotNull(echoed)
         assertNotEquals(hostile, echoed)
-        assertTrue(echoed!!.length <= 128, "request id must be bounded")
+        assertTrue(boundedRequestId.length <= 128, "request id must be bounded")
     }
 
     private fun createAccount(): String {

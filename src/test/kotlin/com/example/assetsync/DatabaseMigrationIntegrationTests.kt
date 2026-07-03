@@ -83,6 +83,10 @@ class DatabaseMigrationIntegrationTests(
         }
 
         assertThrows<DataIntegrityViolationException> {
+            insertObservedTransaction(watchedAddressId, txHash = "0xnegative-block-height", blockHeight = -1)
+        }
+
+        assertThrows<DataIntegrityViolationException> {
             insertOutboxEvent(transactionId, duplicateOutboxKey)
             insertOutboxEvent(transactionId, duplicateOutboxKey)
         }
@@ -209,6 +213,7 @@ class DatabaseMigrationIntegrationTests(
         watchedAddressId: UUID,
         txHash: String = "0x${UUID.randomUUID().toString().replace("-", "")}",
         status: String = "SEEN",
+        blockHeight: Long = 1,
         confirmations: Int = 0,
     ): UUID {
         val transactionId = UUID.randomUUID()
@@ -232,12 +237,13 @@ class DatabaseMigrationIntegrationTests(
                 created_at,
                 updated_at
             )
-            VALUES (?, 'local-evm', ?, 0, ?, '0xobserved-address', 'USDC', 'INBOUND', ?, 1, ?, ?, ?, ?, ?, ?)
+            VALUES (?, 'local-evm', ?, 0, ?, '0xobserved-address', 'USDC', 'INBOUND', ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
             transactionId,
             txHash,
             watchedAddressId,
             BigDecimal("1.000000000000000000"),
+            blockHeight,
             confirmations,
             status,
             now(),
