@@ -57,6 +57,19 @@ asset-sync:
       batch-size: ${ASSET_SYNC_RECOVERY_BATCH_SIZE:100}
       fixed-delay: ${ASSET_SYNC_RECOVERY_FIXED_DELAY:5m}
       initial-delay: ${ASSET_SYNC_RECOVERY_INITIAL_DELAY:5m}
+    worker:
+      enabled: ${ASSET_SYNC_WORKER_ENABLED:true}
+      fixed-delay: ${ASSET_SYNC_WORKER_FIXED_DELAY:5s}
+      initial-delay: ${ASSET_SYNC_WORKER_INITIAL_DELAY:10s}
+      claim-batch-size: ${ASSET_SYNC_WORKER_CLAIM_BATCH_SIZE:10}
+      max-concurrency: ${ASSET_SYNC_WORKER_MAX_CONCURRENCY:4}
+      lease-duration: ${ASSET_SYNC_WORKER_LEASE_DURATION:60s}
+      heartbeat-interval: ${ASSET_SYNC_WORKER_HEARTBEAT_INTERVAL:20s}
+      max-attempts: ${ASSET_SYNC_WORKER_MAX_ATTEMPTS:5}
+      retry-backoff-base-delay: ${ASSET_SYNC_WORKER_RETRY_BACKOFF_BASE_DELAY:30s}
+      retry-backoff-max-delay: ${ASSET_SYNC_WORKER_RETRY_BACKOFF_MAX_DELAY:15m}
+      max-in-flight-runs: ${ASSET_SYNC_WORKER_MAX_IN_FLIGHT_RUNS:1000}
+      max-error-length: ${ASSET_SYNC_WORKER_MAX_ERROR_LENGTH:1024}
   outbox:
     batch-size: ${ASSET_SYNC_OUTBOX_BATCH_SIZE:50}
     retry-backoff-base-delay: ${ASSET_SYNC_OUTBOX_RETRY_BACKOFF_BASE_DELAY:30s}

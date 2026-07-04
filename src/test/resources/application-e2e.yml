@@ -18,3 +18,5 @@ asset-sync:
   sync:
     recovery:
       enabled: false
+    worker:
+      enabled: false

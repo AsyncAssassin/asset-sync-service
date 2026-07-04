@@ -197,7 +197,7 @@ curl -s http://localhost:18080/actuator/metrics/asset.sync.outbox.backlog.total
 curl -s http://localhost:18080/actuator/prometheus
 ```
 
-Optionally trigger sync with the local/test fake provider. With no scripted fake-provider events in a normal local run, this should complete successfully with zero provider events.
+Optionally trigger sync with the local/test fake provider. Sync POST is asynchronous: it returns `202 Accepted` and a `Location` for the durable `sync_run`. With no scripted fake-provider events in a normal local run, the background worker should complete the run successfully with zero provider events.
 
 ```bash
 SYNC_JSON=$(curl -s -X POST "http://localhost:18080/api/v1/addresses/${ADDRESS_ID}/sync")
@@ -271,6 +271,14 @@ Runtime configuration:
 | `ASSET_SYNC_OUTBOX_SCHEDULER_INITIAL_DELAY` | `10s` | Initial delay before first poll |
 | `ASSET_SYNC_OUTBOX_RETENTION_ENABLED` | `false` | Enables published outbox retention |
 | `ASSET_SYNC_SYNC_PROVIDER_TIMEOUT` | `10s` | Absolute provider fetch deadline per watched address; not a per-event idle timeout |
+| `ASSET_SYNC_SYNC_PROVIDER_MAX_THREADS` | `4` | Provider fetch isolation pool size |
+| `ASSET_SYNC_WORKER_ENABLED` | `true` | Enables the scheduled async sync worker |
+| `ASSET_SYNC_WORKER_CLAIM_BATCH_SIZE` | `10` | Due sync runs claimed per worker tick |
+| `ASSET_SYNC_WORKER_MAX_CONCURRENCY` | `4` | Local worker job concurrency; must be `<= ASSET_SYNC_SYNC_PROVIDER_MAX_THREADS` |
+| `ASSET_SYNC_WORKER_LEASE_DURATION` | `60s` | Lease duration for `RUNNING` sync runs |
+| `ASSET_SYNC_WORKER_HEARTBEAT_INTERVAL` | `20s` | Heartbeat cadence while a worker owns a run |
+| `ASSET_SYNC_WORKER_MAX_ATTEMPTS` | `5` | Attempts before retryable sync failure becomes terminal `FAILED` |
+| `ASSET_SYNC_WORKER_MAX_IN_FLIGHT_RUNS` | `1000` | Soft cap for `QUEUED + RUNNING` sync runs |
 
 ## Reliability Highlights
 
@@ -280,6 +288,8 @@ Runtime configuration:
 - jOOQ uses `INSERT ... ON CONFLICT` for idempotent observed-transaction and outbox writes.
 - Transactional outbox rows are inserted in the same database transaction as lifecycle state changes.
 - The outbox poller claims due rows with `FOR UPDATE SKIP LOCKED`, writes a lease to `next_attempt_at`, then completes each event with a fenced compare-and-set update.
+- Sync POST enqueues durable `sync_runs` and returns `202 Accepted`; the scheduled worker claims `QUEUED` runs with `FOR UPDATE SKIP LOCKED`, heartbeats `RUNNING` leases, and completes with `locked_by + lock_token` fencing.
+- Duplicate in-flight sync requests for the same address/account return the existing run instead of starting duplicate provider work.
 - Publishing is at-least-once; downstream consumers should deduplicate by event id or idempotency key.
 - Failed publishes store a bounded error message, use bounded retry backoff, and become terminal `DEAD` rows at max attempts.
 - A publish that succeeds but cannot be marked `PUBLISHED` is treated as a completion failure, not a publish failure: attempts are not incremented and the leased row is retried after the lease expires.

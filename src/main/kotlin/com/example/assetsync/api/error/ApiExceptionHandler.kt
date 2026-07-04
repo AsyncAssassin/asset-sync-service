@@ -8,6 +8,7 @@ import com.example.assetsync.application.account.UnsupportedChainException
 import com.example.assetsync.application.sync.AccountSyncTooLargeException
 import com.example.assetsync.application.sync.ProviderDataMismatchException
 import com.example.assetsync.application.sync.SyncCapacityExceededException
+import com.example.assetsync.application.sync.SyncQueueFullException
 import com.example.assetsync.application.sync.SyncProviderUnavailableException
 import com.example.assetsync.application.sync.SyncRunNotFoundException
 import com.example.assetsync.application.sync.WatchedAddressByIdNotFoundException
@@ -296,6 +297,20 @@ class ApiExceptionHandler {
             detail = "Too many concurrent syncs are in flight; retry shortly.",
             request = request,
             properties = mapOf("maxConcurrentSyncs" to exception.maxConcurrentSyncs),
+        )
+
+    @ExceptionHandler(SyncQueueFullException::class)
+    fun handleSyncQueueFull(
+        exception: SyncQueueFullException,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> =
+        problem(
+            status = HttpStatus.TOO_MANY_REQUESTS,
+            type = "sync-queue-full",
+            title = "Sync queue full",
+            detail = "Too many sync runs are queued or running; retry shortly.",
+            request = request,
+            properties = mapOf("maxInFlightRuns" to exception.maxInFlightRuns),
         )
 
     @ExceptionHandler(DataIntegrityViolationException::class)

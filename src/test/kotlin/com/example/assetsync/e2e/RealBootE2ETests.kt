@@ -1,10 +1,14 @@
 package com.example.assetsync.e2e
 
 import com.example.assetsync.TestcontainersConfiguration
+import com.example.assetsync.application.sync.SyncApplicationService
+import com.example.assetsync.application.sync.SyncRunLifecycleService
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
+import java.util.UUID
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeEach
@@ -44,6 +48,8 @@ class RealBootE2ETests(
     @Autowired private val jdbcTemplate: JdbcTemplate,
     @Autowired private val userDetailsManager: UserDetailsManager,
     @Autowired private val passwordEncoder: PasswordEncoder,
+    @Autowired private val syncRunLifecycleService: SyncRunLifecycleService,
+    @Autowired private val syncApplicationService: SyncApplicationService,
 ) {
 
     @BeforeEach
@@ -93,8 +99,11 @@ class RealBootE2ETests(
         // 5) Operator sync drives the REAL HttpChainProvider -> in-test stub -> ingestion.
         val sync = operator()
             .postForEntity("/api/v1/addresses/$addressId/sync", HttpEntity<Void>(HttpHeaders()), Map::class.java)
-        assertEquals(HttpStatus.OK, sync.statusCode)
-        assertEquals("SUCCEEDED", sync.body!!["status"])
+        assertEquals(HttpStatus.ACCEPTED, sync.statusCode)
+        assertEquals("QUEUED", sync.body!!["status"])
+        assertNotNull(sync.headers.location)
+        runNextClaimedSync()
+        assertEquals("SUCCEEDED", syncRunStatus(sync.body!!["id"] as String))
         assertEquals(1, jdbcTemplate.queryForObject("SELECT count(*) FROM observed_transactions", Int::class.java))
         assertEquals(1, jdbcTemplate.queryForObject("SELECT count(*) FROM outbox_events", Int::class.java))
 
@@ -130,6 +139,24 @@ class RealBootE2ETests(
         jdbcTemplate.update("DELETE FROM watched_addresses")
         jdbcTemplate.update("DELETE FROM accounts")
     }
+
+    private fun runNextClaimedSync() {
+        val claimed = syncRunLifecycleService.claimDueRuns(
+            workerId = "e2e-test-worker-${UUID.randomUUID()}",
+            limit = 1,
+        )
+        assertEquals(1, claimed.size)
+        syncApplicationService.executeClaimedSyncRun(claimed.single())
+    }
+
+    private fun syncRunStatus(syncRunId: String): String =
+        requireNotNull(
+            jdbcTemplate.queryForObject(
+                "SELECT status FROM sync_runs WHERE id = ?",
+                String::class.java,
+                UUID.fromString(syncRunId),
+            ),
+        )
 
     companion object {
         private val providerStub: HttpServer = HttpServer.create(InetSocketAddress(0), 0).apply {

@@ -1,9 +1,9 @@
 # asset-sync-service Architecture
 
-Status: MVP implemented through Phase 10  
+Status: MVP implemented through async sync
 Scope: MVP backend service  
 Stack: Kotlin, Spring Boot 3.x, Spring MVC, jOOQ, PostgreSQL, Liquibase, Testcontainers, Docker Compose, OpenAPI, transactional outbox  
-Last updated: 2026-06-20
+Last updated: 2026-07-04
 
 ## 1. Assumptions
 
@@ -148,25 +148,29 @@ sequenceDiagram
     participant Client
     participant API as SyncController
     participant Sync as SyncApplicationService
+    participant Worker as SyncRunWorkerJob
     participant Provider as ActiveChainProvider
     participant Ingest as ObservedTransactionIngestionService
     participant DB as PostgreSQL
 
     Client->>API: POST /api/v1/addresses/{addressId}/sync
-    API->>Sync: syncAddress(addressId)
-    Sync->>DB: create sync_run STARTED
-    Sync->>Provider: fetchEvents(address)
-    Provider-->>Sync: observed events
+    API->>Sync: enqueue address sync
+    Sync->>DB: insert or reuse sync_run QUEUED
+    API-->>Client: 202 Accepted + Location
+    Worker->>DB: claim due QUEUED run FOR UPDATE SKIP LOCKED
+    Worker->>DB: mark RUNNING with lease + lock_token
+    Worker->>Provider: fetchEvents(address)
+    Provider-->>Worker: observed events
     loop each event
-        Sync->>Ingest: ingest(event)
+        Worker->>Ingest: ingest(event)
         Ingest->>DB: transactional upsert + outbox
     end
-    Sync->>DB: mark sync_run SUCCEEDED
-    Sync-->>API: SyncRunResponse
-    API-->>Client: 200 OK
+    Worker->>DB: fenced mark SUCCEEDED, FAILED, or QUEUED retry
+    Client->>API: GET /api/v1/sync-runs/{id}
+    API-->>Client: current run state
 ```
 
-The provider call is outside the observed event ingestion transaction. `asset-sync.sync.provider-timeout` is an absolute deadline for the full provider fetch path for one watched address, not a per-item idle timeout. A provider timeout must not hold database locks.
+The provider call is outside the observed event ingestion transaction and outside the POST request. `asset-sync.sync.provider-timeout` is an absolute deadline for the full provider fetch path for one watched address, not a per-item idle timeout. A provider timeout must not hold database locks. Completion is fenced by `locked_by`, `lock_token`, and `attempts`, so stale owners cannot overwrite a recovered or terminal run.
 
 ### Observed Event Ingestion
 
@@ -330,7 +334,7 @@ OutboxEvent:
 - Durable integration event created inside the same database transaction as the observed transaction change.
 
 SyncRun:
-- Diagnostic record for manual or scheduled sync execution.
+- Durable queue and diagnostic record for manual or scheduled sync execution.
 - Not a source of truth for transaction state.
 
 ### Enums
@@ -516,24 +520,36 @@ Key columns:
 - `target_type text not null`
 - `target_id uuid not null`
 - `status text not null`
-- `started_at timestamptz not null`
+- `queued_at timestamptz not null`
+- `started_at timestamptz null`
 - `finished_at timestamptz null`
 - `events_seen integer not null default 0`
 - `events_changed integer not null default 0`
 - `last_error text null`
+- `attempts integer not null default 0`
+- `next_attempt_at timestamptz not null`
+- `locked_by varchar(200) null`
+- `lock_token uuid null`
+- `locked_until timestamptz null`
+- `heartbeat_at timestamptz null`
 - `created_at timestamptz not null`
 - `updated_at timestamptz not null`
 
 Constraints and indexes:
 - `index (target_type, target_id, started_at desc)`
 - `index (status, started_at desc)`
+- partial due index on `(next_attempt_at, queued_at, id) where status = 'QUEUED'`
+- partial expired-running index on `(locked_until, started_at, id) where status = 'RUNNING'`
+- partial unique in-flight target index on `(target_type, target_id) where status in ('QUEUED','RUNNING')`
 - `check (target_type in ('ACCOUNT', 'ADDRESS'))`
-- `check (status in ('STARTED', 'SUCCEEDED', 'FAILED'))`
+- `check (status in ('STARTED', 'QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED'))`
 - `check (events_seen >= 0)`
 - `check (events_changed >= 0)`
+- `check (attempts >= 0)`
+- lock fields are required for `RUNNING` and null for non-`RUNNING`
 
 Rationale:
-- Sync runs are operational records for troubleshooting and API inspection.
+- Sync runs are operational records for troubleshooting, API inspection, and durable worker claiming.
 - They are not used as transaction idempotency keys.
 
 ### Liquibase Changelog Structure
@@ -623,19 +639,25 @@ Response:
 
 Response:
 
+```http
+HTTP/1.1 202 Accepted
+Location: /api/v1/sync-runs/067bdcd7-23c9-44c5-ac73-caeef65ca5ab
+```
+
 ```json
 {
   "id": "067bdcd7-23c9-44c5-ac73-caeef65ca5ab",
   "targetType": "ADDRESS",
   "targetId": "6df29db1-96d2-4665-8945-266c7f90138e",
-  "status": "SUCCEEDED",
-  "eventsSeen": 5,
-  "eventsChanged": 2,
+  "status": "QUEUED",
+  "eventsSeen": 0,
+  "eventsChanged": 0,
   "lastError": null,
-  "startedAt": "2026-06-19T00:00:00Z",
-  "finishedAt": "2026-06-19T00:00:02Z",
+  "queuedAt": "2026-06-19T00:00:00Z",
+  "startedAt": null,
+  "finishedAt": null,
   "createdAt": "2026-06-19T00:00:00Z",
-  "updatedAt": "2026-06-19T00:00:02Z"
+  "updatedAt": "2026-06-19T00:00:00Z"
 }
 ```
 
@@ -685,7 +707,9 @@ Duplicate no-op response:
 - `400 Bad Request`: invalid request shape, invalid amount, invalid enum value, negative confirmation count.
 - `404 Not Found`: account, watched address, unsupported chain, or sync run not found.
 - `409 Conflict`: duplicate watched address or immutable observed transaction field mismatch.
-- `503 Service Unavailable`: provider timeout, provider unavailable, or PostgreSQL unavailable.
+- `503 Service Unavailable`: request-time infrastructure failure, such as PostgreSQL unavailable.
+
+Provider timeout or unavailability during async sync worker execution does not change the already-returned `202 Accepted` POST response. The worker records retry or terminal `FAILED` state on the `sync_run`, and clients inspect it through `GET /api/v1/sync-runs/{id}`.
 
 ProblemDetail example:
 
@@ -744,10 +768,11 @@ Mutable fields:
 Sync operations can be retried safely because each observed transaction event is idempotent. `sync_runs` records are diagnostic and do not define business idempotency.
 
 Sync flow:
-- Create `sync_run`.
-- Call provider outside a database transaction.
+- POST creates or reuses a `QUEUED` `sync_run` and returns `202 Accepted`.
+- A scheduled worker claims due rows with `FOR UPDATE SKIP LOCKED`, marks them `RUNNING`, and sets a lease token.
+- Call provider outside a database transaction and outside the request thread.
 - Ingest each event transactionally.
-- Mark sync run as `SUCCEEDED` or `FAILED`.
+- Fenced completion marks the run `SUCCEEDED`, `FAILED`, or `QUEUED` for retry.
 
 ### Reorg Idempotency
 
@@ -838,10 +863,11 @@ Do not keep a database transaction open while calling the chain provider.
 Recommended sync sequence:
 
 ```text
-1. Create sync_run in a short transaction.
-2. Call the active chain provider outside a database transaction.
-3. Ingest each event in its own transaction.
-4. Mark sync_run as SUCCEEDED or FAILED in a short transaction.
+1. Insert sync_run with status QUEUED in a short transaction, or return an existing QUEUED/RUNNING run for the same target.
+2. Worker claims due QUEUED rows with FOR UPDATE SKIP LOCKED and writes RUNNING lease fields.
+3. Worker calls the active chain provider outside a database transaction.
+4. Ingest each event in its own transaction.
+5. Fenced completion updates sync_run to SUCCEEDED, FAILED, or QUEUED retry.
 ```
 
 Concurrency controls:
@@ -933,8 +959,9 @@ Publisher publishes twice:
 - Downstream consumers deduplicate by event id or idempotency key.
 
 Concurrent sync for same address:
-- Duplicate provider work is possible, but event ingestion remains safe.
-- Optional advisory lock can be added later.
+- Duplicate POSTs for the exact same address or account return the existing in-flight run.
+- Duplicate provider work is still possible after lease recovery or process crash, but event ingestion remains safe.
+- Optional advisory lock can be added later for stricter global admission control.
 
 PostgreSQL unavailable:
 - API returns `503`.
@@ -942,9 +969,10 @@ PostgreSQL unavailable:
 - No fake success response is returned.
 
 Provider timeout:
-- Sync run is marked `FAILED`.
+- Worker stores concise failure detail and requeues with backoff until max attempts.
+- At max attempts the run is marked `FAILED`.
 - Already ingested committed events remain valid.
-- If `markFailed` itself fails, the provider timeout/unavailable error remains primary and the mark failure is logged as suppressed diagnostic context.
+- POST already returned `202 Accepted`; clients observe the outcome through `GET /api/v1/sync-runs/{id}`.
 
 App crashes after DB commit before publish:
 - Outbox poller resumes after restart and publishes pending events.

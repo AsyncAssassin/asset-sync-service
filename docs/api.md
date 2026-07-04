@@ -22,8 +22,9 @@ Conventions:
 Compatibility rules:
 
 - Additive response fields are allowed in `/api/v1`.
-- Existing field semantics, enum names, and status code meanings are stable within `/api/v1`.
-- Breaking changes require a new URL version.
+- The current service is still a pre-production MVP. The async sync change intentionally keeps
+  `/api/v1` while changing sync POST semantics from final `200 OK` to enqueue-only `202 Accepted`.
+- Future production breaking changes should use a new URL version.
 
 ## 2. MVP Endpoints
 
@@ -366,7 +367,7 @@ Response shape is the same transaction object used by the list endpoint.
 
 ## 10. Start Address Sync
 
-Starts a sync for one watched address using the active chain provider. Local/test profiles use the fake provider; non-local/test profiles use the HTTP provider. The provider call must not run inside a database transaction.
+Enqueues a durable sync run for one watched address. The POST request validates that the address exists, creates or reuses an in-flight `sync_runs` row, and returns before provider work starts. Local/test profiles use the fake provider; non-local/test profiles use the HTTP provider from the background worker.
 
 Request:
 
@@ -377,7 +378,8 @@ POST /api/v1/addresses/6df29db1-96d2-4665-8945-266c7f90138e/sync
 Response:
 
 ```http
-HTTP/1.1 200 OK
+HTTP/1.1 202 Accepted
+Location: /api/v1/sync-runs/067bdcd7-23c9-44c5-ac73-caeef65ca5ab
 ```
 
 ```json
@@ -385,36 +387,37 @@ HTTP/1.1 200 OK
   "id": "067bdcd7-23c9-44c5-ac73-caeef65ca5ab",
   "targetType": "ADDRESS",
   "targetId": "6df29db1-96d2-4665-8945-266c7f90138e",
-  "status": "SUCCEEDED",
-  "eventsSeen": 5,
-  "eventsChanged": 2,
+  "status": "QUEUED",
+  "eventsSeen": 0,
+  "eventsChanged": 0,
   "lastError": null,
-  "startedAt": "2026-06-19T00:00:00Z",
-  "finishedAt": "2026-06-19T00:00:02Z",
+  "queuedAt": "2026-06-19T00:00:00Z",
+  "startedAt": null,
+  "finishedAt": null,
   "createdAt": "2026-06-19T00:00:00Z",
-  "updatedAt": "2026-06-19T00:00:02Z"
+  "updatedAt": "2026-06-19T00:00:00Z"
 }
 ```
 
 Behavior:
 
-- Create a `sync_runs` row in a short transaction.
-- Fetch events from the active chain provider outside a database transaction.
+- Duplicate in-flight requests for the same target return the existing `QUEUED` or `RUNNING` run with `202 Accepted` and the same `Location`.
+- If no duplicate exists and the soft queue cap is full, the API returns `429 sync-queue-full`.
+- The worker claims due `QUEUED` rows, marks them `RUNNING`, and fetches events from the active chain provider outside a database transaction.
 - `asset-sync.sync.provider-timeout` is the absolute provider fetch deadline for each watched address. It is not a per-event idle timeout; slow trickle streams cannot extend the deadline by yielding one item just before each poll expires.
 - Ingest each event through the same observed-event ingestion path used by the API.
-- Mark the sync run `SUCCEEDED` or `FAILED` in a short transaction.
-- Return `200 OK` with the final sync run state. The MVP sync contract is synchronous; a future async API should use `202 Accepted` plus a pollable run location.
+- Mark the sync run `SUCCEEDED`, `FAILED`, or requeue it as `QUEUED` in a short fenced transaction.
 - Retrying a sync is safe because observed event ingestion is idempotent. `sync_runs` records are diagnostic and are not business idempotency keys.
 
 Failure behavior:
 
-- Provider timeout or provider unavailability marks the sync run `FAILED` and returns a `503 Service Unavailable` response. If recording the failed state itself fails, the API still reports provider unavailability with the original provider cause preserved for logs.
+- Provider timeout or provider unavailability no longer bubbles to POST. The worker stores concise failure detail in `lastError` and either requeues the run with backoff or marks it `FAILED` after max attempts.
 - Events committed before a provider failure remain valid.
-- The API must not report success if the final sync run state is `FAILED`.
+- The API must not report provider completion from POST; clients poll `GET /api/v1/sync-runs/{id}`.
 
 ## 11. Start Account Sync
 
-Starts sync for all active watched addresses under one account.
+Enqueues sync for all active watched addresses under one account. The POST behavior is the same as address sync: validate account existence, create or reuse an in-flight run, and return `202 Accepted` with a pollable location.
 
 Request:
 
@@ -425,7 +428,8 @@ POST /api/v1/accounts/4f6f3d3a-40b5-46fd-86cc-7105d19f17d1/sync
 Response:
 
 ```http
-HTTP/1.1 200 OK
+HTTP/1.1 202 Accepted
+Location: /api/v1/sync-runs/53059d5b-4813-4d6d-9f8e-6f993744e879
 ```
 
 ```json
@@ -433,14 +437,15 @@ HTTP/1.1 200 OK
   "id": "53059d5b-4813-4d6d-9f8e-6f993744e879",
   "targetType": "ACCOUNT",
   "targetId": "4f6f3d3a-40b5-46fd-86cc-7105d19f17d1",
-  "status": "SUCCEEDED",
-  "eventsSeen": 12,
-  "eventsChanged": 4,
+  "status": "QUEUED",
+  "eventsSeen": 0,
+  "eventsChanged": 0,
   "lastError": null,
-  "startedAt": "2026-06-19T00:00:00Z",
-  "finishedAt": "2026-06-19T00:00:04Z",
+  "queuedAt": "2026-06-19T00:00:00Z",
+  "startedAt": null,
+  "finishedAt": null,
   "createdAt": "2026-06-19T00:00:00Z",
-  "updatedAt": "2026-06-19T00:00:04Z"
+  "updatedAt": "2026-06-19T00:00:00Z"
 }
 ```
 
@@ -449,8 +454,8 @@ Behavior:
 - Resolve active watched addresses in bounded pages.
 - Call the active chain provider once per watched address.
 - Ingest each provider event independently.
-- A provider failure should fail the overall sync run unless implementation explicitly records partial success in a later version.
-- Accounts over the synchronous address cap are rejected with `400`.
+- A retryable provider failure requeues the overall sync run unless max attempts has been reached.
+- Accounts over the configured address cap are terminal `FAILED` during worker execution.
 
 ## 12. Get Sync Run
 
@@ -471,12 +476,15 @@ Response:
   "eventsSeen": 5,
   "eventsChanged": 2,
   "lastError": null,
+  "queuedAt": "2026-06-19T00:00:00Z",
   "startedAt": "2026-06-19T00:00:00Z",
   "finishedAt": "2026-06-19T00:00:02Z",
   "createdAt": "2026-06-19T00:00:00Z",
   "updatedAt": "2026-06-19T00:00:02Z"
 }
 ```
+
+Possible statuses are `QUEUED`, `RUNNING`, `SUCCEEDED`, and `FAILED`. Legacy `STARTED` may be visible for pre-async rows until recovery or an operator runbook drains them. `startedAt` is nullable while a run is still `QUEUED`.
 
 ## 13. ProblemDetail Error Mapping
 
@@ -494,8 +502,8 @@ Common mappings:
 | Duplicate watched address | 409 | `https://asset-sync-service/errors/duplicate-watched-address` |
 | Immutable observed transaction conflict | 409 | `https://asset-sync-service/errors/immutable-field-conflict` |
 | Database constraint violation from non-HTTP ingest paths | 400 | `https://asset-sync-service/errors/database-constraint-violation` |
-| Account sync exceeds the synchronous address cap | 400 | `https://asset-sync-service/errors/sync-account-too-large` |
-| Provider timeout or unavailable | 503 | `https://asset-sync-service/errors/provider-unavailable` |
+| Sync queue is full | 429 | `https://asset-sync-service/errors/sync-queue-full` |
+| Provider timeout or unavailable during async execution | Stored on sync run | n/a |
 | PostgreSQL unavailable | 503 | `https://asset-sync-service/errors/database-unavailable` |
 
 Example:
@@ -514,7 +522,7 @@ Example:
 }
 ```
 
-Responses echo `X-Request-Id` when supplied, or generate and return one when absent. The request id is stored in logging MDC for the servlet request and is copied into provider executor tasks used by sync, then restored/cleared after the async provider work completes.
+Responses echo `X-Request-Id` when supplied, or generate and return one when absent. The request id is stored in logging MDC for the servlet request. Background sync worker logs use sync-run and worker identifiers because provider work no longer runs inside the original HTTP request.
 
 ## 14. Future Extensions
 

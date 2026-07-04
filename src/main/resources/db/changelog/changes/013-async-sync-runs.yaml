@@ -1,0 +1,83 @@
+databaseChangeLog:
+  - changeSet:
+      id: 013-async-sync-runs
+      author: AsyncAssassin
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            sql: |
+              ALTER TABLE sync_runs
+                  ADD COLUMN queued_at timestamptz,
+                  ADD COLUMN locked_by varchar(200),
+                  ADD COLUMN lock_token uuid,
+                  ADD COLUMN locked_until timestamptz,
+                  ADD COLUMN heartbeat_at timestamptz,
+                  ADD COLUMN attempts integer NOT NULL DEFAULT 0,
+                  ADD COLUMN next_attempt_at timestamptz;
+
+              UPDATE sync_runs
+              SET queued_at = COALESCE(queued_at, started_at, created_at),
+                  next_attempt_at = COALESCE(next_attempt_at, started_at, created_at),
+                  attempts = 0,
+                  locked_by = NULL,
+                  lock_token = NULL,
+                  locked_until = NULL,
+                  heartbeat_at = NULL
+              WHERE queued_at IS NULL OR next_attempt_at IS NULL;
+
+              ALTER TABLE sync_runs
+                  ALTER COLUMN queued_at SET NOT NULL,
+                  ALTER COLUMN next_attempt_at SET NOT NULL,
+                  ALTER COLUMN started_at DROP NOT NULL;
+
+              ALTER TABLE sync_runs DROP CONSTRAINT ck_sync_runs_status;
+              ALTER TABLE sync_runs
+                  ADD CONSTRAINT ck_sync_runs_status
+                      CHECK (status IN ('STARTED', 'QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED')),
+                  ADD CONSTRAINT ck_sync_runs_attempts_non_negative
+                      CHECK (attempts >= 0),
+                  ADD CONSTRAINT ck_sync_runs_started_at_by_status
+                      CHECK (status = 'QUEUED' OR started_at IS NOT NULL) NOT VALID,
+                  ADD CONSTRAINT ck_sync_runs_finished_at_by_status
+                      CHECK (
+                          (status IN ('SUCCEEDED', 'FAILED') AND finished_at IS NOT NULL)
+                          OR (status IN ('STARTED', 'QUEUED', 'RUNNING') AND finished_at IS NULL)
+                      ) NOT VALID,
+                  ADD CONSTRAINT ck_sync_runs_lock_fields_by_status
+                      CHECK (
+                          (
+                              status = 'RUNNING'
+                              AND locked_by IS NOT NULL
+                              AND lock_token IS NOT NULL
+                              AND locked_until IS NOT NULL
+                              AND heartbeat_at IS NOT NULL
+                          )
+                          OR (
+                              status <> 'RUNNING'
+                              AND locked_by IS NULL
+                              AND lock_token IS NULL
+                              AND locked_until IS NULL
+                              AND heartbeat_at IS NULL
+                          )
+                      ) NOT VALID,
+                  ADD CONSTRAINT ck_sync_runs_locked_by_length
+                      CHECK (locked_by IS NULL OR char_length(locked_by) <= 200),
+                  ADD CONSTRAINT ck_sync_runs_last_error_length
+                      CHECK (last_error IS NULL OR char_length(last_error) <= 1024) NOT VALID;
+
+              CREATE INDEX idx_sync_runs_due_queue_partial
+                  ON sync_runs (next_attempt_at, queued_at, id)
+                  WHERE status = 'QUEUED';
+
+              CREATE INDEX idx_sync_runs_expired_running_partial
+                  ON sync_runs (locked_until, started_at, id)
+                  WHERE status = 'RUNNING';
+
+              CREATE UNIQUE INDEX uq_sync_runs_in_flight_target_partial
+                  ON sync_runs (target_type, target_id)
+                  WHERE status IN ('QUEUED', 'RUNNING');
+
+              CREATE INDEX idx_sync_runs_target_type_target_id_queued_at
+                  ON sync_runs (target_type, target_id, queued_at DESC);

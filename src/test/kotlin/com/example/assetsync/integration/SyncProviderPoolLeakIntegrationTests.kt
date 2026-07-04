@@ -1,6 +1,8 @@
 package com.example.assetsync.integration
 
 import com.example.assetsync.TestcontainersConfiguration
+import com.example.assetsync.application.sync.SyncApplicationService
+import com.example.assetsync.application.sync.SyncRunLifecycleService
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
@@ -10,7 +12,6 @@ import java.math.BigDecimal
 import java.sql.Timestamp
 import java.time.Instant
 import java.util.UUID
-import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
@@ -35,7 +36,12 @@ import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
  */
 @ActiveProfiles("test")
 @Import(TestcontainersConfiguration::class)
-@SpringBootTest(properties = ["asset-sync.sync.provider-max-threads=1"])
+@SpringBootTest(
+    properties = [
+        "asset-sync.sync.provider-max-threads=1",
+        "asset-sync.sync.worker.max-concurrency=1",
+    ],
+)
 @AutoConfigureMockMvc
 // Own context: this test intentionally stresses the size-1 provider pool; a fresh, disposed-after
 // context isolates that state from the other pool-1 test.
@@ -45,6 +51,8 @@ class SyncProviderPoolLeakIntegrationTests(
     @Autowired private val objectMapper: ObjectMapper,
     @Autowired private val jdbcTemplate: JdbcTemplate,
     @Autowired private val fakeChainProvider: FakeChainProvider,
+    @Autowired private val syncRunLifecycleService: SyncRunLifecycleService,
+    @Autowired private val syncApplicationService: SyncApplicationService,
 ) {
 
     @BeforeEach
@@ -73,8 +81,9 @@ class SyncProviderPoolLeakIntegrationTests(
             asset = "USDC",
             events = (1..300).map { providerEvent(txHash = "0xflood-$it", address = "0xmismatch") },
         )
-        mockMvc.perform(post("/api/v1/addresses/$leakAddress/sync"))
-            .andExpect(status().isBadGateway)
+        val failedRunId = submitSync(leakAddress)
+        runNextClaimedSync()
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", failedRunId))
 
         // The single pool thread must be free again. Poll briefly to absorb the producer's unwind
         // window; a real leak (pre-fix) never releases the thread, so this stays red on the old code.
@@ -84,20 +93,25 @@ class SyncProviderPoolLeakIntegrationTests(
             asset = "USDC",
             events = listOf(providerEvent(txHash = "0xhealthy", address = "0xleak-b")),
         )
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-        var lastStatus = 0
-        var lastBody = ""
-        while (System.nanoTime() < deadline) {
-            val result = mockMvc.perform(post("/api/v1/addresses/$healthyAddress/sync")).andReturn()
-            lastStatus = result.response.status
-            lastBody = result.response.contentAsString
-            if (lastStatus == 200) {
-                break
-            }
-            Thread.sleep(100)
-        }
-        assertEquals(200, lastStatus, "provider pool did not recover after the aborted flooding sync")
-        assertEquals("SUCCEEDED", objectMapper.readTree(lastBody)["status"].asText())
+        val healthyRunId = submitSync(healthyAddress)
+        runNextClaimedSync()
+        assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", healthyRunId))
+    }
+
+    private fun submitSync(addressId: String): UUID {
+        val result = mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
+            .andExpect(status().isAccepted)
+            .andReturn()
+        return UUID.fromString(objectMapper.readTree(result.response.contentAsString)["id"].asText())
+    }
+
+    private fun runNextClaimedSync() {
+        val claimed = syncRunLifecycleService.claimDueRuns(
+            workerId = "leak-test-worker-${UUID.randomUUID()}",
+            limit = 1,
+        )
+        assertEquals(1, claimed.size)
+        syncApplicationService.executeClaimedSyncRun(claimed.single())
     }
 
     private fun createAccount(): String {
@@ -152,4 +166,7 @@ class SyncProviderPoolLeakIntegrationTests(
             Timestamp.from(Instant.now()),
         )
     }
+
+    private fun singleString(sql: String, vararg args: Any): String =
+        requireNotNull(jdbcTemplate.queryForObject(sql, String::class.java, *args))
 }

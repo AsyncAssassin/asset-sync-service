@@ -33,6 +33,7 @@ import org.springframework.test.context.ActiveProfiles
         "asset-sync.outbox.scheduler.enabled=false",
         "asset-sync.outbox.retention.enabled=false",
         "asset-sync.sync.recovery.enabled=false",
+        "asset-sync.sync.worker.enabled=false",
     ],
 )
 class RealBootStartupSmokeTest(

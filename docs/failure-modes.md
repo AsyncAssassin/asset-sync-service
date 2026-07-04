@@ -123,11 +123,11 @@ Scenario:
 
 Expected behavior:
 
-- Provider call is outside a database transaction.
+- Sync POST has already returned `202 Accepted`; provider failure is observed through `GET /api/v1/sync-runs/{id}`.
+- Provider call is outside a database transaction and outside the request thread.
 - `asset-sync.sync.provider-timeout` is a total deadline for the provider fetch path for one watched address, not an idle timeout between provider events.
-- The current `sync_run` is marked `FAILED` in a short transaction.
-- If the final `markFailed` write fails, the original provider timeout/unavailable error remains the primary error and the database failure is attached for logs/diagnostics.
-- API returns `503 Service Unavailable`.
+- Retryable provider failures requeue the current `sync_run` as `QUEUED` with bounded backoff.
+- At max attempts, the current `sync_run` is marked `FAILED` in a short fenced transaction.
 - Events already committed before the timeout remain valid.
 - No long-lived database locks are held while waiting for provider response.
 
@@ -188,8 +188,9 @@ Scenario:
 
 Expected behavior:
 
-- Duplicate provider work is possible in the MVP.
-- Each sync has its own `sync_runs` row.
+- Duplicate in-flight target lookup happens before the queue cap.
+- Both clients receive `202 Accepted` for the same existing `QUEUED` or `RUNNING` `sync_runs` row.
+- Exact-target single-flight is enforced by a partial unique index on `target_type, target_id where status in ('QUEUED','RUNNING')`.
 - Observed event ingestion remains safe through natural unique keys and row locks.
 - Duplicate events return `NoChange`.
 - Outbox idempotency keys prevent duplicate lifecycle events.
@@ -199,12 +200,44 @@ Operational signal:
 - Log each sync run independently.
 - Track duplicate processing metrics when implemented.
 
-Future extension:
+Notes:
 
-- Add PostgreSQL advisory locks per address or account to reduce duplicate provider work.
-- This is not part of the MVP.
+- Duplicate provider work can still happen after process crash or lease recovery because sync execution is at-least-once.
+- Advisory locks or a counter table can be added later if operators need stricter global admission guarantees.
 
-## 11. Future Failure Modes
+## 11. Expired Running Sync Lease
+
+Scenario:
+
+- A worker claims a `QUEUED` sync run, marks it `RUNNING`, then crashes or loses progress before fenced completion.
+
+Expected behavior:
+
+- Recovery finds expired `RUNNING` rows with `locked_until < now()` using `FOR UPDATE SKIP LOCKED`.
+- If `attempts < maxAttempts`, recovery requeues the row as `QUEUED`, sets a future `next_attempt_at`, records concise `last_error`, and clears `locked_by`, `lock_token`, `locked_until`, and `heartbeat_at`.
+- If `attempts >= maxAttempts`, recovery marks the row `FAILED`, sets `finished_at`, records concise `last_error`, and clears lock fields.
+- Recovery never overwrites `SUCCEEDED` or `FAILED` rows.
+- Legacy stale `STARTED` recovery remains separate for rolling deploy compatibility.
+
+Operational signal:
+
+- Log recovered run id, target, attempts, and whether the run was requeued or failed.
+- A stale worker completion after recovery affects zero rows because fenced completion requires matching `locked_by`, `lock_token`, and `attempts`.
+
+## 12. Process Crash During Sync Execution
+
+Scenario:
+
+- The process crashes after provider work or partial event ingestion but before sync-run completion.
+
+Expected behavior:
+
+- Already committed observed events and outbox rows remain valid.
+- The `RUNNING` sync run is recovered after lease expiry and may execute again.
+- Duplicate future provider events are safe because observed-event ingestion is idempotent.
+- This is at-least-once sync execution, not exactly-once provider work.
+
+## 13. Future Failure Modes
 
 Deferred areas:
 

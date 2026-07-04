@@ -26,6 +26,7 @@ import org.springframework.test.context.ActiveProfiles
         "asset-sync.provider.base-url=http://localhost:1",
         "asset-sync.outbox.scheduler.enabled=false",
         "asset-sync.sync.recovery.enabled=false",
+        "asset-sync.sync.worker.enabled=false",
     ],
 )
 class DemoDataSeederIntegrationTests(

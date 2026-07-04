@@ -3,12 +3,13 @@ package com.example.assetsync.integration
 import com.example.assetsync.TestcontainersConfiguration
 import com.example.assetsync.application.outbox.OutboxProcessingService
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
+import com.example.assetsync.application.sync.SyncApplicationService
+import com.example.assetsync.application.sync.SyncRunLifecycleService
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
 import com.example.assetsync.infrastructure.outbox.OutboxPublisherJob
 import com.example.assetsync.infrastructure.provider.FakeChainProvider
 import com.example.assetsync.infrastructure.provider.FakeChainProviderHealthIndicator
-import com.example.assetsync.infrastructure.provider.FakeChainProviderStep
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.core.instrument.MeterRegistry
@@ -59,6 +60,8 @@ class ObservabilityIntegrationTests(
     @Autowired private val outboxProcessingService: OutboxProcessingService,
     @Autowired private val publisher: ControlledOutboxEventPublisher,
     @Autowired private val applicationContext: ApplicationContext,
+    @Autowired private val syncRunLifecycleService: SyncRunLifecycleService,
+    @Autowired private val syncApplicationService: SyncApplicationService,
 ) {
 
     @BeforeEach
@@ -154,7 +157,8 @@ class ObservabilityIntegrationTests(
 
     @Test
     fun `sync success and failure increment sync and provider metrics`() {
-        val startedBefore = counterCount("asset.sync.sync.runs", "targetType", "ADDRESS", "status", "STARTED")
+        val queuedBefore = counterCount("asset.sync.sync.runs", "targetType", "ADDRESS", "status", "QUEUED")
+        val runningBefore = counterCount("asset.sync.sync.runs", "targetType", "ADDRESS", "status", "RUNNING")
         val succeededBefore = counterCount("asset.sync.sync.runs", "targetType", "ADDRESS", "status", "SUCCEEDED")
         val failedBefore = counterCount("asset.sync.sync.runs", "targetType", "ADDRESS", "status", "FAILED")
         val providerAttemptsBefore = counterCount(
@@ -203,23 +207,29 @@ class ObservabilityIntegrationTests(
         )
 
         mockMvc.perform(post("/api/v1/addresses/$successAddressId/sync"))
-            .andExpect(status().isOk)
+            .andExpect(status().isAccepted)
+        runNextClaimedSync()
 
         val failureAddress = createWatchedAddress(address = "0xmetrics-sync-failure")
         val failureAddressId = failureAddress["id"].asText()
-        fakeChainProvider.setScript(
+        fakeChainProvider.setEvents(
             chainId = "local-evm",
             address = "0xmetrics-sync-failure",
             asset = "USDC",
-            steps = listOf(FakeChainProviderStep.Failure("Provider timeout")),
+            events = listOf(providerEvent(txHash = "0xmetrics-sync-failure", address = "0xmetrics-sync-mismatch")),
         )
 
         mockMvc.perform(post("/api/v1/addresses/$failureAddressId/sync"))
-            .andExpect(status().isServiceUnavailable)
+            .andExpect(status().isAccepted)
+        runNextClaimedSync()
 
         assertEquals(
-            startedBefore + 2.0,
-            counterCount("asset.sync.sync.runs", "targetType", "ADDRESS", "status", "STARTED"),
+            queuedBefore + 2.0,
+            counterCount("asset.sync.sync.runs", "targetType", "ADDRESS", "status", "QUEUED"),
+        )
+        assertEquals(
+            runningBefore + 2.0,
+            counterCount("asset.sync.sync.runs", "targetType", "ADDRESS", "status", "RUNNING"),
         )
         assertEquals(
             succeededBefore + 1.0,
@@ -290,8 +300,8 @@ class ObservabilityIntegrationTests(
         )
 
         mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
-            .andExpect(status().isBadGateway)
-            .andExpect(jsonPath("$.title").value("Provider returned invalid data"))
+            .andExpect(status().isAccepted)
+        runNextClaimedSync()
 
         assertEquals(
             providerAttemptsBefore + 1.0,
@@ -378,6 +388,15 @@ class ObservabilityIntegrationTests(
             .andReturn()
 
         return objectMapper.readTree(result.response.contentAsString)
+    }
+
+    private fun runNextClaimedSync() {
+        val claimed = syncRunLifecycleService.claimDueRuns(
+            workerId = "metrics-test-worker-${UUID.randomUUID()}",
+            limit = 1,
+        )
+        assertEquals(1, claimed.size)
+        syncApplicationService.executeClaimedSyncRun(claimed.single())
     }
 
     private fun createAccount(): String {

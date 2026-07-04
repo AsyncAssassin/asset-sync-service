@@ -25,6 +25,7 @@ class SyncRunRecoveryJob(
     fun recoverStaleRuns() {
         try {
             syncRunLifecycleService.markStaleStartedFailed()
+            syncRunLifecycleService.recoverExpiredRunning()
         } catch (exception: Exception) {
             logger.error(
                 "sync_run_recovery_failed exceptionClass={} error={}",

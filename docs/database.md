@@ -38,6 +38,7 @@ src/main/resources/db/changelog
     010-create-users-and-authorities.yaml
     011-validate-length-constraints.yaml
     012-add-observed-transaction-block-height-check.yaml
+    013-async-sync-runs.yaml
 ```
 
 Changelog rules:
@@ -60,6 +61,17 @@ WHERE block_height < 0;
 ```
 
 If the query returns rows, perform an audited cleanup or backfill before running the migration.
+- Changeset `013` converts `sync_runs` into the durable async sync queue. It keeps legacy `STARTED` for recovery compatibility, adds queue/lease fields, and creates a partial unique index for `QUEUED/RUNNING` target single-flight. Do not run mixed old/new application versions that can both accept sync POSTs. Before enabling the async worker, inspect legacy duplicate `STARTED` targets:
+
+```sql
+SELECT target_type, target_id, count(*)
+FROM sync_runs
+WHERE status = 'STARTED'
+GROUP BY target_type, target_id
+HAVING count(*) > 1;
+```
+
+Drain, fail, or explicitly accept any legacy `STARTED` rows before enabling the worker. The worker processes only `QUEUED/RUNNING`; legacy stale-`STARTED` recovery remains separate.
 
 ## 3. Tables
 
@@ -328,7 +340,7 @@ Notes:
 
 ### `sync_runs`
 
-Purpose: diagnostic record for manual or scheduled sync execution.
+Purpose: durable queue and diagnostic record for manual or scheduled sync execution.
 
 Key columns:
 
@@ -337,12 +349,19 @@ Key columns:
 | `id` | `uuid` | no | Primary key |
 | `target_type` | `text` | no | `ACCOUNT` or `ADDRESS` |
 | `target_id` | `uuid` | no | Account id or watched address id |
-| `status` | `text` | no | `STARTED`, `SUCCEEDED`, or `FAILED` |
-| `started_at` | `timestamptz` | no | Start timestamp |
+| `status` | `text` | no | `STARTED`, `QUEUED`, `RUNNING`, `SUCCEEDED`, or `FAILED` |
+| `queued_at` | `timestamptz` | no | Queue timestamp |
+| `started_at` | `timestamptz` | yes | First provider start timestamp; null while fresh `QUEUED` |
 | `finished_at` | `timestamptz` | yes | End timestamp |
 | `events_seen` | `integer` | no | Provider events observed |
 | `events_changed` | `integer` | no | Events that changed stored state |
 | `last_error` | `text` | yes | Failure detail for diagnostics |
+| `attempts` | `integer` | no | Worker claim attempts |
+| `next_attempt_at` | `timestamptz` | no | Earliest claim/retry time |
+| `locked_by` | `varchar(200)` | yes | Current worker owner for `RUNNING` |
+| `lock_token` | `uuid` | yes | Current claim token for fenced updates |
+| `locked_until` | `timestamptz` | yes | Lease expiry for `RUNNING` |
+| `heartbeat_at` | `timestamptz` | yes | Last heartbeat timestamp |
 | `created_at` | `timestamptz` | no | Creation timestamp |
 | `updated_at` | `timestamptz` | no | Last update timestamp |
 
@@ -351,15 +370,23 @@ Constraints and indexes:
 - `primary key (id)`
 - `index (target_type, target_id, started_at desc)`
 - `index (status, started_at desc)`
+- partial due index on `(next_attempt_at, queued_at, id) where status = 'QUEUED'`
+- partial expired-running index on `(locked_until, started_at, id) where status = 'RUNNING'`
+- partial unique in-flight target index on `(target_type, target_id) where status in ('QUEUED','RUNNING')`
+- `index (target_type, target_id, queued_at desc)`
 - `check (target_type in ('ACCOUNT', 'ADDRESS'))`
-- `check (status in ('STARTED', 'SUCCEEDED', 'FAILED'))`
+- `check (status in ('STARTED', 'QUEUED', 'RUNNING', 'SUCCEEDED', 'FAILED'))`
 - `check (events_seen >= 0)`
 - `check (events_changed >= 0)`
+- `check (attempts >= 0)`
+- lock fields are required for `RUNNING` and null for non-`RUNNING`
+- terminal rows require `finished_at`; queued/running/started rows require `finished_at is null`
 
 Notes:
 
-- `sync_runs` are operational records.
+- `sync_runs` are operational records and the durable queue for async sync.
 - They do not participate in observed transaction idempotency.
+- The partial unique in-flight index intentionally excludes legacy `STARTED`.
 
 ## 4. Transaction Boundaries
 
@@ -368,8 +395,7 @@ Use short Spring-managed database transactions for:
 - Account creation.
 - Watched address registration.
 - Single observed event ingestion.
-- Sync run creation.
-- Sync run final status update.
+- Sync run queue insertion, claim, heartbeat, requeue, and final status update.
 - Outbox batch claiming.
 - Per-event outbox completion updates.
 
@@ -381,10 +407,11 @@ If `publish()` succeeds but `markPublished()` fails, the row remains leased in i
 Recommended sync sequence:
 
 ```text
-1. Insert sync_run with status STARTED in a short transaction.
-2. Call the active provider outside a database transaction: fake in `local`/`test`, HTTP in non-local/test profiles.
-3. Ingest each observed event in its own transaction.
-4. Update sync_run to SUCCEEDED or FAILED in a short transaction.
+1. Insert sync_run with status QUEUED in a short transaction, or return the existing QUEUED/RUNNING run for the same target.
+2. Worker claims due QUEUED rows with FOR UPDATE SKIP LOCKED and writes RUNNING lease fields.
+3. Worker calls the active provider outside a database transaction: fake in `local`/`test`, HTTP in non-local/test profiles.
+4. Ingest each observed event in its own transaction.
+5. Fenced update marks sync_run SUCCEEDED, FAILED, or QUEUED retry.
 ```
 
 Observed event ingestion transaction:
@@ -415,9 +442,10 @@ Outbox polling:
 
 Concurrent sync:
 
-- Concurrent sync for the same address can duplicate provider work in the MVP.
+- Concurrent sync for the same address/account returns one in-flight `QUEUED/RUNNING` run.
+- Duplicate provider work can still happen after crash/recovery because execution is at-least-once.
 - Event ingestion remains safe through row locks and unique constraints.
-- Advisory locks per address or account are a future extension, not part of MVP.
+- Advisory locks or a counter table are future options for stricter global queue caps.
 
 Isolation:
 

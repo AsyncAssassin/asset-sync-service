@@ -8,16 +8,19 @@ import com.example.assetsync.application.observability.AssetSyncMetrics
 import com.example.assetsync.application.transaction.ObservedEventApplicationService
 import com.example.assetsync.application.transaction.ObservedTransactionConflictException
 import com.example.assetsync.application.transaction.WatchedAddressNotFoundException
+import com.example.assetsync.config.SyncHeartbeatScheduler
 import com.example.assetsync.config.SyncProperties
 import com.example.assetsync.domain.model.TransitionOutcome
 import java.util.UUID
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.Semaphore
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
+import org.springframework.dao.DataAccessException
+import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.stereotype.Service
 
 @Service
@@ -29,141 +32,184 @@ class SyncApplicationService(
     private val syncRunLifecycleService: SyncRunLifecycleService,
     private val metrics: AssetSyncMetrics,
     private val syncProviderExecutor: ExecutorService,
-    private val syncCapacitySemaphore: Semaphore,
+    private val syncHeartbeatScheduler: SyncHeartbeatScheduler,
     private val syncProperties: SyncProperties,
 ) {
     private val logger = LoggerFactory.getLogger(SyncApplicationService::class.java)
 
     fun syncAddress(addressId: UUID): SyncRun {
-        val watchedAddress = watchedAddressRepository.findActiveById(addressId)
+        watchedAddressRepository.findActiveById(addressId)
             ?: throw WatchedAddressByIdNotFoundException(addressId)
-        return withCapacityPermit {
-            val syncRun = syncRunLifecycleService.createStarted(SyncTargetType.ADDRESS, addressId)
-            execute(syncRun, listOf(watchedAddress))
-        }
+        return syncRunLifecycleService.createQueued(SyncTargetType.ADDRESS, addressId)
     }
 
     fun syncAccount(accountId: UUID): SyncRun {
         if (!accountRepository.existsById(accountId)) {
             throw AccountNotFoundException(accountId)
         }
-        return withCapacityPermit {
-            val syncRun = syncRunLifecycleService.createStarted(SyncTargetType.ACCOUNT, accountId)
-            executeAccount(syncRun, accountId)
-        }
-    }
-
-    // Admission gate before a run is created: an over-cap sync is rejected cleanly (429) with no
-    // orphan STARTED/FAILED row. The provider-pool AbortPolicy remains a backstop (e.g. on a leak).
-    private fun <T> withCapacityPermit(block: () -> T): T {
-        if (!syncCapacitySemaphore.tryAcquire()) {
-            throw SyncCapacityExceededException(syncProperties.providerMaxThreads)
-        }
-        return try {
-            block()
-        } finally {
-            syncCapacitySemaphore.release()
-        }
+        return syncRunLifecycleService.createQueued(SyncTargetType.ACCOUNT, accountId)
     }
 
     fun getSyncRun(syncRunId: UUID): SyncRun =
         syncRunLifecycleService.get(syncRunId)
 
-    private fun execute(syncRun: SyncRun, watchedAddresses: List<WatchedAddress>): SyncRun =
-        executeWithProgress(syncRun) { progress ->
-            watchedAddresses.forEach { watchedAddress ->
-                fetchAndIngestEvents(syncRun = syncRun, watchedAddress = watchedAddress, progress = progress)
+    fun executeClaimedSyncRun(claim: ClaimedSyncRun) {
+        val progress = SyncProgress(
+            eventsSeen = claim.run.eventsSeen,
+            eventsChanged = claim.run.eventsChanged,
+        )
+        val heartbeat = startHeartbeat(claim)
+        try {
+            when (claim.run.targetType) {
+                SyncTargetType.ADDRESS -> executeAddress(claim.run, progress)
+                SyncTargetType.ACCOUNT -> executeAccount(claim.run, claim.run.targetId, progress)
             }
-        }
-
-    private fun executeAccount(syncRun: SyncRun, accountId: UUID): SyncRun =
-        executeWithProgress(syncRun) { progress ->
-            var processed = 0
-            while (true) {
-                if (processed >= syncProperties.maxAccountSyncAddresses) {
-                    val overflow = watchedAddressRepository.findActiveByAccountId(
-                        accountId = accountId,
-                        limit = 1,
-                        offset = processed,
-                    )
-                    if (overflow.isNotEmpty()) {
-                        throw AccountSyncTooLargeException(
-                            accountId = accountId,
-                            maxAddresses = syncProperties.maxAccountSyncAddresses,
-                        )
-                    }
-                    break
-                }
-
-                val limit = minOf(
-                    syncProperties.accountSyncBatchSize,
-                    syncProperties.maxAccountSyncAddresses - processed,
-                )
-                val batch = watchedAddressRepository.findActiveByAccountId(
-                    accountId = accountId,
-                    limit = limit,
-                    offset = processed,
-                )
-                if (batch.isEmpty()) {
-                    break
-                }
-
-                batch.forEach { watchedAddress ->
-                    fetchAndIngestEvents(syncRun = syncRun, watchedAddress = watchedAddress, progress = progress)
-                }
-                processed += batch.size
-
-                if (batch.size < limit) {
-                    break
-                }
-            }
-        }
-
-    private fun executeWithProgress(syncRun: SyncRun, body: (SyncProgress) -> Unit): SyncRun {
-        val progress = SyncProgress()
-
-        return try {
-            body(progress)
             syncRunLifecycleService.markSucceeded(
-                syncRunId = syncRun.id,
+                claim = claim,
                 eventsSeen = progress.eventsSeen,
                 eventsChanged = progress.eventsChanged,
             )
-        } catch (exception: ChainProviderUnavailableException) {
-            val failed = markFailedPreserving(exception, syncRun, progress) ?: syncRun
-            throw SyncProviderUnavailableException(failed, exception)
-        } catch (exception: RuntimeException) {
-            markFailedPreserving(exception, syncRun, progress)
-            throw exception
         } catch (throwable: Throwable) {
-            markFailedPreserving(throwable, syncRun, progress)
-            throw throwable
+            if (throwable is InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+            handleClaimFailure(claim = claim, progress = progress, throwable = throwable)
+        } finally {
+            heartbeat.cancel(false)
         }
     }
 
-    private fun markFailedPreserving(
-        original: Throwable,
-        syncRun: SyncRun,
-        progress: SyncProgress,
-    ): SyncRun? =
+    private fun executeAddress(syncRun: SyncRun, progress: SyncProgress) {
+        val watchedAddress = watchedAddressRepository.findActiveById(syncRun.targetId)
+            ?: throw WatchedAddressByIdNotFoundException(syncRun.targetId)
+        fetchAndIngestEvents(syncRun = syncRun, watchedAddress = watchedAddress, progress = progress)
+    }
+
+    private fun executeAccount(syncRun: SyncRun, accountId: UUID, progress: SyncProgress) {
+        if (!accountRepository.existsById(accountId)) {
+            throw AccountNotFoundException(accountId)
+        }
+        val overflow = watchedAddressRepository.findActiveByAccountId(
+            accountId = accountId,
+            limit = 1,
+            offset = syncProperties.maxAccountSyncAddresses,
+        )
+        if (overflow.isNotEmpty()) {
+            throw AccountSyncTooLargeException(
+                accountId = accountId,
+                maxAddresses = syncProperties.maxAccountSyncAddresses,
+            )
+        }
+
+        var processed = 0
+        while (true) {
+            val batch = watchedAddressRepository.findActiveByAccountId(
+                accountId = accountId,
+                limit = syncProperties.accountSyncBatchSize,
+                offset = processed,
+            )
+            if (batch.isEmpty()) {
+                break
+            }
+
+            batch.forEach { watchedAddress ->
+                fetchAndIngestEvents(syncRun = syncRun, watchedAddress = watchedAddress, progress = progress)
+            }
+            processed += batch.size
+            if (batch.size < syncProperties.accountSyncBatchSize) {
+                break
+            }
+        }
+    }
+
+    private fun startHeartbeat(claim: ClaimedSyncRun): ScheduledFuture<*> {
+        val intervalMillis = syncProperties.worker.heartbeatInterval.toMillis()
+        return syncHeartbeatScheduler.scheduleAtFixedRate(
+            {
+                try {
+                    val marked = syncRunLifecycleService.heartbeat(claim)
+                    if (!marked) {
+                        logger.debug(
+                            "sync_run_heartbeat_stale syncRunId={} workerId={} attempts={} lockToken={}",
+                            claim.run.id,
+                            claim.lockedBy,
+                            claim.attempts,
+                            claim.lockToken,
+                        )
+                    }
+                } catch (exception: Exception) {
+                    logger.warn(
+                        "sync_run_heartbeat_failed syncRunId={} workerId={} attempts={} error={}",
+                        claim.run.id,
+                        claim.lockedBy,
+                        claim.attempts,
+                        exception.conciseMessage(),
+                    )
+                }
+            },
+            intervalMillis,
+            intervalMillis,
+            TimeUnit.MILLISECONDS,
+        )
+    }
+
+    private fun handleClaimFailure(claim: ClaimedSyncRun, progress: SyncProgress, throwable: Throwable) {
+        val error = throwable.conciseMessage().take(syncProperties.worker.maxErrorLength)
+        val terminal = isTerminalFailure(throwable) || claim.attempts >= syncProperties.worker.maxAttempts
         try {
-            syncRunLifecycleService.markFailed(
-                syncRunId = syncRun.id,
-                eventsSeen = progress.eventsSeen,
-                eventsChanged = progress.eventsChanged,
-                lastError = original.conciseMessage(),
-            )
-        } catch (markFailedException: Throwable) {
-            original.addSuppressed(markFailedException)
+            if (terminal) {
+                syncRunLifecycleService.markFailed(
+                    claim = claim,
+                    eventsSeen = progress.eventsSeen,
+                    eventsChanged = progress.eventsChanged,
+                    lastError = error,
+                )
+            } else {
+                syncRunLifecycleService.requeue(
+                    claim = claim,
+                    eventsSeen = progress.eventsSeen,
+                    eventsChanged = progress.eventsChanged,
+                    lastError = error,
+                )
+            }
+        } catch (markException: Throwable) {
+            throwable.addSuppressed(markException)
             logger.error(
-                "sync_run_mark_failed_failed syncRunId={} targetType={} targetId={} originalError={} markError={}",
-                syncRun.id,
-                syncRun.targetType,
-                syncRun.targetId,
-                original.conciseMessage(),
-                markFailedException.conciseMessage(),
+                "sync_run_failure_update_failed syncRunId={} targetType={} targetId={} terminal={} originalError={} markError={}",
+                claim.run.id,
+                claim.run.targetType,
+                claim.run.targetId,
+                terminal,
+                error,
+                markException.conciseMessage(),
             )
-            null
+            return
+        }
+
+        logger.warn(
+            "sync_run_execution_failed syncRunId={} targetType={} targetId={} attempts={} terminal={} error={}",
+            claim.run.id,
+            claim.run.targetType,
+            claim.run.targetId,
+            claim.attempts,
+            terminal,
+            error,
+        )
+    }
+
+    private fun isTerminalFailure(throwable: Throwable): Boolean =
+        when (throwable) {
+            is AccountNotFoundException,
+            is WatchedAddressByIdNotFoundException,
+            is AccountSyncTooLargeException,
+            is ProviderDataMismatchException,
+            is DataIntegrityViolationException,
+            -> true
+            is ChainProviderUnavailableException,
+            is SyncCapacityExceededException,
+            -> false
+            is DataAccessException -> false
+            else -> false
         }
 
     private fun fetchAndIngestEvents(

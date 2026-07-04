@@ -81,10 +81,13 @@ class DemoDataSeeder(
         val staleStart = now.minus(2, ChronoUnit.HOURS).epoch()
         jdbcTemplate.update(
             """
-            INSERT INTO sync_runs (id, target_type, target_id, status, started_at, events_seen, events_changed, created_at, updated_at)
-            VALUES (?, 'ADDRESS', ?, 'STARTED', ?, 0, 0, ?, ?) ON CONFLICT (id) DO NOTHING
+            INSERT INTO sync_runs (
+                id, target_type, target_id, status, started_at, events_seen, events_changed,
+                queued_at, attempts, next_attempt_at, created_at, updated_at
+            )
+            VALUES (?, 'ADDRESS', ?, 'STARTED', ?, 0, 0, ?, 0, ?, ?, ?) ON CONFLICT (id) DO NOTHING
             """.trimIndent(),
-            STALE_RUN_ID, WATCHED_ADDRESS_ID, staleStart, staleStart, staleStart,
+            STALE_RUN_ID, WATCHED_ADDRESS_ID, staleStart, staleStart, staleStart, staleStart, staleStart,
         )
     }
 

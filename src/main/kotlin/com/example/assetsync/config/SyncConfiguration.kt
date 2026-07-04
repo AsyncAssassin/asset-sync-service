@@ -2,6 +2,9 @@ package com.example.assetsync.config
 
 import java.time.Duration
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.Semaphore
 import java.util.concurrent.SynchronousQueue
 import java.util.concurrent.ThreadFactory
@@ -29,11 +32,25 @@ class SyncConfiguration {
             ThreadPoolExecutor.AbortPolicy(),
         )
 
-    /** Admission gate for concurrent syncs, sized to the provider pool. Acquired at sync entry
-     * (before a run is created) so an over-cap sync is rejected cleanly without an orphan run. */
+    @Bean(destroyMethod = "shutdownNow")
+    fun syncWorkerExecutor(syncProperties: SyncProperties): ExecutorService =
+        ThreadPoolExecutor(
+            syncProperties.worker.maxConcurrency,
+            syncProperties.worker.maxConcurrency,
+            0L,
+            TimeUnit.MILLISECONDS,
+            LinkedBlockingQueue(),
+            NamedThreadFactory("asset-sync-worker"),
+            ThreadPoolExecutor.AbortPolicy(),
+        )
+
+    @Bean(destroyMethod = "shutdownNow")
+    fun syncHeartbeatScheduler(syncProperties: SyncProperties): SyncHeartbeatScheduler =
+        SyncHeartbeatScheduler(syncProperties.worker.maxConcurrency)
+
     @Bean
-    fun syncCapacitySemaphore(syncProperties: SyncProperties): Semaphore =
-        Semaphore(syncProperties.providerMaxThreads)
+    fun syncWorkerPermitSemaphore(syncProperties: SyncProperties): Semaphore =
+        Semaphore(syncProperties.worker.maxConcurrency)
 }
 
 @ConfigurationProperties(prefix = "asset-sync.sync")
@@ -44,6 +61,7 @@ data class SyncProperties(
     val maxAccountSyncAddresses: Int = 1_000,
     val staleRunTimeout: Duration = Duration.ofMinutes(30),
     val recovery: Recovery = Recovery(),
+    val worker: Worker = Worker(),
 ) {
     init {
         require(!providerTimeout.isNegative && !providerTimeout.isZero) {
@@ -54,6 +72,9 @@ data class SyncProperties(
         require(maxAccountSyncAddresses > 0) { "asset-sync.sync.max-account-sync-addresses must be positive." }
         require(!staleRunTimeout.isNegative && !staleRunTimeout.isZero) {
             "asset-sync.sync.stale-run-timeout must be positive."
+        }
+        require(worker.maxConcurrency <= providerMaxThreads) {
+            "asset-sync.sync.worker.max-concurrency must be <= asset-sync.sync.provider-max-threads."
         }
     }
 
@@ -72,6 +93,74 @@ data class SyncProperties(
                 "asset-sync.sync.recovery.initial-delay must not be negative."
             }
         }
+    }
+
+    data class Worker(
+        val enabled: Boolean = true,
+        val fixedDelay: Duration = Duration.ofSeconds(5),
+        val initialDelay: Duration = Duration.ofSeconds(10),
+        val claimBatchSize: Int = 10,
+        val maxConcurrency: Int = 4,
+        val leaseDuration: Duration = Duration.ofSeconds(60),
+        val heartbeatInterval: Duration = Duration.ofSeconds(20),
+        val maxAttempts: Int = 5,
+        val retryBackoffBaseDelay: Duration = Duration.ofSeconds(30),
+        val retryBackoffMaxDelay: Duration = Duration.ofMinutes(15),
+        val maxInFlightRuns: Int = 1_000,
+        val maxErrorLength: Int = 1_024,
+    ) {
+        init {
+            require(!fixedDelay.isNegative && !fixedDelay.isZero) {
+                "asset-sync.sync.worker.fixed-delay must be positive."
+            }
+            require(!initialDelay.isNegative) {
+                "asset-sync.sync.worker.initial-delay must not be negative."
+            }
+            require(claimBatchSize > 0) {
+                "asset-sync.sync.worker.claim-batch-size must be positive."
+            }
+            require(maxConcurrency > 0) {
+                "asset-sync.sync.worker.max-concurrency must be positive."
+            }
+            require(!leaseDuration.isNegative && !leaseDuration.isZero) {
+                "asset-sync.sync.worker.lease-duration must be positive."
+            }
+            require(!heartbeatInterval.isNegative && !heartbeatInterval.isZero) {
+                "asset-sync.sync.worker.heartbeat-interval must be positive."
+            }
+            require(heartbeatInterval < leaseDuration) {
+                "asset-sync.sync.worker.heartbeat-interval must be less than lease-duration."
+            }
+            require(maxAttempts > 0) {
+                "asset-sync.sync.worker.max-attempts must be positive."
+            }
+            require(!retryBackoffBaseDelay.isNegative && !retryBackoffBaseDelay.isZero) {
+                "asset-sync.sync.worker.retry-backoff-base-delay must be positive."
+            }
+            require(!retryBackoffMaxDelay.isNegative && !retryBackoffMaxDelay.isZero) {
+                "asset-sync.sync.worker.retry-backoff-max-delay must be positive."
+            }
+            require(maxInFlightRuns > 0) {
+                "asset-sync.sync.worker.max-in-flight-runs must be positive."
+            }
+            require(maxErrorLength in 1..1_024) {
+                "asset-sync.sync.worker.max-error-length must be between 1 and 1024."
+            }
+        }
+    }
+}
+
+class SyncHeartbeatScheduler(maxConcurrency: Int) {
+    private val executor = Executors.newScheduledThreadPool(
+        maxConcurrency,
+        NamedThreadFactory("asset-sync-heartbeat"),
+    )
+
+    fun scheduleAtFixedRate(command: Runnable, initialDelay: Long, period: Long, unit: TimeUnit): ScheduledFuture<*> =
+        executor.scheduleAtFixedRate(command, initialDelay, period, unit)
+
+    fun shutdownNow() {
+        executor.shutdownNow()
     }
 }
 

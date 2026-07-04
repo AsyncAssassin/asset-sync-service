@@ -4,6 +4,8 @@ import java.math.BigDecimal
 import java.nio.file.Path
 import java.sql.Connection
 import java.sql.DriverManager
+import java.sql.ResultSet
+import java.sql.SQLException
 import java.sql.Timestamp
 import java.time.Instant
 import java.util.UUID
@@ -89,6 +91,175 @@ class DatabaseMigrationIntegrationTests(
         assertThrows<DataIntegrityViolationException> {
             insertOutboxEvent(transactionId, duplicateOutboxKey)
             insertOutboxEvent(transactionId, duplicateOutboxKey)
+        }
+    }
+
+    @Test
+    fun `async sync run migration supports queue fields and in-flight uniqueness`() {
+        val columns = jdbcTemplate.queryForList(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'sync_runs'
+            """.trimIndent(),
+            String::class.java,
+        ).toSet()
+        assertTrue(columns.containsAll(setOf("queued_at", "locked_by", "lock_token", "locked_until", "heartbeat_at", "attempts", "next_attempt_at")))
+
+        val targetId = UUID.randomUUID()
+        val queued = insertSyncRun(status = "QUEUED", targetId = targetId, startedAt = null, finishedAt = null)
+        assertEquals(null, jdbcTemplate.queryForObject("SELECT started_at FROM sync_runs WHERE id = ?", Timestamp::class.java, queued))
+
+        assertThrows<DataIntegrityViolationException> {
+            insertSyncRun(status = "QUEUED", targetId = targetId, startedAt = null, finishedAt = null)
+        }
+
+        val terminalTargetId = UUID.randomUUID()
+        insertSyncRun(status = "SUCCEEDED", targetId = terminalTargetId, startedAt = now(), finishedAt = now())
+        insertSyncRun(status = "QUEUED", targetId = terminalTargetId, startedAt = null, finishedAt = null)
+
+        val legacyTargetId = UUID.randomUUID()
+        insertSyncRun(status = "STARTED", targetId = legacyTargetId, startedAt = now(), finishedAt = null)
+        insertSyncRun(status = "QUEUED", targetId = legacyTargetId, startedAt = null, finishedAt = null)
+
+        assertThrows<DataIntegrityViolationException> {
+            insertSyncRun(status = "RUNNING", targetId = UUID.randomUUID(), startedAt = now(), finishedAt = null)
+        }
+    }
+
+    @Test
+    fun `migration 013 upgrades legacy sync runs and enforces async queue invariants`() {
+        val schema = "migration_013_${UUID.randomUUID().toString().replace("-", "_")}"
+        dataSource.connection.use { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute("CREATE SCHEMA $schema")
+            }
+        }
+
+        try {
+            withMigrationSchemaConnection(schema) { connection ->
+                runLiquibase(connection, changesToApply = 12)
+
+                val startedAt = Instant.parse("2026-07-01T10:00:00Z")
+                val finishedAt = Instant.parse("2026-07-01T10:05:00Z")
+                val legacyStartedTarget = UUID.randomUUID()
+                val legacySucceededTarget = UUID.randomUUID()
+                val legacyFailedTarget = UUID.randomUUID()
+                val legacyStarted = insertLegacyMigrationSyncRun(
+                    connection = connection,
+                    status = "STARTED",
+                    targetId = legacyStartedTarget,
+                    startedAt = startedAt,
+                    finishedAt = null,
+                    eventsSeen = 7,
+                    eventsChanged = 3,
+                )
+                val legacySucceeded = insertLegacyMigrationSyncRun(
+                    connection = connection,
+                    status = "SUCCEEDED",
+                    targetId = legacySucceededTarget,
+                    startedAt = startedAt,
+                    finishedAt = finishedAt,
+                )
+                val legacyFailed = insertLegacyMigrationSyncRun(
+                    connection = connection,
+                    status = "FAILED",
+                    targetId = legacyFailedTarget,
+                    startedAt = startedAt,
+                    finishedAt = finishedAt,
+                )
+
+                runLiquibase(connection)
+
+                listOf(legacyStarted, legacySucceeded, legacyFailed).forEach { id ->
+                    assertEquals(0, queryMigrationInt(connection, "SELECT attempts FROM sync_runs WHERE id = ?", id))
+                    assertEquals(null, queryMigrationString(connection, "SELECT locked_by FROM sync_runs WHERE id = ?", id))
+                    assertEquals(null, queryMigrationString(connection, "SELECT lock_token::text FROM sync_runs WHERE id = ?", id))
+                    assertEquals(null, queryMigrationTimestamp(connection, "SELECT locked_until FROM sync_runs WHERE id = ?", id))
+                    assertEquals(null, queryMigrationTimestamp(connection, "SELECT heartbeat_at FROM sync_runs WHERE id = ?", id))
+                    assertEquals(
+                        startedAt,
+                        queryMigrationTimestamp(connection, "SELECT queued_at FROM sync_runs WHERE id = ?", id)?.toInstant(),
+                    )
+                    assertEquals(
+                        startedAt,
+                        queryMigrationTimestamp(connection, "SELECT next_attempt_at FROM sync_runs WHERE id = ?", id)?.toInstant(),
+                    )
+                }
+                assertEquals("STARTED", queryMigrationString(connection, "SELECT status FROM sync_runs WHERE id = ?", legacyStarted))
+
+                val queuedForLegacyStarted = insertPost013MigrationSyncRun(
+                    connection = connection,
+                    status = "QUEUED",
+                    targetId = legacyStartedTarget,
+                    startedAt = null,
+                    finishedAt = null,
+                )
+                assertEquals(
+                    null,
+                    queryMigrationTimestamp(connection, "SELECT started_at FROM sync_runs WHERE id = ?", queuedForLegacyStarted),
+                )
+
+                val runningTarget = UUID.randomUUID()
+                insertPost013MigrationSyncRun(
+                    connection = connection,
+                    status = "RUNNING",
+                    targetId = runningTarget,
+                    startedAt = startedAt,
+                    finishedAt = null,
+                    lockedBy = "migration-test-worker",
+                    lockToken = UUID.randomUUID(),
+                    lockedUntil = startedAt.plusSeconds(60),
+                    heartbeatAt = startedAt,
+                    attempts = 1,
+                )
+
+                val duplicateInFlightTarget = UUID.randomUUID()
+                insertPost013MigrationSyncRun(
+                    connection = connection,
+                    status = "QUEUED",
+                    targetId = duplicateInFlightTarget,
+                    startedAt = null,
+                    finishedAt = null,
+                )
+                val duplicateInFlightSavepoint = connection.setSavepoint("duplicate_in_flight")
+                assertThrows<SQLException> {
+                    insertPost013MigrationSyncRun(
+                        connection = connection,
+                        status = "RUNNING",
+                        targetId = duplicateInFlightTarget,
+                        startedAt = startedAt,
+                        finishedAt = null,
+                        lockedBy = "migration-test-worker",
+                        lockToken = UUID.randomUUID(),
+                        lockedUntil = startedAt.plusSeconds(60),
+                        heartbeatAt = startedAt,
+                        attempts = 1,
+                    )
+                }
+                connection.rollback(duplicateInFlightSavepoint)
+
+                insertPost013MigrationSyncRun(
+                    connection = connection,
+                    status = "QUEUED",
+                    targetId = legacySucceededTarget,
+                    startedAt = null,
+                    finishedAt = null,
+                )
+                insertPost013MigrationSyncRun(
+                    connection = connection,
+                    status = "QUEUED",
+                    targetId = legacyFailedTarget,
+                    startedAt = null,
+                    finishedAt = null,
+                )
+            }
+        } finally {
+            dataSource.connection.use { cleanupConnection ->
+                cleanupConnection.createStatement().use { statement ->
+                    statement.execute("DROP SCHEMA IF EXISTS $schema CASCADE")
+                }
+            }
         }
     }
 
@@ -282,6 +453,169 @@ class DatabaseMigrationIntegrationTests(
             now(),
         )
         return outboxEventId
+    }
+
+    private fun insertSyncRun(
+        status: String,
+        targetId: UUID,
+        startedAt: Timestamp?,
+        finishedAt: Timestamp?,
+    ): UUID {
+        val syncRunId = UUID.randomUUID()
+        jdbcTemplate.update(
+            """
+            INSERT INTO sync_runs (
+                id,
+                target_type,
+                target_id,
+                status,
+                started_at,
+                finished_at,
+                events_seen,
+                events_changed,
+                queued_at,
+                attempts,
+                next_attempt_at,
+                created_at,
+                updated_at
+            )
+            VALUES (?, 'ADDRESS', ?, ?, ?, ?, 0, 0, ?, 0, ?, ?, ?)
+            """.trimIndent(),
+            syncRunId,
+            targetId,
+            status,
+            startedAt,
+            finishedAt,
+            now(),
+            now(),
+            now(),
+            now(),
+        )
+        return syncRunId
+    }
+
+    private fun insertLegacyMigrationSyncRun(
+        connection: Connection,
+        status: String,
+        targetId: UUID,
+        startedAt: Instant,
+        finishedAt: Instant?,
+        eventsSeen: Int = 0,
+        eventsChanged: Int = 0,
+    ): UUID {
+        val syncRunId = UUID.randomUUID()
+        connection.prepareStatement(
+            """
+            INSERT INTO sync_runs (
+                id,
+                target_type,
+                target_id,
+                status,
+                started_at,
+                finished_at,
+                events_seen,
+                events_changed,
+                created_at,
+                updated_at
+            )
+            VALUES (?, 'ADDRESS', ?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setObject(1, syncRunId)
+            statement.setObject(2, targetId)
+            statement.setString(3, status)
+            statement.setTimestamp(4, Timestamp.from(startedAt))
+            statement.setTimestamp(5, finishedAt?.let { Timestamp.from(it) })
+            statement.setInt(6, eventsSeen)
+            statement.setInt(7, eventsChanged)
+            statement.setTimestamp(8, Timestamp.from(startedAt))
+            statement.setTimestamp(9, Timestamp.from(startedAt))
+            statement.executeUpdate()
+        }
+        return syncRunId
+    }
+
+    private fun insertPost013MigrationSyncRun(
+        connection: Connection,
+        status: String,
+        targetId: UUID,
+        startedAt: Instant?,
+        finishedAt: Instant?,
+        lockedBy: String? = null,
+        lockToken: UUID? = null,
+        lockedUntil: Instant? = null,
+        heartbeatAt: Instant? = null,
+        attempts: Int = 0,
+    ): UUID {
+        val syncRunId = UUID.randomUUID()
+        val now = Instant.parse("2026-07-01T11:00:00Z")
+        connection.prepareStatement(
+            """
+            INSERT INTO sync_runs (
+                id,
+                target_type,
+                target_id,
+                status,
+                started_at,
+                finished_at,
+                events_seen,
+                events_changed,
+                queued_at,
+                locked_by,
+                lock_token,
+                locked_until,
+                heartbeat_at,
+                attempts,
+                next_attempt_at,
+                created_at,
+                updated_at
+            )
+            VALUES (?, 'ADDRESS', ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+        ).use { statement ->
+            statement.setObject(1, syncRunId)
+            statement.setObject(2, targetId)
+            statement.setString(3, status)
+            statement.setTimestamp(4, startedAt?.let { Timestamp.from(it) })
+            statement.setTimestamp(5, finishedAt?.let { Timestamp.from(it) })
+            statement.setTimestamp(6, Timestamp.from(now))
+            statement.setString(7, lockedBy)
+            statement.setObject(8, lockToken)
+            statement.setTimestamp(9, lockedUntil?.let { Timestamp.from(it) })
+            statement.setTimestamp(10, heartbeatAt?.let { Timestamp.from(it) })
+            statement.setInt(11, attempts)
+            statement.setTimestamp(12, Timestamp.from(now))
+            statement.setTimestamp(13, Timestamp.from(now))
+            statement.setTimestamp(14, Timestamp.from(now))
+            statement.executeUpdate()
+        }
+        return syncRunId
+    }
+
+    private fun queryMigrationString(connection: Connection, sql: String, vararg args: Any?): String? =
+        queryMigrationOne(connection, sql, { it.getString(1) }, *args)
+
+    private fun queryMigrationInt(connection: Connection, sql: String, vararg args: Any?): Int =
+        queryMigrationOne(connection, sql, { it.getInt(1) }, *args)
+
+    private fun queryMigrationTimestamp(connection: Connection, sql: String, vararg args: Any?): Timestamp? =
+        queryMigrationOne(connection, sql, { it.getTimestamp(1) }, *args)
+
+    private fun <T> queryMigrationOne(
+        connection: Connection,
+        sql: String,
+        mapper: (ResultSet) -> T,
+        vararg args: Any?,
+    ): T {
+        connection.prepareStatement(sql).use { statement ->
+            args.forEachIndexed { index, arg ->
+                statement.setObject(index + 1, arg)
+            }
+            statement.executeQuery().use { resultSet ->
+                assertTrue(resultSet.next(), "Expected one row for query: $sql")
+                return mapper(resultSet)
+            }
+        }
     }
 
     private fun assertNormalizationPreconditionFailsCleanly(
