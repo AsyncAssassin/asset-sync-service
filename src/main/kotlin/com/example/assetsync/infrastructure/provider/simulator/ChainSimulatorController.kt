@@ -3,7 +3,7 @@ package com.example.assetsync.infrastructure.provider.simulator
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
 import com.example.assetsync.infrastructure.provider.ProviderEvent
-import com.example.assetsync.infrastructure.provider.ProviderEventsResponse
+import com.example.assetsync.infrastructure.provider.ProviderEventsPageResponse
 import java.math.BigDecimal
 import org.springframework.context.annotation.Profile
 import org.springframework.web.bind.annotation.GetMapping
@@ -29,20 +29,33 @@ class ChainSimulatorController {
         @PathVariable chainId: String,
         @PathVariable address: String,
         @RequestParam asset: String,
-    ): ProviderEventsResponse =
-        ProviderEventsResponse(
-            events = listOf(
-                ProviderEvent(
-                    txHash = "0xsim-" + Integer.toHexString(("$chainId:$address:$asset").hashCode()),
-                    eventIndex = 0,
-                    address = address,
-                    asset = asset,
-                    amount = BigDecimal("1.000000000000000000"),
-                    blockHeight = 1_000,
-                    confirmations = 6,
-                    direction = Direction.INBOUND,
-                    status = TransactionStatus.CONFIRMED,
-                ),
-            ),
+        @RequestParam limit: Int,
+        @RequestParam(required = false) cursor: String?,
+    ): ProviderEventsPageResponse {
+        require(limit > 0) { "limit must be positive." }
+        val finalCursor = cursor ?: "sim:" + Integer.toHexString(("$chainId:$address:$asset").hashCode())
+        return ProviderEventsPageResponse(
+            events = if (cursor == null) {
+                listOf(
+                    ProviderEvent(
+                        txHash = "0xsim-" + Integer.toHexString(("$chainId:$address:$asset").hashCode()),
+                        eventIndex = 0,
+                        address = address,
+                        asset = asset,
+                        amount = BigDecimal("1.000000000000000000"),
+                        blockHeight = 1_000,
+                        confirmations = 6,
+                        direction = Direction.INBOUND,
+                        status = TransactionStatus.CONFIRMED,
+                    ),
+                )
+            } else {
+                emptyList()
+            },
+            nextCursor = finalCursor,
+            hasMore = false,
+            latestBlockHeight = 1_000,
+            safeBlockHeight = 1_000,
         )
+    }
 }

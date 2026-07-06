@@ -302,7 +302,7 @@ Not in MVP:
 Future phases can add:
 
 - Real provider adapters.
-- Provider cursors and block range scans.
+- Provider-specific block range scans and production indexer adapters.
 - Kafka, SQS, or Debezium-based outbox delivery.
 - Advisory locks for multi-instance sync coordination.
 - Balance projection as a rebuildable read model.

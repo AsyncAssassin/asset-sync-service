@@ -100,6 +100,8 @@ interface WatchedAddressRepository {
 
     fun findActiveByAccountId(accountId: UUID, limit: Int, offset: Int): List<WatchedAddress>
 
+    fun countActiveByAccountId(accountId: UUID): Int
+
     fun findActiveByNaturalKey(chainId: String, address: String, asset: String): WatchedAddress?
 }
 

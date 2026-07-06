@@ -1,12 +1,16 @@
 package com.example.assetsync.infrastructure.provider
 
-import com.example.assetsync.application.account.WatchedAddress
+import com.example.assetsync.application.sync.ChainProviderEventsPage
+import com.example.assetsync.application.sync.ChainProviderEventsPageRequest
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
 import com.example.assetsync.application.sync.ChainProviderPort
 import com.example.assetsync.application.sync.ChainProviderUnavailableException
+import com.example.assetsync.application.sync.ProviderDataInvalidException
+import com.fasterxml.jackson.databind.node.ObjectNode
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import org.slf4j.LoggerFactory
 import org.slf4j.MDC
 import org.springframework.boot.actuate.health.Health
@@ -20,97 +24,55 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 class FakeChainProvider : ChainProviderPort {
     private val logger = LoggerFactory.getLogger(FakeChainProvider::class.java)
     private val scripts = ConcurrentHashMap<FakeChainProviderKey, List<FakeChainProviderStep>>()
+    private val scriptPositions = ConcurrentHashMap<FakeChainProviderKey, AtomicInteger>()
     private val requestedKeys = CopyOnWriteArrayList<FakeChainProviderKey>()
+    private val requestedPageRequests = CopyOnWriteArrayList<FakeChainProviderPageRequest>()
     private val transactionActiveSnapshots = CopyOnWriteArrayList<Boolean>()
     private val requestIdSnapshots = CopyOnWriteArrayList<String?>()
 
-    override fun fetchObservedEvents(watchedAddress: WatchedAddress): Sequence<ChainProviderObservedEvent> {
+    override fun fetchObservedEventsPage(request: ChainProviderEventsPageRequest): ChainProviderEventsPage {
         val key = FakeChainProviderKey(
-            chainId = watchedAddress.chainId,
-            address = watchedAddress.address,
-            asset = watchedAddress.asset,
+            chainId = request.chainId,
+            address = request.address,
+            asset = request.asset,
         )
         requestedKeys.add(key)
+        requestedPageRequests.add(
+            FakeChainProviderPageRequest(
+                key = key,
+                cursor = request.cursor,
+                limit = request.limit,
+            ),
+        )
         recordTransactionState()
         recordRequestId()
+
         val steps = scripts[key].orEmpty()
         logger.info(
-            "fake_provider_fetch_started accountId={} watchedAddressId={} chainId={} address={} asset={} scriptedSteps={}",
-            watchedAddress.accountId,
-            watchedAddress.id,
-            watchedAddress.chainId,
-            watchedAddress.address,
-            watchedAddress.asset,
+            "fake_provider_page_fetch_started accountId={} watchedAddressId={} chainId={} address={} asset={} cursorPresent={} limit={} scriptedSteps={}",
+            request.accountId,
+            request.watchedAddressId,
+            request.chainId,
+            request.address,
+            request.asset,
+            request.cursor != null,
+            request.limit,
             steps.size,
         )
 
-        return sequence {
-            var eventsEmitted = 0
-            steps.forEach { step ->
-                recordTransactionState()
-                recordRequestId()
-                when (step) {
-                    is FakeChainProviderStep.Event -> {
-                        logger.debug(
-                            "fake_provider_event_emitted accountId={} watchedAddressId={} chainId={} address={} asset={} txHash={} eventIndex={} status={}",
-                            watchedAddress.accountId,
-                            watchedAddress.id,
-                            step.event.chainId,
-                            step.event.address,
-                            step.event.asset,
-                            step.event.txHash,
-                            step.event.eventIndex,
-                            step.event.status,
-                        )
-                        eventsEmitted += 1
-                        yield(step.event)
-                    }
-                    is FakeChainProviderStep.Failure -> {
-                        logger.warn(
-                            "fake_provider_fetch_failed accountId={} watchedAddressId={} chainId={} address={} asset={} eventsEmitted={} error={}",
-                            watchedAddress.accountId,
-                            watchedAddress.id,
-                            watchedAddress.chainId,
-                            watchedAddress.address,
-                            watchedAddress.asset,
-                            eventsEmitted,
-                            step.message.concise(),
-                        )
-                        throw ChainProviderUnavailableException(step.message)
-                    }
-                    is FakeChainProviderStep.ThrowableFailure -> {
-                        logger.warn(
-                            "fake_provider_fetch_failed accountId={} watchedAddressId={} chainId={} address={} asset={} eventsEmitted={} error={}",
-                            watchedAddress.accountId,
-                            watchedAddress.id,
-                            watchedAddress.chainId,
-                            watchedAddress.address,
-                            watchedAddress.asset,
-                            eventsEmitted,
-                            step.throwable.message?.concise() ?: step.throwable.javaClass.simpleName,
-                        )
-                        throw step.throwable
-                    }
-                    is FakeChainProviderStep.Delay -> {
-                        try {
-                            Thread.sleep(step.duration.toMillis())
-                        } catch (exception: InterruptedException) {
-                            Thread.currentThread().interrupt()
-                            throw ChainProviderUnavailableException("Provider fetch interrupted.", exception)
-                        }
-                    }
-                }
-            }
-            logger.info(
-                "fake_provider_fetch_completed accountId={} watchedAddressId={} chainId={} address={} asset={} eventsEmitted={}",
-                watchedAddress.accountId,
-                watchedAddress.id,
-                watchedAddress.chainId,
-                watchedAddress.address,
-                watchedAddress.asset,
-                eventsEmitted,
-            )
-        }
+        val page = nextPage(key = key, steps = steps, request = request)
+        logger.info(
+            "fake_provider_page_fetch_completed accountId={} watchedAddressId={} chainId={} address={} asset={} events={} hasMore={} nextCursorPresent={}",
+            request.accountId,
+            request.watchedAddressId,
+            request.chainId,
+            request.address,
+            request.asset,
+            page.events.size,
+            page.hasMore,
+            page.nextCursor != null,
+        )
+        return page
     }
 
     fun setEvents(
@@ -119,7 +81,9 @@ class FakeChainProvider : ChainProviderPort {
         asset: String,
         events: List<ChainProviderObservedEvent>,
     ) {
-        scripts[FakeChainProviderKey(chainId, address, asset)] = events.map { FakeChainProviderStep.Event(it) }
+        val key = FakeChainProviderKey(chainId, address, asset)
+        scripts[key] = events.map { FakeChainProviderStep.Event(it) }
+        scriptPositions.remove(key)
     }
 
     fun setScript(
@@ -128,18 +92,25 @@ class FakeChainProvider : ChainProviderPort {
         asset: String,
         steps: List<FakeChainProviderStep>,
     ) {
-        scripts[FakeChainProviderKey(chainId, address, asset)] = steps
+        val key = FakeChainProviderKey(chainId, address, asset)
+        scripts[key] = steps
+        scriptPositions.remove(key)
     }
 
     fun clear() {
         scripts.clear()
+        scriptPositions.clear()
         requestedKeys.clear()
+        requestedPageRequests.clear()
         transactionActiveSnapshots.clear()
         requestIdSnapshots.clear()
     }
 
     fun requestedKeys(): List<FakeChainProviderKey> =
         requestedKeys.toList()
+
+    fun requestedPageRequests(): List<FakeChainProviderPageRequest> =
+        requestedPageRequests.toList()
 
     fun transactionActiveSnapshots(): List<Boolean> =
         transactionActiveSnapshots.toList()
@@ -150,6 +121,117 @@ class FakeChainProvider : ChainProviderPort {
     fun scriptCount(): Int =
         scripts.size
 
+    private fun nextPage(
+        key: FakeChainProviderKey,
+        steps: List<FakeChainProviderStep>,
+        request: ChainProviderEventsPageRequest,
+    ): ChainProviderEventsPage {
+        if (request.limit <= 0) {
+            throw ProviderDataInvalidException("Fake provider received a non-positive page limit.")
+        }
+
+        val storedPosition = scriptPositions.computeIfAbsent(key) { AtomicInteger(0) }
+        var index = request.cursor?.toIntOrNull() ?: storedPosition.get()
+        if (index >= steps.size) {
+            return ChainProviderEventsPage(
+                events = emptyList(),
+                nextCursor = request.cursor ?: index.toString(),
+                hasMore = false,
+                latestBlockHeight = null,
+                safeBlockHeight = null,
+            )
+        }
+
+        val firstStep = steps[index]
+        if (firstStep is FakeChainProviderStep.Page) {
+            return scriptedPage(
+                key = key,
+                position = storedPosition,
+                index = index,
+                request = request,
+                page = firstStep.page,
+            )
+        }
+
+        val events = mutableListOf<ChainProviderObservedEvent>()
+        while (index < steps.size && events.size < request.limit) {
+            recordTransactionState()
+            recordRequestId()
+            when (val step = steps[index]) {
+                is FakeChainProviderStep.Event -> {
+                    events += step.event
+                    index += 1
+                }
+                is FakeChainProviderStep.Delay -> {
+                    sleep(step.duration)
+                    index += 1
+                }
+                is FakeChainProviderStep.Failure -> {
+                    if (events.isEmpty()) {
+                        throw ChainProviderUnavailableException(step.message)
+                    }
+                    break
+                }
+                is FakeChainProviderStep.ThrowableFailure -> {
+                    if (events.isEmpty()) {
+                        throw step.throwable
+                    }
+                    break
+                }
+                is FakeChainProviderStep.Page -> break
+            }
+        }
+
+        storedPosition.set(index)
+        val hasMore = index < steps.size
+        val nextCursor = index.toString()
+        val latestBlockHeight = events.maxOfOrNull { it.blockHeight }
+        return ChainProviderEventsPage(
+            events = events,
+            nextCursor = nextCursor,
+            hasMore = hasMore,
+            latestBlockHeight = latestBlockHeight,
+            safeBlockHeight = latestBlockHeight,
+        )
+    }
+
+    private fun scriptedPage(
+        key: FakeChainProviderKey,
+        position: AtomicInteger,
+        index: Int,
+        request: ChainProviderEventsPageRequest,
+        page: FakeChainProviderPage,
+    ): ChainProviderEventsPage {
+        if (page.expectedCursor != request.cursor) {
+            throw ProviderDataInvalidException("Fake provider expected cursor ${page.expectedCursor} but received ${request.cursor}.")
+        }
+        position.set(index + 1)
+        logger.debug(
+            "fake_provider_scripted_page key={} expectedCursor={} events={} hasMore={}",
+            key,
+            page.expectedCursor,
+            page.events.size,
+            page.hasMore,
+        )
+        return ChainProviderEventsPage(
+            events = page.events,
+            nextCursor = page.nextCursor,
+            hasMore = page.hasMore,
+            latestBlockHeight = page.latestBlockHeight,
+            safeBlockHeight = page.safeBlockHeight,
+            metadata = page.metadata,
+        )
+    }
+
+    private fun sleep(duration: Duration) {
+        try {
+            Thread.sleep(duration.toMillis())
+        } catch (exception: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw ChainProviderUnavailableException("Provider fetch interrupted.", exception)
+        }
+    }
+
     private fun recordTransactionState() {
         transactionActiveSnapshots.add(TransactionSynchronizationManager.isActualTransactionActive())
     }
@@ -157,9 +239,6 @@ class FakeChainProvider : ChainProviderPort {
     private fun recordRequestId() {
         requestIdSnapshots.add(MDC.get("requestId"))
     }
-
-    private fun String.concise(): String =
-        replace(Regex("\\s+"), " ").take(240)
 }
 
 @Component
@@ -182,7 +261,27 @@ data class FakeChainProviderKey(
     val asset: String,
 )
 
+data class FakeChainProviderPageRequest(
+    val key: FakeChainProviderKey,
+    val cursor: String?,
+    val limit: Int,
+)
+
+data class FakeChainProviderPage(
+    val expectedCursor: String?,
+    val events: List<ChainProviderObservedEvent>,
+    val nextCursor: String?,
+    val hasMore: Boolean,
+    val latestBlockHeight: Long? = null,
+    val safeBlockHeight: Long? = null,
+    val metadata: ObjectNode? = null,
+)
+
 sealed interface FakeChainProviderStep {
+    data class Page(
+        val page: FakeChainProviderPage,
+    ) : FakeChainProviderStep
+
     data class Event(
         val event: ChainProviderObservedEvent,
     ) : FakeChainProviderStep

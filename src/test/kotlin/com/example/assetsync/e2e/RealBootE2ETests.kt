@@ -164,7 +164,8 @@ class RealBootE2ETests(
                 val body = """
                     {"events":[{"txHash":"0xe2e-tx","eventIndex":0,"address":"0xe2eaddr","asset":"USDC",
                     "amount":1.000000000000000000,"blockHeight":1000,"confirmations":6,
-                    "direction":"INBOUND","status":"CONFIRMED"}]}
+                    "direction":"INBOUND","status":"CONFIRMED"}],
+                    "nextCursor":"e2e-final","hasMore":false,"latestBlockHeight":1000,"safeBlockHeight":1000}
                 """.trimIndent().replace("\n", "")
                 val bytes = body.toByteArray(StandardCharsets.UTF_8)
                 exchange.responseHeaders.add("Content-Type", "application/json")

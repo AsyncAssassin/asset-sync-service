@@ -264,6 +264,86 @@ class DatabaseMigrationIntegrationTests(
     }
 
     @Test
+    fun `migration 014 backfills sync cursors and separates failure attempts from claim attempts`() {
+        val schema = "migration_014_${UUID.randomUUID().toString().replace("-", "_")}"
+        dataSource.connection.use { connection ->
+            connection.createStatement().use { statement ->
+                statement.execute("CREATE SCHEMA $schema")
+            }
+        }
+
+        try {
+            withMigrationSchemaConnection(schema) { connection ->
+                runLiquibase(connection, changesToApply = 13)
+
+                val accountId = insertMigrationAccount(connection)
+                val watchedAddressId = insertMigrationWatchedAddress(
+                    connection = connection,
+                    accountId = accountId,
+                    address = "0xmigration014",
+                    asset = "USDC",
+                )
+                val running = insertPost013MigrationSyncRun(
+                    connection = connection,
+                    status = "RUNNING",
+                    targetId = watchedAddressId,
+                    startedAt = Instant.parse("2026-07-01T11:00:00Z"),
+                    finishedAt = null,
+                    lockedBy = "migration-worker",
+                    lockToken = UUID.randomUUID(),
+                    lockedUntil = Instant.parse("2026-07-01T11:05:00Z"),
+                    heartbeatAt = Instant.parse("2026-07-01T11:00:00Z"),
+                    attempts = 3,
+                )
+                val queued = insertPost013MigrationSyncRun(
+                    connection = connection,
+                    status = "QUEUED",
+                    targetId = UUID.randomUUID(),
+                    startedAt = null,
+                    finishedAt = null,
+                    attempts = 2,
+                )
+                val succeeded = insertPost013MigrationSyncRun(
+                    connection = connection,
+                    status = "SUCCEEDED",
+                    targetId = UUID.randomUUID(),
+                    startedAt = Instant.parse("2026-07-01T11:00:00Z"),
+                    finishedAt = Instant.parse("2026-07-01T11:01:00Z"),
+                    attempts = 5,
+                )
+
+                runLiquibase(connection)
+
+                assertEquals(
+                    1,
+                    queryMigrationInt(connection, "SELECT count(*) FROM sync_cursors WHERE watched_address_id = ?", watchedAddressId),
+                )
+                assertEquals(
+                    "{}",
+                    queryMigrationString(connection, "SELECT checkpoint::text FROM sync_cursors WHERE watched_address_id = ?", watchedAddressId),
+                )
+                assertEquals(
+                    null,
+                    queryMigrationString(connection, "SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", watchedAddressId),
+                )
+                assertEquals(0, queryMigrationInt(connection, "SELECT version FROM sync_cursors WHERE watched_address_id = ?", watchedAddressId))
+                assertEquals(2, queryMigrationInt(connection, "SELECT failure_attempts FROM sync_runs WHERE id = ?", running))
+                assertEquals(2, queryMigrationInt(connection, "SELECT failure_attempts FROM sync_runs WHERE id = ?", queued))
+                assertEquals("FAILURE", queryMigrationString(connection, "SELECT last_requeue_reason FROM sync_runs WHERE id = ?", queued))
+                assertEquals(0, queryMigrationInt(connection, "SELECT failure_attempts FROM sync_runs WHERE id = ?", succeeded))
+                assertEquals(0, queryMigrationInt(connection, "SELECT continuation_count FROM sync_runs WHERE id = ?", running))
+                assertEquals("{}", queryMigrationString(connection, "SELECT run_checkpoint::text FROM sync_runs WHERE id = ?", running))
+            }
+        } finally {
+            dataSource.connection.use { cleanupConnection ->
+                cleanupConnection.createStatement().use { statement ->
+                    statement.execute("DROP SCHEMA IF EXISTS $schema CASCADE")
+                }
+            }
+        }
+    }
+
+    @Test
     fun `local evm normalization migration halts when watched address duplicates would collide`() {
         assertNormalizationPreconditionFailsCleanly { connection ->
             val accountId = insertMigrationAccount(connection)

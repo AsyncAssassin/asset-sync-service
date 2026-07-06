@@ -1,11 +1,13 @@
 package com.example.assetsync.application.observability
 
 import com.example.assetsync.application.outbox.OutboxEventRepository
+import com.example.assetsync.application.sync.SyncRunRequeueReason
 import com.example.assetsync.application.sync.SyncRunStatus
 import com.example.assetsync.application.sync.SyncTargetType
 import com.example.assetsync.domain.model.OutboxEventType
 import com.example.assetsync.domain.model.TransactionStatus
 import com.example.assetsync.domain.model.TransitionOutcome
+import io.micrometer.core.instrument.DistributionSummary
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Timer
@@ -95,6 +97,51 @@ class AssetSyncMetrics(
 
     fun recordProviderFetchFailure(targetType: SyncTargetType, sample: Timer.Sample) {
         recordProviderFetchResult(targetType = targetType, status = "FAILED", sample = sample)
+    }
+
+    fun recordCursorLease(result: String) {
+        meterRegistry
+            .counter("asset.sync.cursor.leases", "result", result)
+            .increment()
+    }
+
+    fun recordProviderPage(targetType: SyncTargetType, result: String) {
+        meterRegistry
+            .counter(
+                "asset.sync.provider.pages",
+                "targetType",
+                targetType.name,
+                "result",
+                result,
+            )
+            .increment()
+    }
+
+    fun recordProviderPageEvents(targetType: SyncTargetType, count: Int) {
+        DistributionSummary
+            .builder("asset.sync.provider.page.events")
+            .description("Events returned in one provider page.")
+            .tag("targetType", targetType.name)
+            .register(meterRegistry)
+            .record(count.toDouble())
+    }
+
+    fun recordCursorCheckpoint(result: String) {
+        meterRegistry
+            .counter("asset.sync.cursor.checkpoints", "result", result)
+            .increment()
+    }
+
+    fun recordSyncContinuation(reason: SyncRunRequeueReason, targetType: SyncTargetType) {
+        meterRegistry
+            .counter(
+                "asset.sync.sync.continuations",
+                "reason",
+                reason.name,
+                "targetType",
+                targetType.name,
+            )
+            .increment()
     }
 
     fun recordOutboxBatch(claimed: Int, published: Int, failed: Int) {

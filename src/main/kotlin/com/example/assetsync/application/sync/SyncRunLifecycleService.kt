@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional
 @Service
 class SyncRunLifecycleService(
     private val syncRunRepository: SyncRunRepository,
+    private val syncCursorRepository: SyncCursorRepository,
     private val metrics: AssetSyncMetrics,
     private val clock: Clock,
     private val syncProperties: SyncProperties,
@@ -124,7 +125,13 @@ class SyncRunLifecycleService(
     }
 
     @Transactional
-    fun markFailed(claim: ClaimedSyncRun, eventsSeen: Int, eventsChanged: Int, lastError: String): Boolean {
+    fun markFailed(
+        claim: ClaimedSyncRun,
+        eventsSeen: Int,
+        eventsChanged: Int,
+        lastError: String,
+        failureAttempts: Int? = null,
+    ): Boolean {
         val now = Instant.now(clock)
         val marked = syncRunRepository.markFailedFenced(
             id = claim.run.id,
@@ -136,6 +143,7 @@ class SyncRunLifecycleService(
             lastError = lastError.take(syncProperties.worker.maxErrorLength),
             finishedAt = now,
             updatedAt = now,
+            failureAttempts = failureAttempts,
         )
         if (marked) {
             recordCompleted(
@@ -153,7 +161,7 @@ class SyncRunLifecycleService(
     @Transactional
     fun requeue(claim: ClaimedSyncRun, eventsSeen: Int, eventsChanged: Int, lastError: String): Boolean {
         val now = Instant.now(clock)
-        val nextAttemptAt = retryNextAttemptAt(now = now, attempts = claim.attempts, seed = claim.run.id)
+        val nextAttemptAt = retryNextAttemptAtForClaimAttempts(now = now, attempts = claim.attempts, seed = claim.run.id)
         val requeued = syncRunRepository.requeueFenced(
             id = claim.run.id,
             lockedBy = claim.lockedBy,
@@ -179,6 +187,111 @@ class SyncRunLifecycleService(
             logStaleClaimCompletion(claim = claim, intendedStatus = SyncRunStatus.QUEUED)
         }
         return requeued
+    }
+
+    @Transactional
+    fun requeueFailure(
+        claim: ClaimedSyncRun,
+        eventsSeen: Int,
+        eventsChanged: Int,
+        lastError: String,
+        retryAfter: Instant? = null,
+    ): Boolean {
+        val now = Instant.now(clock)
+        val expectedFailureAttempts = claim.run.failureAttempts
+        val newFailureAttempts = expectedFailureAttempts + 1
+        val clippedError = lastError.take(syncProperties.worker.maxErrorLength)
+        return if (newFailureAttempts >= syncProperties.worker.maxAttempts) {
+            markFailed(
+                claim = claim,
+                eventsSeen = eventsSeen,
+                eventsChanged = eventsChanged,
+                lastError = clippedError,
+                failureAttempts = newFailureAttempts,
+            )
+        } else {
+            val nextAttemptAt = retryAfter?.let { minOf(it, now.plus(syncProperties.worker.retryBackoffMaxDelay)) }
+                ?: retryNextAttemptAt(now = now, failureAttempts = newFailureAttempts, seed = claim.run.id)
+            val requeued = syncRunRepository.requeueFailureFenced(
+                id = claim.run.id,
+                lockedBy = claim.lockedBy,
+                lockToken = claim.lockToken,
+                attempts = claim.attempts,
+                expectedFailureAttempts = expectedFailureAttempts,
+                newFailureAttempts = newFailureAttempts,
+                eventsSeen = eventsSeen,
+                eventsChanged = eventsChanged,
+                lastError = clippedError,
+                nextAttemptAt = nextAttemptAt,
+                updatedAt = now,
+            )
+            if (requeued) {
+                logger.warn(
+                    "sync_run_requeued_failure syncRunId={} targetType={} targetId={} attempts={} failureAttempts={} nextAttemptAt={} error={}",
+                    claim.run.id,
+                    claim.run.targetType,
+                    claim.run.targetId,
+                    claim.attempts,
+                    newFailureAttempts,
+                    nextAttemptAt,
+                    clippedError,
+                )
+            } else {
+                logStaleClaimCompletion(claim = claim, intendedStatus = SyncRunStatus.QUEUED)
+            }
+            requeued
+        }
+    }
+
+    @Transactional
+    fun requeueContinuation(
+        claim: ClaimedSyncRun,
+        eventsSeen: Int,
+        eventsChanged: Int,
+        reason: SyncRunRequeueReason,
+        runCheckpoint: com.fasterxml.jackson.databind.node.ObjectNode,
+        delay: Duration,
+    ): SyncRunContinuationRequeueResult {
+        val now = Instant.now(clock)
+        val result = syncRunRepository.requeueContinuationFenced(
+            id = claim.run.id,
+            lockedBy = claim.lockedBy,
+            lockToken = claim.lockToken,
+            attempts = claim.attempts,
+            eventsSeen = eventsSeen,
+            eventsChanged = eventsChanged,
+            reason = reason,
+            runCheckpoint = runCheckpoint,
+            nextAttemptAt = now.plus(delay),
+            maxContinuationsPerRun = syncProperties.pagination.maxContinuationsPerRun,
+            maxErrorLength = syncProperties.worker.maxErrorLength,
+            updatedAt = now,
+        )
+        when (result) {
+            SyncRunContinuationRequeueResult.REQUEUED -> {
+                metrics.recordSyncContinuation(reason = reason, targetType = claim.run.targetType)
+                logger.info(
+                    "sync_run_requeued_continuation syncRunId={} targetType={} targetId={} reason={} continuationCount={} nextAttemptDelay={}",
+                    claim.run.id,
+                    claim.run.targetType,
+                    claim.run.targetId,
+                    reason,
+                    claim.run.continuationCount + 1,
+                    delay,
+                )
+            }
+            SyncRunContinuationRequeueResult.FAILED_LIMIT_EXCEEDED ->
+                logger.warn(
+                    "sync_run_continuation_limit_exceeded syncRunId={} targetType={} targetId={} maxContinuations={}",
+                    claim.run.id,
+                    claim.run.targetType,
+                    claim.run.targetId,
+                    syncProperties.pagination.maxContinuationsPerRun,
+                )
+            SyncRunContinuationRequeueResult.STALE_CLAIM ->
+                logStaleClaimCompletion(claim = claim, intendedStatus = SyncRunStatus.QUEUED)
+        }
+        return result
     }
 
     @Transactional
@@ -238,9 +351,9 @@ class SyncRunLifecycleService(
         val recoveredRuns = syncRunRepository.recoverExpiredRunning(
             now = now,
             limit = syncProperties.recovery.batchSize,
-            maxAttempts = syncProperties.worker.maxAttempts,
-            retryNextAttemptAt = { syncRun ->
-                retryNextAttemptAt(now = now, attempts = syncRun.attempts, seed = syncRun.id)
+            maxFailureAttempts = syncProperties.worker.maxAttempts,
+            retryNextAttemptAt = { syncRun, failureAttempts ->
+                retryNextAttemptAt(now = now, failureAttempts = failureAttempts, seed = syncRun.id)
             },
             maxErrorLength = syncProperties.worker.maxErrorLength,
         )
@@ -274,8 +387,24 @@ class SyncRunLifecycleService(
         return recoveredRuns.size
     }
 
-    fun retryNextAttemptAt(now: Instant, attempts: Int, seed: UUID): Instant =
+    @Transactional
+    fun clearExpiredCursorLeases(): Int {
+        val now = Instant.now(clock)
+        val cleared = syncCursorRepository.clearExpiredCursorLeases(
+            now = now,
+            limit = syncProperties.recovery.batchSize,
+        )
+        if (cleared > 0) {
+            logger.warn("sync_cursor_leases_recovered_expired count={}", cleared)
+        }
+        return cleared
+    }
+
+    fun retryNextAttemptAtForClaimAttempts(now: Instant, attempts: Int, seed: UUID): Instant =
         now.plus(backoffDelay(attempts = attempts, seed = seed))
+
+    fun retryNextAttemptAt(now: Instant, failureAttempts: Int, seed: UUID): Instant =
+        now.plus(backoffDelay(attempts = failureAttempts, seed = seed))
 
     private fun recordCompleted(syncRun: SyncRun, status: SyncRunStatus, eventsSeen: Int, eventsChanged: Int) {
         metrics.recordSyncRun(targetType = syncRun.targetType, status = status)

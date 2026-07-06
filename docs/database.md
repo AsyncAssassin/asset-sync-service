@@ -39,6 +39,7 @@ src/main/resources/db/changelog
     011-validate-length-constraints.yaml
     012-add-observed-transaction-block-height-check.yaml
     013-async-sync-runs.yaml
+    014-provider-pagination-cursors.yaml
 ```
 
 Changelog rules:
@@ -72,6 +73,7 @@ HAVING count(*) > 1;
 ```
 
 Drain, fail, or explicitly accept any legacy `STARTED` rows before enabling the worker. The worker processes only `QUEUED/RUNNING`; legacy stale-`STARTED` recovery remains separate.
+- Changeset `014` adds per-address `sync_cursors` and separates retry budget from worker claim count. Existing watched addresses receive one cursor row with null provider cursor and `{}` checkpoint. Existing `sync_runs.attempts` remains a total claim diagnostic; retry budget is backfilled into `failure_attempts`.
 
 ## 3. Tables
 
@@ -357,6 +359,10 @@ Key columns:
 | `events_changed` | `integer` | no | Events that changed stored state |
 | `last_error` | `text` | yes | Failure detail for diagnostics |
 | `attempts` | `integer` | no | Worker claim attempts |
+| `failure_attempts` | `integer` | no | Retryable failure budget counter |
+| `continuation_count` | `integer` | no | Healthy continuation requeue counter |
+| `run_checkpoint` | `jsonb` | no | Run-local metadata, currently account traversal offset |
+| `last_requeue_reason` | `text` | yes | `FAILURE`, `CONTINUATION`, or `LEASE_BUSY` |
 | `next_attempt_at` | `timestamptz` | no | Earliest claim/retry time |
 | `locked_by` | `varchar(200)` | yes | Current worker owner for `RUNNING` |
 | `lock_token` | `uuid` | yes | Current claim token for fenced updates |
@@ -379,6 +385,10 @@ Constraints and indexes:
 - `check (events_seen >= 0)`
 - `check (events_changed >= 0)`
 - `check (attempts >= 0)`
+- `check (failure_attempts >= 0)`
+- `check (continuation_count >= 0)`
+- `check (jsonb_typeof(run_checkpoint) = 'object')`
+- `check (last_requeue_reason is null or last_requeue_reason in ('FAILURE','CONTINUATION','LEASE_BUSY'))`
 - lock fields are required for `RUNNING` and null for non-`RUNNING`
 - terminal rows require `finished_at`; queued/running/started rows require `finished_at is null`
 
@@ -386,7 +396,46 @@ Notes:
 
 - `sync_runs` are operational records and the durable queue for async sync.
 - They do not participate in observed transaction idempotency.
+- Healthy provider pagination continuations increment `continuation_count`, not `failure_attempts`.
+- Retryable provider failures, 429 throttling, capacity failures, and expired `RUNNING` recovery increment `failure_attempts`.
 - The partial unique in-flight index intentionally excludes legacy `STARTED`.
+
+### `sync_cursors`
+
+Purpose: per-watched-address provider checkpoint and lease. This table prevents direct address sync and account sync from advancing the same address checkpoint concurrently.
+
+Key columns:
+
+| Column | Type | Nullable | Notes |
+| --- | --- | --- | --- |
+| `watched_address_id` | `uuid` | no | Primary key and FK to `watched_addresses(id)` |
+| `provider_cursor` | `text` | yes | Opaque provider resume token |
+| `checkpoint` | `jsonb` | no | Provider metadata object |
+| `last_processed_block_height` | `bigint` | yes | Durable high-water block |
+| `last_processed_event_index` | `integer` | yes | Durable high-water event index |
+| `last_finalized_block_height` | `bigint` | yes | Provider safe/finalized height |
+| `version` | `bigint` | no | Checkpoint CAS version |
+| `locked_by` | `varchar(200)` | yes | Current cursor lease owner |
+| `lock_token` | `uuid` | yes | Cursor lease token |
+| `locked_until` | `timestamptz` | yes | Cursor lease expiry |
+| `cursor_updated_at` | `timestamptz` | yes | Last checkpoint advancement |
+| `created_at` | `timestamptz` | no | Creation timestamp |
+| `updated_at` | `timestamptz` | no | Last update timestamp |
+
+Constraints and indexes:
+
+- `primary key (watched_address_id)`
+- `foreign key (watched_address_id) references watched_addresses(id) on delete cascade`
+- cursor length, checkpoint object/length, non-negative high-water fields, non-negative version
+- lease fields are all null or all populated
+- partial indexes for expired leases and locked owners
+
+Notes:
+
+- Provider fetches never run inside the cursor lease transaction. The worker acquires the lease, fetches one page outside a DB transaction, ingests the full page, then advances the checkpoint with `locked_by + lock_token + version + locked_until >= now` fencing.
+- A cursor heartbeat extends `locked_until` while a page fetch or ingest is in progress. If the heartbeat or the pre-checkpoint lease extension fails, the worker treats the checkpoint owner as stale and does not advance.
+- `advanceCheckpointFenced` preserves high-water columns when a final empty page or cursor-only page supplies null block fields. SQL also uses `COALESCE` as defense in depth. Final empty pages without `nextCursor` are valid only when the provider supplies durable block high-water such as `safeBlockHeight` or `latestBlockHeight`.
+- A failed checkpoint advance after committed events is safe: retry starts from the old cursor and replays the page idempotently.
 
 ## 4. Transaction Boundaries
 
@@ -399,7 +448,7 @@ Use short Spring-managed database transactions for:
 - Outbox batch claiming.
 - Per-event outbox completion updates.
 
-Provider calls must run outside database transactions. `asset-sync.sync.provider-timeout` is a total provider fetch deadline for one watched address rather than an idle timeout between queue items. A provider timeout must not hold row locks or an open connection.
+Provider calls must run outside database transactions. `asset-sync.sync.provider-timeout` is the deadline for one provider page fetch. A provider timeout must not hold row locks or an open connection.
 
 Outbox publishing uses `next_attempt_at` as a lease token rather than a separate `PROCESSING` status. The poller claims a small due batch with `FOR UPDATE SKIP LOCKED`, immediately updates each claimed row's `next_attempt_at` to the lease deadline, and commits. It then publishes outside the claim transaction. Each completion update records `PUBLISHED`, `FAILED`, or `DEAD` in a separate short transaction fenced by the exact claimed lease value.
 If `publish()` succeeds but `markPublished()` fails, the row remains leased in its previous `NEW` or `FAILED` status until the lease expires. That completion failure is logged and metered separately; it does not consume a publish attempt and cannot move the row to `DEAD`.
@@ -409,9 +458,11 @@ Recommended sync sequence:
 ```text
 1. Insert sync_run with status QUEUED in a short transaction, or return the existing QUEUED/RUNNING run for the same target.
 2. Worker claims due QUEUED rows with FOR UPDATE SKIP LOCKED and writes RUNNING lease fields.
-3. Worker calls the active provider outside a database transaction: fake in `local`/`test`, HTTP in non-local/test profiles.
-4. Ingest each observed event in its own transaction.
-5. Fenced update marks sync_run SUCCEEDED, FAILED, or QUEUED retry.
+3. Worker acquires a `sync_cursors` lease for each watched address it processes.
+4. Worker calls the active provider for one bounded page outside a database transaction.
+5. Ingest each observed event in the page in its own transaction.
+6. Advance the cursor checkpoint only after the whole page was ingested.
+7. Fenced update marks sync_run SUCCEEDED, FAILED, or QUEUED for retry/continuation.
 ```
 
 Observed event ingestion transaction:

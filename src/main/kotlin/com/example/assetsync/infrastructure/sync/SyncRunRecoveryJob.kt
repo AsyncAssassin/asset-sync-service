@@ -26,6 +26,7 @@ class SyncRunRecoveryJob(
         try {
             syncRunLifecycleService.markStaleStartedFailed()
             syncRunLifecycleService.recoverExpiredRunning()
+            syncRunLifecycleService.clearExpiredCursorLeases()
         } catch (exception: Exception) {
             logger.error(
                 "sync_run_recovery_failed exceptionClass={} error={}",

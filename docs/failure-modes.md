@@ -115,20 +115,23 @@ Operational signal:
 - Log database exception class and operation name.
 - Avoid logging credentials or raw connection strings.
 
-## 7. Provider Timeout
+## 7. Provider Timeout Or Backpressure
 
 Scenario:
 
-- The active chain provider times out or is unavailable during a sync.
+- The active chain provider times out, returns 429/5xx, or is unavailable during a sync page fetch.
 
 Expected behavior:
 
 - Sync POST has already returned `202 Accepted`; provider failure is observed through `GET /api/v1/sync-runs/{id}`.
 - Provider call is outside a database transaction and outside the request thread.
-- `asset-sync.sync.provider-timeout` is a total deadline for the provider fetch path for one watched address, not an idle timeout between provider events.
+- `asset-sync.sync.provider-timeout` is the deadline for one provider page fetch.
+- HTTP provider responses are bounded by `asset-sync.sync.pagination.max-provider-page-bytes` before JSON parsing.
 - Retryable provider failures requeue the current `sync_run` as `QUEUED` with bounded backoff.
+- HTTP 429 is retryable provider backpressure, increments `failure_attempts`, and uses valid `Retry-After` values capped by the configured max backoff.
 - At max attempts, the current `sync_run` is marked `FAILED` in a short fenced transaction.
 - Events already committed before the timeout remain valid.
+- The cursor checkpoint is not advanced for the failed page.
 - No long-lived database locks are held while waiting for provider response.
 
 Operational signal:
@@ -136,7 +139,57 @@ Operational signal:
 - Store concise failure detail in `sync_runs.last_error`.
 - Log `syncRunId`, target type, target id, and provider operation.
 
-## 8. Publisher Failure And Retry
+## 8. Malformed Provider Page
+
+Scenario:
+
+- The HTTP provider omits required `events` or `hasMore`.
+- The provider returns too many events, an oversized cursor/body/checkpoint, `hasMore=true` without cursor progress, wrong address/asset, invalid high-water fields, or insufficient final resume state. A final empty page may omit `nextCursor` only when it supplies durable block high-water such as `safeBlockHeight` or `latestBlockHeight`.
+
+Expected behavior:
+
+- Classify the page as terminal provider data invalid.
+- Do not ingest any event from a page that fails validation.
+- Do not advance `sync_cursors`.
+- Mark the current sync run `FAILED` with bounded `last_error`.
+
+Operational signal:
+
+- Log page validation failure with sync run id, watched address id, chain id, asset, event count, and whether `hasMore` was set. Do not log full opaque cursors.
+
+## 9. Cursor Lease Busy Or Stale
+
+Scenario:
+
+- A direct address sync and an account sync target the same watched address.
+- A worker loses a cursor lease or attempts to advance with a stale lock token/version or expired `locked_until`.
+
+Expected behavior:
+
+- A busy cursor lease does not mark success. Direct address sync requeues as `LEASE_BUSY`; account sync skips that address, processes later addresses, and requeues to revisit skipped work.
+- A worker must extend its cursor lease before checkpointing and through the cursor heartbeat while long page work is in progress. If extension fails, checkpoint advancement is skipped and the run is retried as a stale-owner failure.
+- Busy lease continuations increment `continuation_count`, not `failure_attempts`.
+- Stale checkpoint advancement affects zero rows. Already committed page events remain valid and the old checkpoint causes safe idempotent replay.
+- Expired cursor leases are cleared by recovery.
+
+Operational signal:
+
+- Log cursor lease acquired, busy, advanced, stale, and released events with watched address id and sync run id.
+
+## 10. Healthy Continuation Limit
+
+Scenario:
+
+- A large address/account hits configured page, event, or run-duration bounds while the provider still has more pages.
+
+Expected behavior:
+
+- The current page is ingested and checkpointed first.
+- The sync run is requeued as `CONTINUATION`.
+- `continuation_count` increments; `failure_attempts` does not.
+- If `max-continuations-per-run` is exceeded, the run is marked `FAILED` as likely stuck or misconfigured.
+
+## 11. Publisher Failure And Retry
 
 Scenario:
 
@@ -157,7 +210,7 @@ Operational signal:
 - Emit outbox failure/dead metrics.
 - Keep error messages bounded to avoid unbounded row growth.
 
-## 9. Process Crash Around Outbox Publish
+## 12. Process Crash Around Outbox Publish
 
 Scenario:
 
@@ -180,7 +233,7 @@ Expected behavior:
 
 - The row is retried after the processing lease expires.
 
-## 10. Concurrent Sync For Same Address
+## 13. Concurrent Sync For Same Address
 
 Scenario:
 
@@ -205,7 +258,7 @@ Notes:
 - Duplicate provider work can still happen after process crash or lease recovery because sync execution is at-least-once.
 - Advisory locks or a counter table can be added later if operators need stricter global admission guarantees.
 
-## 11. Expired Running Sync Lease
+## 14. Expired Running Sync Lease
 
 Scenario:
 
@@ -214,17 +267,18 @@ Scenario:
 Expected behavior:
 
 - Recovery finds expired `RUNNING` rows with `locked_until < now()` using `FOR UPDATE SKIP LOCKED`.
-- If `attempts < maxAttempts`, recovery requeues the row as `QUEUED`, sets a future `next_attempt_at`, records concise `last_error`, and clears `locked_by`, `lock_token`, `locked_until`, and `heartbeat_at`.
-- If `attempts >= maxAttempts`, recovery marks the row `FAILED`, sets `finished_at`, records concise `last_error`, and clears lock fields.
+- Recovery increments `failure_attempts` because an expired `RUNNING` row means the previous owner failed under lease.
+- If the incremented `failure_attempts` is below max attempts, recovery requeues the row as `QUEUED`, sets a future `next_attempt_at`, records concise `last_error`, and clears `locked_by`, `lock_token`, `locked_until`, and `heartbeat_at`.
+- If the incremented `failure_attempts` reaches max attempts, recovery marks the row `FAILED`, sets `finished_at`, records concise `last_error`, and clears lock fields.
 - Recovery never overwrites `SUCCEEDED` or `FAILED` rows.
 - Legacy stale `STARTED` recovery remains separate for rolling deploy compatibility.
 
 Operational signal:
 
-- Log recovered run id, target, attempts, and whether the run was requeued or failed.
+- Log recovered run id, target, attempts, failure attempts, and whether the run was requeued or failed.
 - A stale worker completion after recovery affects zero rows because fenced completion requires matching `locked_by`, `lock_token`, and `attempts`.
 
-## 12. Process Crash During Sync Execution
+## 15. Process Crash During Sync Execution
 
 Scenario:
 
@@ -233,11 +287,13 @@ Scenario:
 Expected behavior:
 
 - Already committed observed events and outbox rows remain valid.
+- If the crash happens after a page checkpoint advances but before sync-run completion, retry resumes from the advanced cursor.
+- If the crash happens before checkpoint advancement, retry replays the previous page and ingestion idempotency handles duplicates.
 - The `RUNNING` sync run is recovered after lease expiry and may execute again.
 - Duplicate future provider events are safe because observed-event ingestion is idempotent.
 - This is at-least-once sync execution, not exactly-once provider work.
 
-## 13. Future Failure Modes
+## 16. Future Failure Modes
 
 Deferred areas:
 

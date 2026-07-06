@@ -110,6 +110,16 @@ class JooqWatchedAddressRepository(
             .offset(offset)
             .fetch { it.toWatchedAddress() }
 
+    override fun countActiveByAccountId(accountId: UUID): Int =
+        requireNotNull(
+            dsl
+                .selectCount()
+                .from(WATCHED_ADDRESSES)
+                .where(WATCHED_ADDRESSES.ACCOUNT_ID.eq(accountId))
+                .and(WATCHED_ADDRESSES.STATUS.eq(WatchedAddressStatus.ACTIVE.name))
+                .fetchOne(0, Int::class.java),
+        )
+
     override fun findActiveByNaturalKey(chainId: String, address: String, asset: String): WatchedAddress? =
         dsl
             .select(

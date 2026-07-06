@@ -3,12 +3,14 @@ package com.example.assetsync.integration
 import com.example.assetsync.TestcontainersConfiguration
 import com.example.assetsync.api.dto.MAX_TX_HASH_LENGTH
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
+import com.example.assetsync.application.sync.SyncCursorRepository
 import com.example.assetsync.application.sync.SyncApplicationService
 import com.example.assetsync.application.sync.SyncRunLifecycleService
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
 import com.example.assetsync.infrastructure.provider.FakeChainProvider
 import com.example.assetsync.infrastructure.provider.FakeChainProviderKey
+import com.example.assetsync.infrastructure.provider.FakeChainProviderPage
 import com.example.assetsync.infrastructure.provider.FakeChainProviderStep
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -56,6 +58,7 @@ class SyncApiIntegrationTests(
     @Autowired private val objectMapper: ObjectMapper,
     @Autowired private val jdbcTemplate: JdbcTemplate,
     @Autowired private val fakeChainProvider: FakeChainProvider,
+    @Autowired private val syncCursorRepository: SyncCursorRepository,
     @Autowired private val syncRunLifecycleService: SyncRunLifecycleService,
     @Autowired private val syncApplicationService: SyncApplicationService,
 ) {
@@ -117,6 +120,444 @@ class SyncApiIntegrationTests(
             fakeChainProvider.requestedKeys(),
         )
         assertProviderCallsOutsideTransactions()
+    }
+
+    @Test
+    fun `address sync consumes multiple provider pages and persists final cursor`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-three-pages")
+        val addressId = watchedAddress["id"].asText()
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-three-pages",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = listOf(providerEvent(txHash = "0xsync-three-pages-1", address = "0xsync-three-pages", blockHeight = 100)),
+                        nextCursor = "page-2",
+                        hasMore = true,
+                        latestBlockHeight = 100,
+                        safeBlockHeight = 100,
+                    ),
+                ),
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = "page-2",
+                        events = listOf(providerEvent(txHash = "0xsync-three-pages-2", address = "0xsync-three-pages", blockHeight = 101)),
+                        nextCursor = "page-3",
+                        hasMore = true,
+                        latestBlockHeight = 101,
+                        safeBlockHeight = 101,
+                    ),
+                ),
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = "page-3",
+                        events = listOf(providerEvent(txHash = "0xsync-three-pages-3", address = "0xsync-three-pages", blockHeight = 102)),
+                        nextCursor = "final-cursor",
+                        hasMore = false,
+                        latestBlockHeight = 102,
+                        safeBlockHeight = 102,
+                    ),
+                ),
+            ),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(3, singleInt("SELECT events_seen FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(3, tableCount("observed_transactions"))
+        assertEquals(listOf(null, "page-2", "page-3"), fakeChainProvider.requestedPageRequests().map { it.cursor })
+        assertEquals(
+            "final-cursor",
+            singleString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)),
+        )
+    }
+
+    @Test
+    fun `empty final page with block high water and no cursor succeeds and advances checkpoint`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-empty-high-water")
+        val addressId = watchedAddress["id"].asText()
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-empty-high-water",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = emptyList(),
+                        nextCursor = null,
+                        hasMore = false,
+                        latestBlockHeight = 500,
+                    ),
+                ),
+            ),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(0, singleInt("SELECT events_seen FROM sync_runs WHERE id = ?", syncRunId))
+        assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        assertNull(nullableLong("SELECT last_processed_block_height FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        assertEquals(500L, singleLong("SELECT last_finalized_block_height FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+    }
+
+    @Test
+    fun `empty final high water page preserves event checkpoint and updates finalized high water`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-high-water-after-cursor")
+        val addressId = watchedAddress["id"].asText()
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-high-water-after-cursor",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = listOf(
+                            providerEvent(
+                                txHash = "0xsync-high-water-after-cursor-1",
+                                address = "0xsync-high-water-after-cursor",
+                                eventIndex = 5,
+                                blockHeight = 100,
+                            ),
+                        ),
+                        nextCursor = "page-2",
+                        hasMore = true,
+                        latestBlockHeight = 100,
+                        safeBlockHeight = 90,
+                    ),
+                ),
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = "page-2",
+                        events = emptyList(),
+                        nextCursor = null,
+                        hasMore = false,
+                        latestBlockHeight = 125,
+                        safeBlockHeight = 120,
+                    ),
+                ),
+            ),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        assertEquals(100L, singleLong("SELECT last_processed_block_height FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        assertEquals(5, singleInt("SELECT last_processed_event_index FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        assertEquals(120L, singleLong("SELECT last_finalized_block_height FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+    }
+
+    @Test
+    fun `empty final page without cursor or high water is rejected without advancing checkpoint`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-empty-no-progress")
+        val addressId = watchedAddress["id"].asText()
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-empty-no-progress",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = emptyList(),
+                        nextCursor = null,
+                        hasMore = false,
+                    ),
+                ),
+            ),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertTrue(
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId)
+                .contains("final page without a durable resume cursor or high-water checkpoint"),
+        )
+        assertEquals(0L, singleLong("SELECT version FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+    }
+
+    @Test
+    fun `has more page without next cursor is rejected without advancing checkpoint`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-has-more-null-cursor")
+        val addressId = watchedAddress["id"].asText()
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-has-more-null-cursor",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = emptyList(),
+                        nextCursor = null,
+                        hasMore = true,
+                    ),
+                ),
+            ),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertTrue(
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId)
+                .contains("hasMore=true without nextCursor"),
+        )
+        assertEquals(listOf(null), fakeChainProvider.requestedPageRequests().map { it.cursor })
+        assertEquals(0L, singleLong("SELECT version FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        assertEquals(0, tableCount("observed_transactions"))
+    }
+
+    @Test
+    fun `has more page with same cursor is rejected without advancing checkpoint again`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-has-more-same-cursor")
+        val addressId = watchedAddress["id"].asText()
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-has-more-same-cursor",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = listOf(
+                            providerEvent(
+                                txHash = "0xsync-has-more-same-cursor-1",
+                                address = "0xsync-has-more-same-cursor",
+                                blockHeight = 100,
+                            ),
+                        ),
+                        nextCursor = "page-2",
+                        hasMore = true,
+                        latestBlockHeight = 100,
+                        safeBlockHeight = 100,
+                    ),
+                ),
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = "page-2",
+                        events = emptyList(),
+                        nextCursor = "page-2",
+                        hasMore = true,
+                        latestBlockHeight = 100,
+                        safeBlockHeight = 100,
+                    ),
+                ),
+            ),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertTrue(
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId)
+                .contains("hasMore=true without cursor progress"),
+        )
+        assertEquals(listOf(null, "page-2"), fakeChainProvider.requestedPageRequests().map { it.cursor })
+        assertEquals(1L, singleLong("SELECT version FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        assertEquals(
+            "page-2",
+            singleString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)),
+        )
+        assertEquals(1, tableCount("observed_transactions"))
+    }
+
+    @Test
+    fun `retry after page two provider failure resumes from last checkpointed cursor`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-page-two-retry")
+        val addressId = watchedAddress["id"].asText()
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-page-two-retry",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = listOf(providerEvent(txHash = "0xsync-page-two-retry-1", address = "0xsync-page-two-retry", blockHeight = 100)),
+                        nextCursor = "page-2",
+                        hasMore = true,
+                        latestBlockHeight = 100,
+                        safeBlockHeight = 100,
+                    ),
+                ),
+                FakeChainProviderStep.Failure("Provider failed on page two"),
+            ),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("QUEUED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(1, singleInt("SELECT failure_attempts FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(0, singleInt("SELECT continuation_count FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(
+            "page-2",
+            singleString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)),
+        )
+        assertEquals(1, tableCount("observed_transactions"))
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-page-two-retry",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = "page-2",
+                        events = listOf(providerEvent(txHash = "0xsync-page-two-retry-2", address = "0xsync-page-two-retry", blockHeight = 101)),
+                        nextCursor = "final-page",
+                        hasMore = false,
+                        latestBlockHeight = 101,
+                        safeBlockHeight = 101,
+                    ),
+                ),
+            ),
+        )
+        jdbcTemplate.update(
+            "UPDATE sync_runs SET next_attempt_at = ? WHERE id = ?",
+            Timestamp.from(Instant.now().minusSeconds(1)),
+            syncRunId,
+        )
+        runNextClaimedSyncs()
+
+        assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(2, tableCount("observed_transactions"))
+        assertEquals(listOf(null, "page-2", "page-2"), fakeChainProvider.requestedPageRequests().map { it.cursor })
+    }
+
+    @Test
+    fun `healthy page continuation increments continuation count without failure attempts`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-continuation-budget")
+        val addressId = watchedAddress["id"].asText()
+        val pages = (1..51).map { page ->
+            FakeChainProviderStep.Page(
+                FakeChainProviderPage(
+                    expectedCursor = if (page == 1) null else "page-$page",
+                    events = listOf(
+                        providerEvent(
+                            txHash = "0xsync-continuation-budget-$page",
+                            address = "0xsync-continuation-budget",
+                            blockHeight = 100L + page,
+                        ),
+                    ),
+                    nextCursor = if (page == 51) "final-page" else "page-${page + 1}",
+                    hasMore = page < 51,
+                    latestBlockHeight = 100L + page,
+                    safeBlockHeight = 100L + page,
+                ),
+            )
+        }
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-continuation-budget",
+            asset = "USDC",
+            steps = pages,
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("QUEUED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(1, singleInt("SELECT continuation_count FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(0, singleInt("SELECT failure_attempts FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals("CONTINUATION", singleString("SELECT last_requeue_reason FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(50, tableCount("observed_transactions"))
+        assertEquals(
+            "page-51",
+            singleString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)),
+        )
+    }
+
+    @Test
+    fun `account sync skips busy early address and processes later address`() {
+        val accountId = createAccount()
+        val busyAddress = registerAddress(accountId = accountId, address = "0xsync-account-busy")
+        val laterAddress = registerAddress(accountId = accountId, address = "0xsync-account-later")
+        val busyAddressId = UUID.fromString(busyAddress["id"].asText())
+        val laterAddressId = laterAddress["id"].asText()
+        val now = Instant.now()
+        val busyToken = UUID.randomUUID()
+        syncCursorRepository.ensureCursor(watchedAddressId = busyAddressId, now = now)
+        assertNotNull(
+            syncCursorRepository.tryAcquireCursorLease(
+                watchedAddressId = busyAddressId,
+                lockedBy = "external-worker",
+                lockToken = busyToken,
+                now = now,
+                leaseUntil = now.plusSeconds(60),
+            ),
+        )
+
+        try {
+            fakeChainProvider.setEvents(
+                chainId = "local-evm",
+                address = "0xsync-account-busy",
+                asset = "USDC",
+                events = listOf(providerEvent(txHash = "0xsync-account-busy", address = "0xsync-account-busy")),
+            )
+            fakeChainProvider.setEvents(
+                chainId = "local-evm",
+                address = "0xsync-account-later",
+                asset = "USDC",
+                events = listOf(providerEvent(txHash = "0xsync-account-later", address = "0xsync-account-later")),
+            )
+
+            val syncRunId = submitAccountSync(accountId)
+            runNextClaimedSyncs()
+
+            assertEquals("QUEUED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+            assertEquals("LEASE_BUSY", singleString("SELECT last_requeue_reason FROM sync_runs WHERE id = ?", syncRunId))
+            assertEquals(1, singleInt("SELECT continuation_count FROM sync_runs WHERE id = ?", syncRunId))
+            assertEquals(0, singleInt("SELECT failure_attempts FROM sync_runs WHERE id = ?", syncRunId))
+            assertEquals(1, tableCount("observed_transactions"))
+            assertEquals(
+                listOf(FakeChainProviderKey("local-evm", "0xsync-account-later", "USDC")),
+                fakeChainProvider.requestedKeys(),
+            )
+            assertEquals(
+                "1",
+                singleString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(laterAddressId)),
+            )
+        } finally {
+            syncCursorRepository.releaseCursorLeaseFenced(
+                watchedAddressId = busyAddressId,
+                lockedBy = "external-worker",
+                lockToken = busyToken,
+                updatedAt = Instant.now(),
+            )
+        }
     }
 
     @Test
@@ -267,6 +708,88 @@ class SyncApiIntegrationTests(
     }
 
     @Test
+    fun `partial page ingest failure leaves checkpoint unchanged and retry reprocesses idempotently`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-partial-page-retry")
+        val addressId = watchedAddress["id"].asText()
+        val firstEvent = providerEvent(
+            txHash = "0xsync-partial-page-retry-1",
+            address = "0xsync-partial-page-retry",
+            blockHeight = 100,
+            eventIndex = 0,
+        )
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-partial-page-retry",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = listOf(
+                            firstEvent,
+                            providerEvent(
+                                txHash = "x".repeat(MAX_TX_HASH_LENGTH + 1),
+                                address = "0xsync-partial-page-retry",
+                                blockHeight = 100,
+                                eventIndex = 1,
+                            ),
+                        ),
+                        nextCursor = "final-page",
+                        hasMore = false,
+                        latestBlockHeight = 100,
+                        safeBlockHeight = 100,
+                    ),
+                ),
+            ),
+        )
+
+        val failedRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", failedRunId))
+        assertEquals(1, tableCount("observed_transactions"))
+        assertEquals(0L, singleLong("SELECT version FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-partial-page-retry",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = listOf(
+                            firstEvent,
+                            providerEvent(
+                                txHash = "0xsync-partial-page-retry-2",
+                                address = "0xsync-partial-page-retry",
+                                blockHeight = 100,
+                                eventIndex = 1,
+                            ),
+                        ),
+                        nextCursor = "final-page",
+                        hasMore = false,
+                        latestBlockHeight = 100,
+                        safeBlockHeight = 100,
+                    ),
+                ),
+            ),
+        )
+
+        val retryRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", retryRunId))
+        assertEquals(2, tableCount("observed_transactions"))
+        assertEquals(2, tableCount("outbox_events"))
+        assertEquals("final-page", singleString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        assertEquals(listOf(null, null), fakeChainProvider.requestedPageRequests().map { it.cursor })
+    }
+
+    @Test
     fun `provider data mismatch is terminal failed`() {
         val accountId = createAccount()
         val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-provider-mismatch")
@@ -283,7 +806,7 @@ class SyncApiIntegrationTests(
         runNextClaimedSyncs()
 
         assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
-        assertEquals(1, singleInt("SELECT events_seen FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(0, singleInt("SELECT events_seen FROM sync_runs WHERE id = ?", syncRunId))
         assertEquals(0, tableCount("observed_transactions"))
         assertEquals(0, tableCount("outbox_events"))
     }
@@ -548,6 +1071,15 @@ class SyncApiIntegrationTests(
 
     private fun singleInt(sql: String, vararg args: Any): Int =
         requireNotNull(jdbcTemplate.queryForObject(sql, Int::class.java, *args))
+
+    private fun singleLong(sql: String, vararg args: Any): Long =
+        requireNotNull(jdbcTemplate.queryForObject(sql, Long::class.java, *args))
+
+    private fun nullableString(sql: String, vararg args: Any): String? =
+        jdbcTemplate.queryForObject(sql, String::class.java, *args)
+
+    private fun nullableLong(sql: String, vararg args: Any): Long? =
+        jdbcTemplate.queryForObject(sql, Long::class.java, *args)
 
     private fun nullableTimestamp(sql: String, vararg args: Any): Timestamp? =
         jdbcTemplate.queryForObject(sql, Timestamp::class.java, *args)

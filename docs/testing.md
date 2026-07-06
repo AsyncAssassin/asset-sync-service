@@ -73,6 +73,10 @@ Required cases:
 | Retry race | concurrent duplicate processing results in one canonical row |
 | Outbox poller | `FOR UPDATE SKIP LOCKED` prevents duplicate claims across pollers |
 | Publisher retry | failed publish increments attempts and schedules `next_attempt_at` |
+| Sync cursors | lease acquire/release/reclaim, expired lease fencing, stale token rejection, heartbeat extension, high-water preservation |
+| Provider pages | missing required fields, explicit empty page, high-water-only final page, byte cap, cursor progress, multi-page success |
+| Sync continuation | page failure retry from checkpoint, continuation count separate from failure attempts |
+| Account traversal | busy early address is skipped while later addresses are processed |
 
 Testcontainers expectations:
 
@@ -99,8 +103,8 @@ Required cases:
 | `POST /api/v1/accounts/{accountId}/addresses` | create success, account not found, chain disabled/not found, duplicate address, validation failures |
 | `GET /api/v1/accounts/{accountId}/addresses` | list success, account not found |
 | `POST /api/v1/observed-events` | created, updated, no-change duplicate, immutable conflict, validation failures |
-| `POST /api/v1/addresses/{addressId}/sync` | success, address not found, provider timeout |
-| `POST /api/v1/accounts/{accountId}/sync` | success, account not found, provider failure |
+| `POST /api/v1/addresses/{addressId}/sync` | success, address not found, provider timeout, multi-page checkpointing, retry from page cursor |
+| `POST /api/v1/accounts/{accountId}/sync` | success, account not found, provider failure, busy cursor fairness |
 | `GET /api/v1/sync-runs/{syncRunId}` | found, not found |
 
 ProblemDetail assertions:
@@ -134,6 +138,8 @@ Required tests:
 Implementation note:
 
 - Keep network/provider calls outside database transactions in tests that inspect lock duration.
+- Provider pagination tests should assert checkpoint advancement happens only after whole-page ingestion.
+- Retry budget tests should assert `failure_attempts` and `continuation_count` move independently.
 - Use latches or barriers for deterministic concurrency where needed.
 
 ## 6. Gradle Commands
@@ -158,8 +164,7 @@ Do not add a markdown or test tool only for the Specs phase.
 
 Deferred test areas:
 
-- Real provider adapter contract tests.
-- Provider cursor and block-range scan tests.
+- Provider-specific block-range scan contracts beyond the generic page/cursor contract.
 - Broker publisher tests for Kafka, SQS, or CDC.
 - Balance projection rebuild tests.
 - Multi-tenant authorization tests.

@@ -1,9 +1,9 @@
 # asset-sync-service Architecture
 
-Status: MVP implemented through async sync
+Status: MVP implemented through async sync and provider pagination
 Scope: MVP backend service  
 Stack: Kotlin, Spring Boot 3.x, Spring MVC, jOOQ, PostgreSQL, Liquibase, Testcontainers, Docker Compose, OpenAPI, transactional outbox  
-Last updated: 2026-07-04
+Last updated: 2026-07-06
 
 ## 1. Assumptions
 
@@ -149,6 +149,7 @@ sequenceDiagram
     participant API as SyncController
     participant Sync as SyncApplicationService
     participant Worker as SyncRunWorkerJob
+    participant Cursor as SyncCursorRepository
     participant Provider as ActiveChainProvider
     participant Ingest as ObservedTransactionIngestionService
     participant DB as PostgreSQL
@@ -159,18 +160,53 @@ sequenceDiagram
     API-->>Client: 202 Accepted + Location
     Worker->>DB: claim due QUEUED run FOR UPDATE SKIP LOCKED
     Worker->>DB: mark RUNNING with lease + lock_token
-    Worker->>Provider: fetchEvents(address)
-    Provider-->>Worker: observed events
-    loop each event
-        Worker->>Ingest: ingest(event)
-        Ingest->>DB: transactional upsert + outbox
+    Worker->>Cursor: acquire per-address cursor lease
+    loop provider pages
+        Worker->>Provider: fetchEventsPage(address, cursor, limit)
+        Provider-->>Worker: events + nextCursor/high-water + hasMore
+        Worker->>Worker: validate page contract
+        loop each page event
+            Worker->>Ingest: ingest(event)
+            Ingest->>DB: transactional upsert + outbox
+        end
+        Worker->>Cursor: advance checkpoint fenced by lease token + version + unexpired lease
     end
-    Worker->>DB: fenced mark SUCCEEDED, FAILED, or QUEUED retry
+    Worker->>Cursor: release cursor lease
+    Worker->>DB: fenced mark SUCCEEDED, FAILED, or QUEUED continuation/retry
     Client->>API: GET /api/v1/sync-runs/{id}
     API-->>Client: current run state
 ```
 
-The provider call is outside the observed event ingestion transaction and outside the POST request. `asset-sync.sync.provider-timeout` is an absolute deadline for the full provider fetch path for one watched address, not a per-item idle timeout. A provider timeout must not hold database locks. Completion is fenced by `locked_by`, `lock_token`, and `attempts`, so stale owners cannot overwrite a recovered or terminal run.
+The provider call is outside the observed event ingestion transaction and outside the POST request. `asset-sync.sync.provider-timeout` is the deadline for one provider page fetch, and `asset-sync.sync.pagination.max-provider-page-bytes` bounds HTTP provider response bodies before JSON parsing. Checkpoints advance only after all events in a provider page have been ingested. Completion and requeue are fenced by `locked_by`, `lock_token`, and `attempts`; cursor checkpoint advancement is separately fenced by `locked_by`, `lock_token`, cursor `version`, and an unexpired `locked_until`. A cursor heartbeat extends the per-address lease during long page fetch or ingest work, and a worker that cannot extend the lease stops before advancing the checkpoint.
+
+Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. Retryable provider failures, including 429 throttling, increment `failure_attempts`.
+
+### Manual Account Sync Traversal
+
+```mermaid
+sequenceDiagram
+    participant Worker as SyncRunWorkerJob
+    participant Repo as WatchedAddressRepository
+    participant Cursor as SyncCursorRepository
+    participant Provider as ActiveChainProvider
+    participant DB as PostgreSQL
+
+    Worker->>Repo: count active account addresses
+    Worker->>DB: read run_checkpoint.accountNextOffset
+    loop bounded circular traversal
+        Worker->>Repo: fetch deterministic active address slice
+        alt cursor lease acquired
+            Worker->>Cursor: acquire address cursor lease
+            Worker->>Provider: fetch bounded page(s)
+            Worker->>Cursor: checkpoint after page ingest
+        else cursor lease busy
+            Worker->>Worker: count address as visited and skip for this claim
+        end
+        Worker->>DB: persist next traversal offset on continuation
+    end
+```
+
+Account sync does not own a provider cursor. It stores only traversal fairness metadata in `sync_runs.run_checkpoint`; provider resume state remains per watched address in `sync_cursors`.
 
 ### Observed Event Ingestion
 
@@ -527,6 +563,10 @@ Key columns:
 - `events_changed integer not null default 0`
 - `last_error text null`
 - `attempts integer not null default 0`
+- `failure_attempts integer not null default 0`
+- `continuation_count integer not null default 0`
+- `run_checkpoint jsonb not null default '{}'::jsonb`
+- `last_requeue_reason text null`
 - `next_attempt_at timestamptz not null`
 - `locked_by varchar(200) null`
 - `lock_token uuid null`
@@ -546,11 +586,39 @@ Constraints and indexes:
 - `check (events_seen >= 0)`
 - `check (events_changed >= 0)`
 - `check (attempts >= 0)`
+- `check (failure_attempts >= 0)`
+- `check (continuation_count >= 0)`
+- `check (jsonb_typeof(run_checkpoint) = 'object')`
 - lock fields are required for `RUNNING` and null for non-`RUNNING`
 
 Rationale:
 - Sync runs are operational records for troubleshooting, API inspection, and durable worker claiming.
 - They are not used as transaction idempotency keys.
+- `attempts` counts worker claims, `failure_attempts` controls retry budget, and `continuation_count` tracks healthy page/account continuations.
+- `run_checkpoint` stores account traversal metadata, not provider resume state.
+
+### `sync_cursors`
+
+Key columns:
+- `watched_address_id uuid primary key references watched_addresses(id) on delete cascade`
+- `provider_cursor text null`
+- `checkpoint jsonb not null default '{}'::jsonb`
+- `last_processed_block_height bigint null`
+- `last_processed_event_index integer null`
+- `last_finalized_block_height bigint null`
+- `version bigint not null default 0`
+- `locked_by varchar(200) null`
+- `lock_token uuid null`
+- `locked_until timestamptz null`
+- `cursor_updated_at timestamptz null`
+- `created_at timestamptz not null`
+- `updated_at timestamptz not null`
+
+Rationale:
+- Per-address cursor leases prevent direct address sync and account sync from advancing the same checkpoint concurrently.
+- Checkpoint state advances only after a full provider page has been ingested.
+- A final empty provider page may omit `nextCursor` only when it supplies durable block high-water such as `safeBlockHeight` or `latestBlockHeight`; empty pages with no cursor and no high-water are rejected as no-progress provider data.
+- `version + locked_by + lock_token` fencing makes stale owners harmless.
 
 ### Liquibase Changelog Structure
 
@@ -1111,8 +1179,8 @@ asset-sync-service
 - Balance projection as an eventually consistent read model.
 - Kafka or SQS outbox publisher.
 - Debezium CDC-based outbox publishing.
-- Provider cursors and real blockchain/indexer backend integration.
-- Provider cursors and block range scans.
+- Real blockchain/indexer backend integration beyond the generic HTTP page contract.
+- Provider-specific block range scans.
 - Multi-instance sync coordination with advisory locks or a scheduler lock.
 - Multi-tenant authorization and account ownership.
 - Audit event history.

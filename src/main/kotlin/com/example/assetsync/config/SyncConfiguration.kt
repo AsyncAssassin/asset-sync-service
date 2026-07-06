@@ -60,6 +60,7 @@ data class SyncProperties(
     val accountSyncBatchSize: Int = 100,
     val maxAccountSyncAddresses: Int = 1_000,
     val staleRunTimeout: Duration = Duration.ofMinutes(30),
+    val pagination: Pagination = Pagination(),
     val recovery: Recovery = Recovery(),
     val worker: Worker = Worker(),
 ) {
@@ -75,6 +76,83 @@ data class SyncProperties(
         }
         require(worker.maxConcurrency <= providerMaxThreads) {
             "asset-sync.sync.worker.max-concurrency must be <= asset-sync.sync.provider-max-threads."
+        }
+        require(pagination.cursorLeaseDuration > providerTimeout) {
+            "asset-sync.sync.pagination.cursor-lease-duration must be greater than provider-timeout."
+        }
+        require(pagination.pageSize <= pagination.maxEventsPerAddressRun) {
+            "asset-sync.sync.pagination.page-size must be <= max-events-per-address-run."
+        }
+        require(pagination.pageSize <= pagination.maxEventsPerAccountRun) {
+            "asset-sync.sync.pagination.page-size must be <= max-events-per-account-run."
+        }
+        require(pagination.maxPagesPerAccountRun >= pagination.maxPagesPerAddressRun) {
+            "asset-sync.sync.pagination.max-pages-per-account-run must be >= max-pages-per-address-run."
+        }
+    }
+
+    data class Pagination(
+        val pageSize: Int = 100,
+        val maxPagesPerAddressRun: Int = 50,
+        val maxEventsPerAddressRun: Int = 5_000,
+        val maxPagesPerAccountRun: Int = 200,
+        val maxEventsPerAccountRun: Int = 20_000,
+        val maxRunDuration: Duration = Duration.ofMinutes(2),
+        val cursorLeaseDuration: Duration = Duration.ofMinutes(2),
+        val cursorHeartbeatInterval: Duration = Duration.ofSeconds(30),
+        val cursorLeaseRetryDelay: Duration = Duration.ofSeconds(5),
+        val continuationRequeueDelay: Duration = Duration.ofSeconds(1),
+        val maxContinuationsPerRun: Int = 1_000,
+        val maxCursorLength: Int = 4_096,
+        val maxCheckpointJsonLength: Int = 16_384,
+        val maxProviderPageBytes: Int = 1_048_576,
+    ) {
+        init {
+            require(pageSize in 1..1_000) {
+                "asset-sync.sync.pagination.page-size must be between 1 and 1000."
+            }
+            require(maxPagesPerAddressRun > 0) {
+                "asset-sync.sync.pagination.max-pages-per-address-run must be positive."
+            }
+            require(maxEventsPerAddressRun > 0) {
+                "asset-sync.sync.pagination.max-events-per-address-run must be positive."
+            }
+            require(maxPagesPerAccountRun > 0) {
+                "asset-sync.sync.pagination.max-pages-per-account-run must be positive."
+            }
+            require(maxEventsPerAccountRun > 0) {
+                "asset-sync.sync.pagination.max-events-per-account-run must be positive."
+            }
+            require(!maxRunDuration.isNegative && !maxRunDuration.isZero) {
+                "asset-sync.sync.pagination.max-run-duration must be positive."
+            }
+            require(!cursorLeaseDuration.isNegative && !cursorLeaseDuration.isZero) {
+                "asset-sync.sync.pagination.cursor-lease-duration must be positive."
+            }
+            require(!cursorHeartbeatInterval.isNegative && !cursorHeartbeatInterval.isZero) {
+                "asset-sync.sync.pagination.cursor-heartbeat-interval must be positive."
+            }
+            require(cursorHeartbeatInterval < cursorLeaseDuration) {
+                "asset-sync.sync.pagination.cursor-heartbeat-interval must be less than cursor-lease-duration."
+            }
+            require(!cursorLeaseRetryDelay.isNegative) {
+                "asset-sync.sync.pagination.cursor-lease-retry-delay must not be negative."
+            }
+            require(!continuationRequeueDelay.isNegative) {
+                "asset-sync.sync.pagination.continuation-requeue-delay must not be negative."
+            }
+            require(maxContinuationsPerRun >= 0) {
+                "asset-sync.sync.pagination.max-continuations-per-run must not be negative."
+            }
+            require(maxCursorLength in 1..4_096) {
+                "asset-sync.sync.pagination.max-cursor-length must be between 1 and 4096."
+            }
+            require(maxCheckpointJsonLength in 1..16_384) {
+                "asset-sync.sync.pagination.max-checkpoint-json-length must be between 1 and 16384."
+            }
+            require(maxProviderPageBytes > 0) {
+                "asset-sync.sync.pagination.max-provider-page-bytes must be positive."
+            }
         }
     }
 

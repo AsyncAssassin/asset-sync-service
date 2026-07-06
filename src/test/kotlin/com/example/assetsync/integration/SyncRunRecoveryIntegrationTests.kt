@@ -399,7 +399,11 @@ class SyncRunRecoveryIntegrationTests(
         return id
     }
 
-    private fun insertRunningSyncRun(lockedUntil: Instant, attempts: Int): UUID {
+    private fun insertRunningSyncRun(
+        lockedUntil: Instant,
+        attempts: Int,
+        failureAttempts: Int = (attempts - 1).coerceAtLeast(0),
+    ): UUID {
         val id = UUID.randomUUID()
         val now = Instant.now()
         jdbcTemplate.update(
@@ -418,11 +422,12 @@ class SyncRunRecoveryIntegrationTests(
                 locked_until,
                 heartbeat_at,
                 attempts,
+                failure_attempts,
                 next_attempt_at,
                 created_at,
                 updated_at
             )
-            VALUES (?, 'ACCOUNT', ?, 'RUNNING', ?, 0, 0, ?, 'test-worker', ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, 'ACCOUNT', ?, 'RUNNING', ?, 0, 0, ?, 'test-worker', ?, ?, ?, ?, ?, ?, ?, ?)
             """.trimIndent(),
             id,
             UUID.randomUUID(),
@@ -432,6 +437,7 @@ class SyncRunRecoveryIntegrationTests(
             Timestamp.from(lockedUntil),
             Timestamp.from(lockedUntil.minusSeconds(30)),
             attempts,
+            failureAttempts,
             Timestamp.from(now.minusSeconds(120)),
             Timestamp.from(now.minusSeconds(120)),
             Timestamp.from(now.minusSeconds(120)),

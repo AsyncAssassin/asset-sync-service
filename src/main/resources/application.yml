@@ -52,6 +52,21 @@ asset-sync:
     account-sync-batch-size: ${ASSET_SYNC_ACCOUNT_SYNC_BATCH_SIZE:100}
     max-account-sync-addresses: ${ASSET_SYNC_MAX_ACCOUNT_SYNC_ADDRESSES:1000}
     stale-run-timeout: ${ASSET_SYNC_STALE_RUN_TIMEOUT:30m}
+    pagination:
+      page-size: ${ASSET_SYNC_PAGINATION_PAGE_SIZE:100}
+      max-pages-per-address-run: ${ASSET_SYNC_PAGINATION_MAX_PAGES_PER_ADDRESS_RUN:50}
+      max-events-per-address-run: ${ASSET_SYNC_PAGINATION_MAX_EVENTS_PER_ADDRESS_RUN:5000}
+      max-pages-per-account-run: ${ASSET_SYNC_PAGINATION_MAX_PAGES_PER_ACCOUNT_RUN:200}
+      max-events-per-account-run: ${ASSET_SYNC_PAGINATION_MAX_EVENTS_PER_ACCOUNT_RUN:20000}
+      max-run-duration: ${ASSET_SYNC_PAGINATION_MAX_RUN_DURATION:2m}
+      cursor-lease-duration: ${ASSET_SYNC_PAGINATION_CURSOR_LEASE_DURATION:2m}
+      cursor-heartbeat-interval: ${ASSET_SYNC_PAGINATION_CURSOR_HEARTBEAT_INTERVAL:30s}
+      cursor-lease-retry-delay: ${ASSET_SYNC_PAGINATION_CURSOR_LEASE_RETRY_DELAY:5s}
+      continuation-requeue-delay: ${ASSET_SYNC_PAGINATION_CONTINUATION_REQUEUE_DELAY:1s}
+      max-continuations-per-run: ${ASSET_SYNC_PAGINATION_MAX_CONTINUATIONS_PER_RUN:1000}
+      max-cursor-length: ${ASSET_SYNC_PAGINATION_MAX_CURSOR_LENGTH:4096}
+      max-checkpoint-json-length: ${ASSET_SYNC_PAGINATION_MAX_CHECKPOINT_JSON_LENGTH:16384}
+      max-provider-page-bytes: ${ASSET_SYNC_PAGINATION_MAX_PROVIDER_PAGE_BYTES:1048576}
     recovery:
       enabled: ${ASSET_SYNC_RECOVERY_ENABLED:true}
       batch-size: ${ASSET_SYNC_RECOVERY_BATCH_SIZE:100}

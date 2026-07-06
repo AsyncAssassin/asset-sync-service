@@ -1,0 +1,122 @@
+databaseChangeLog:
+  - changeSet:
+      id: 014-provider-pagination-cursors
+      author: AsyncAssassin
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            sql: |
+              CREATE TABLE sync_cursors (
+                  watched_address_id uuid NOT NULL,
+                  provider_cursor text,
+                  checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb,
+                  last_processed_block_height bigint,
+                  last_processed_event_index integer,
+                  last_finalized_block_height bigint,
+                  version bigint NOT NULL DEFAULT 0,
+                  locked_by varchar(200),
+                  lock_token uuid,
+                  locked_until timestamptz,
+                  cursor_updated_at timestamptz,
+                  created_at timestamptz NOT NULL,
+                  updated_at timestamptz NOT NULL,
+                  CONSTRAINT pk_sync_cursors PRIMARY KEY (watched_address_id),
+                  CONSTRAINT fk_sync_cursors_watched_address_id
+                      FOREIGN KEY (watched_address_id)
+                      REFERENCES watched_addresses (id)
+                      ON DELETE CASCADE,
+                  CONSTRAINT ck_sync_cursors_provider_cursor_length
+                      CHECK (provider_cursor IS NULL OR char_length(provider_cursor) <= 4096),
+                  CONSTRAINT ck_sync_cursors_checkpoint_object
+                      CHECK (jsonb_typeof(checkpoint) = 'object'),
+                  CONSTRAINT ck_sync_cursors_checkpoint_length
+                      CHECK (octet_length(checkpoint::text) <= 16384),
+                  CONSTRAINT ck_sync_cursors_last_processed_block_height_non_negative
+                      CHECK (last_processed_block_height IS NULL OR last_processed_block_height >= 0),
+                  CONSTRAINT ck_sync_cursors_last_processed_event_index_non_negative
+                      CHECK (last_processed_event_index IS NULL OR last_processed_event_index >= 0),
+                  CONSTRAINT ck_sync_cursors_last_finalized_block_height_non_negative
+                      CHECK (last_finalized_block_height IS NULL OR last_finalized_block_height >= 0),
+                  CONSTRAINT ck_sync_cursors_version_non_negative
+                      CHECK (version >= 0),
+                  CONSTRAINT ck_sync_cursors_locked_by_length
+                      CHECK (locked_by IS NULL OR char_length(locked_by) <= 200),
+                  CONSTRAINT ck_sync_cursors_lock_fields_consistent
+                      CHECK (
+                          (
+                              locked_by IS NULL
+                              AND lock_token IS NULL
+                              AND locked_until IS NULL
+                          )
+                          OR (
+                              locked_by IS NOT NULL
+                              AND lock_token IS NOT NULL
+                              AND locked_until IS NOT NULL
+                          )
+                      )
+              );
+
+              CREATE INDEX idx_sync_cursors_expired_lease_partial
+                  ON sync_cursors (locked_until, watched_address_id)
+                  WHERE locked_until IS NOT NULL;
+
+              CREATE INDEX idx_sync_cursors_cursor_updated_at
+                  ON sync_cursors (cursor_updated_at, watched_address_id);
+
+              CREATE INDEX idx_sync_cursors_locked_by
+                  ON sync_cursors (locked_by)
+                  WHERE locked_by IS NOT NULL;
+
+              INSERT INTO sync_cursors (
+                  watched_address_id,
+                  provider_cursor,
+                  checkpoint,
+                  version,
+                  created_at,
+                  updated_at
+              )
+              SELECT
+                  id,
+                  NULL,
+                  '{}'::jsonb,
+                  0,
+                  now(),
+                  now()
+              FROM watched_addresses
+              ON CONFLICT (watched_address_id) DO NOTHING;
+
+              ALTER TABLE sync_runs
+                  ADD COLUMN failure_attempts integer NOT NULL DEFAULT 0,
+                  ADD COLUMN continuation_count integer NOT NULL DEFAULT 0,
+                  ADD COLUMN run_checkpoint jsonb NOT NULL DEFAULT '{}'::jsonb,
+                  ADD COLUMN last_requeue_reason text;
+
+              UPDATE sync_runs
+              SET failure_attempts = CASE
+                      WHEN status = 'RUNNING' THEN GREATEST(attempts - 1, 0)
+                      WHEN status IN ('QUEUED', 'FAILED') THEN attempts
+                      ELSE 0
+                  END,
+                  continuation_count = 0,
+                  run_checkpoint = '{}'::jsonb,
+                  last_requeue_reason = CASE
+                      WHEN status = 'QUEUED' AND attempts > 0 THEN 'FAILURE'
+                      ELSE NULL
+                  END;
+
+              ALTER TABLE sync_runs
+                  ADD CONSTRAINT ck_sync_runs_failure_attempts_non_negative
+                      CHECK (failure_attempts >= 0),
+                  ADD CONSTRAINT ck_sync_runs_continuation_count_non_negative
+                      CHECK (continuation_count >= 0),
+                  ADD CONSTRAINT ck_sync_runs_run_checkpoint_object
+                      CHECK (jsonb_typeof(run_checkpoint) = 'object'),
+                  ADD CONSTRAINT ck_sync_runs_run_checkpoint_length
+                      CHECK (octet_length(run_checkpoint::text) <= 16384),
+                  ADD CONSTRAINT ck_sync_runs_last_requeue_reason
+                      CHECK (
+                          last_requeue_reason IS NULL
+                          OR last_requeue_reason IN ('FAILURE', 'CONTINUATION', 'LEASE_BUSY')
+                      );

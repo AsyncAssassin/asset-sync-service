@@ -31,7 +31,8 @@
 - Observed event ingestion for `local-evm`.
 - Idempotent transaction lifecycle transitions: `SEEN`, `CONFIRMED`, and `REVERTED`.
 - Outbox event creation for meaningful transaction state changes.
-- Manual sync by watched address or account through `ChainProviderPort` (`FakeChainProvider` in `local`/`test`, `HttpChainProvider` in non-local/test profiles).
+- Manual sync by watched address or account through a page-based `ChainProviderPort` (`FakeChainProvider` in `local`/`test`, `HttpChainProvider` in non-local/test profiles).
+- Per-watched-address provider cursors, checkpoint leases, and bounded continuation requeue for large syncs.
 - Sync run inspection.
 - Scheduled outbox publishing to structured logs.
 - Liveness, readiness, metrics, Prometheus, Swagger UI, and OpenAPI JSON.
@@ -270,14 +271,24 @@ Runtime configuration:
 | `ASSET_SYNC_OUTBOX_SCHEDULER_FIXED_DELAY` | `5s` | Delay between poller runs |
 | `ASSET_SYNC_OUTBOX_SCHEDULER_INITIAL_DELAY` | `10s` | Initial delay before first poll |
 | `ASSET_SYNC_OUTBOX_RETENTION_ENABLED` | `false` | Enables published outbox retention |
-| `ASSET_SYNC_SYNC_PROVIDER_TIMEOUT` | `10s` | Absolute provider fetch deadline per watched address; not a per-event idle timeout |
+| `ASSET_SYNC_SYNC_PROVIDER_TIMEOUT` | `10s` | Provider page fetch deadline |
 | `ASSET_SYNC_SYNC_PROVIDER_MAX_THREADS` | `4` | Provider fetch isolation pool size |
+| `ASSET_SYNC_PAGINATION_PAGE_SIZE` | `100` | Provider page event limit |
+| `ASSET_SYNC_PAGINATION_MAX_PAGES_PER_ADDRESS_RUN` | `50` | Per-claim page bound for one address |
+| `ASSET_SYNC_PAGINATION_MAX_EVENTS_PER_ADDRESS_RUN` | `5000` | Per-claim event bound for one address |
+| `ASSET_SYNC_PAGINATION_MAX_PAGES_PER_ACCOUNT_RUN` | `200` | Per-claim page bound for account sync |
+| `ASSET_SYNC_PAGINATION_MAX_EVENTS_PER_ACCOUNT_RUN` | `20000` | Per-claim event bound for account sync |
+| `ASSET_SYNC_PAGINATION_MAX_RUN_DURATION` | `2m` | Per-claim sync duration bound checked between pages |
+| `ASSET_SYNC_PAGINATION_CURSOR_LEASE_DURATION` | `2m` | Per-address cursor lease duration |
+| `ASSET_SYNC_PAGINATION_CURSOR_HEARTBEAT_INTERVAL` | `30s` | Cursor lease extension cadence during page work |
+| `ASSET_SYNC_PAGINATION_MAX_PROVIDER_PAGE_BYTES` | `1048576` | HTTP provider response byte cap before JSON parse |
+| `ASSET_SYNC_PAGINATION_MAX_CONTINUATIONS_PER_RUN` | `1000` | Healthy continuation requeue limit |
 | `ASSET_SYNC_WORKER_ENABLED` | `true` | Enables the scheduled async sync worker |
 | `ASSET_SYNC_WORKER_CLAIM_BATCH_SIZE` | `10` | Due sync runs claimed per worker tick |
 | `ASSET_SYNC_WORKER_MAX_CONCURRENCY` | `4` | Local worker job concurrency; must be `<= ASSET_SYNC_SYNC_PROVIDER_MAX_THREADS` |
 | `ASSET_SYNC_WORKER_LEASE_DURATION` | `60s` | Lease duration for `RUNNING` sync runs |
 | `ASSET_SYNC_WORKER_HEARTBEAT_INTERVAL` | `20s` | Heartbeat cadence while a worker owns a run |
-| `ASSET_SYNC_WORKER_MAX_ATTEMPTS` | `5` | Attempts before retryable sync failure becomes terminal `FAILED` |
+| `ASSET_SYNC_WORKER_MAX_ATTEMPTS` | `5` | Retryable failure attempts before sync becomes terminal `FAILED` |
 | `ASSET_SYNC_WORKER_MAX_IN_FLIGHT_RUNS` | `1000` | Soft cap for `QUEUED + RUNNING` sync runs |
 
 ## Reliability Highlights
@@ -289,6 +300,8 @@ Runtime configuration:
 - Transactional outbox rows are inserted in the same database transaction as lifecycle state changes.
 - The outbox poller claims due rows with `FOR UPDATE SKIP LOCKED`, writes a lease to `next_attempt_at`, then completes each event with a fenced compare-and-set update.
 - Sync POST enqueues durable `sync_runs` and returns `202 Accepted`; the scheduled worker claims `QUEUED` runs with `FOR UPDATE SKIP LOCKED`, heartbeats `RUNNING` leases, and completes with `locked_by + lock_token` fencing.
+- Provider sync is page-based. Each watched address has a `sync_cursors` row; the worker acquires a cursor lease, fetches one bounded page, ingests the full page, and only then advances the checkpoint.
+- Healthy page/account continuations increment `continuation_count`, while retryable failures and 429 backpressure increment `failure_attempts`.
 - Duplicate in-flight sync requests for the same address/account return the existing run instead of starting duplicate provider work.
 - Publishing is at-least-once; downstream consumers should deduplicate by event id or idempotency key.
 - Failed publishes store a bounded error message, use bounded retry backoff, and become terminal `DEAD` rows at max attempts.
@@ -342,8 +355,8 @@ This service does not provide custody, signing, private key storage, wallet func
 Future extensions, not implemented in `v0.1.0`:
 
 - Transaction read/list endpoints.
-- Provider cursors and real blockchain/indexer backend integration.
-- Provider cursors and block-range scans.
+- Real blockchain/indexer backend integration beyond the generic HTTP page contract.
+- Provider-specific block-range scans.
 - External broker adapter for the outbox.
 - Balance projection read models.
 - Tenant-level authorization and account ownership.

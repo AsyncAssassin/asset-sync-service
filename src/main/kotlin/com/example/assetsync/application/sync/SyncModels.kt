@@ -1,5 +1,6 @@
 package com.example.assetsync.application.sync
 
+import com.fasterxml.jackson.databind.node.ObjectNode
 import java.time.Instant
 import java.util.UUID
 
@@ -38,12 +39,65 @@ data class SyncRun(
     val startedAt: Instant?,
     val finishedAt: Instant?,
     val attempts: Int,
+    val failureAttempts: Int,
+    val continuationCount: Int,
+    val runCheckpoint: ObjectNode,
+    val lastRequeueReason: SyncRunRequeueReason?,
     val nextAttemptAt: Instant,
     val lockedBy: String?,
     val lockToken: UUID?,
     val lockedUntil: Instant?,
     val heartbeatAt: Instant?,
     val createdAt: Instant,
+    val updatedAt: Instant,
+)
+
+enum class SyncRunRequeueReason {
+    FAILURE,
+    CONTINUATION,
+    LEASE_BUSY,
+}
+
+enum class SyncRunContinuationRequeueResult {
+    REQUEUED,
+    FAILED_LIMIT_EXCEEDED,
+    STALE_CLAIM,
+}
+
+data class SyncCursor(
+    val watchedAddressId: UUID,
+    val providerCursor: String?,
+    val checkpoint: ObjectNode,
+    val lastProcessedBlockHeight: Long?,
+    val lastProcessedEventIndex: Int?,
+    val lastFinalizedBlockHeight: Long?,
+    val version: Long,
+    val lockedBy: String?,
+    val lockToken: UUID?,
+    val lockedUntil: Instant?,
+    val cursorUpdatedAt: Instant?,
+    val createdAt: Instant,
+    val updatedAt: Instant,
+)
+
+data class AcquiredSyncCursorLease(
+    val cursor: SyncCursor,
+    val lockedBy: String,
+    val lockToken: UUID,
+)
+
+data class AdvanceSyncCheckpointCommand(
+    val watchedAddressId: UUID,
+    val lockedBy: String,
+    val lockToken: UUID,
+    val expectedVersion: Long,
+    val leaseCheckedAt: Instant,
+    val providerCursor: String?,
+    val checkpoint: ObjectNode,
+    val lastProcessedBlockHeight: Long?,
+    val lastProcessedEventIndex: Int?,
+    val lastFinalizedBlockHeight: Long?,
+    val cursorUpdatedAt: Instant,
     val updatedAt: Instant,
 )
 
@@ -86,6 +140,7 @@ interface SyncRunRepository {
         lastError: String,
         finishedAt: Instant,
         updatedAt: Instant,
+        failureAttempts: Int? = null,
     ): Boolean
 
     fun requeueFenced(
@@ -93,6 +148,35 @@ interface SyncRunRepository {
         lockedBy: String,
         lockToken: UUID,
         attempts: Int,
+        eventsSeen: Int,
+        eventsChanged: Int,
+        lastError: String,
+        nextAttemptAt: Instant,
+        updatedAt: Instant,
+    ): Boolean
+
+    fun requeueContinuationFenced(
+        id: UUID,
+        lockedBy: String,
+        lockToken: UUID,
+        attempts: Int,
+        eventsSeen: Int,
+        eventsChanged: Int,
+        reason: SyncRunRequeueReason,
+        runCheckpoint: ObjectNode,
+        nextAttemptAt: Instant,
+        maxContinuationsPerRun: Int,
+        maxErrorLength: Int,
+        updatedAt: Instant,
+    ): SyncRunContinuationRequeueResult
+
+    fun requeueFailureFenced(
+        id: UUID,
+        lockedBy: String,
+        lockToken: UUID,
+        attempts: Int,
+        expectedFailureAttempts: Int,
+        newFailureAttempts: Int,
         eventsSeen: Int,
         eventsChanged: Int,
         lastError: String,
@@ -113,8 +197,8 @@ interface SyncRunRepository {
     fun recoverExpiredRunning(
         now: Instant,
         limit: Int,
-        maxAttempts: Int,
-        retryNextAttemptAt: (SyncRun) -> Instant,
+        maxFailureAttempts: Int,
+        retryNextAttemptAt: (SyncRun, Int) -> Instant,
         maxErrorLength: Int,
     ): List<SyncRun>
 
@@ -130,6 +214,43 @@ interface SyncRunRepository {
      * completion resolved to SUCCEEDED/FAILED in the meantime.
      */
     fun markAbandoned(id: UUID, lastError: String, finishedAt: Instant, updatedAt: Instant): SyncRun?
+}
+
+interface SyncCursorRepository {
+    fun ensureCursor(watchedAddressId: UUID, now: Instant): SyncCursor
+
+    fun findCursor(watchedAddressId: UUID): SyncCursor?
+
+    fun tryAcquireCursorLease(
+        watchedAddressId: UUID,
+        lockedBy: String,
+        lockToken: UUID,
+        now: Instant,
+        leaseUntil: Instant,
+    ): AcquiredSyncCursorLease?
+
+    fun extendCursorLease(
+        watchedAddressId: UUID,
+        lockedBy: String,
+        lockToken: UUID,
+        leaseUntil: Instant,
+        updatedAt: Instant,
+    ): Boolean
+
+    fun advanceCheckpointFenced(command: AdvanceSyncCheckpointCommand): SyncCursor?
+
+    fun releaseCursorLease(watchedAddressId: UUID, updatedAt: Instant): Boolean
+
+    fun releaseCursorLeaseFenced(
+        watchedAddressId: UUID,
+        lockedBy: String,
+        lockToken: UUID,
+        updatedAt: Instant,
+    ): Boolean
+
+    fun findExpiredCursorLeases(now: Instant, limit: Int): List<SyncCursor>
+
+    fun clearExpiredCursorLeases(now: Instant, limit: Int): Int
 }
 
 class SyncRunNotFoundException(

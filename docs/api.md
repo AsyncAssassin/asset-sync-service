@@ -367,7 +367,7 @@ Response shape is the same transaction object used by the list endpoint.
 
 ## 10. Start Address Sync
 
-Enqueues a durable sync run for one watched address. The POST request validates that the address exists, creates or reuses an in-flight `sync_runs` row, and returns before provider work starts. Local/test profiles use the fake provider; non-local/test profiles use the HTTP provider from the background worker.
+Enqueues a durable sync run for one watched address. The POST request validates that the address exists, creates or reuses an in-flight `sync_runs` row, and returns before provider work starts. Local/test profiles use the fake provider; non-local/test profiles use the HTTP provider from the background worker. Provider pagination and cursor checkpoints are internal; the public API exposes the durable run state only.
 
 Request:
 
@@ -403,21 +403,27 @@ Behavior:
 
 - Duplicate in-flight requests for the same target return the existing `QUEUED` or `RUNNING` run with `202 Accepted` and the same `Location`.
 - If no duplicate exists and the soft queue cap is full, the API returns `429 sync-queue-full`.
-- The worker claims due `QUEUED` rows, marks them `RUNNING`, and fetches events from the active chain provider outside a database transaction.
-- `asset-sync.sync.provider-timeout` is the absolute provider fetch deadline for each watched address. It is not a per-event idle timeout; slow trickle streams cannot extend the deadline by yielding one item just before each poll expires.
+- The worker claims due `QUEUED` rows, marks them `RUNNING`, and processes provider pages outside database transactions.
+- Each watched address has a `sync_cursors` row. The worker acquires that cursor lease, heartbeats it during page work, fetches a bounded provider page, ingests all page events, then advances the checkpoint with lease/version/unexpired-lease fencing.
+- `asset-sync.sync.provider-timeout` is the deadline for one provider page fetch.
 - Ingest each event through the same observed-event ingestion path used by the API.
 - Mark the sync run `SUCCEEDED`, `FAILED`, or requeue it as `QUEUED` in a short fenced transaction.
+- `eventsSeen` and `eventsChanged` are cumulative across all claims and healthy continuations for the same sync run.
 - Retrying a sync is safe because observed event ingestion is idempotent. `sync_runs` records are diagnostic and are not business idempotency keys.
 
 Failure behavior:
 
 - Provider timeout or provider unavailability no longer bubbles to POST. The worker stores concise failure detail in `lastError` and either requeues the run with backoff or marks it `FAILED` after max attempts.
+- Healthy page limits and account traversal limits requeue the same run as a continuation without consuming retry budget.
+- HTTP 429 throttling is retryable provider backpressure. A valid `Retry-After` value influences the next attempt delay.
 - Events committed before a provider failure remain valid.
 - The API must not report provider completion from POST; clients poll `GET /api/v1/sync-runs/{id}`.
 
 ## 11. Start Account Sync
 
 Enqueues sync for all active watched addresses under one account. The POST behavior is the same as address sync: validate account existence, create or reuse an in-flight run, and return `202 Accepted` with a pollable location.
+
+Account sync uses per-address cursors and a run-local traversal offset. If one address cursor is busy because a direct address sync owns it, the account run skips that address for the current claim, processes later active addresses, and requeues a healthy continuation to revisit skipped work. This prevents an early busy or very large address from starving later addresses.
 
 Request:
 
@@ -452,8 +458,8 @@ Location: /api/v1/sync-runs/53059d5b-4813-4d6d-9f8e-6f993744e879
 Behavior:
 
 - Resolve active watched addresses in bounded pages.
-- Call the active chain provider once per watched address.
-- Ingest each provider event independently.
+- For each address, acquire the per-address cursor lease and fetch bounded provider pages until the page stream is done or a configured continuation limit is reached.
+- Ingest each provider event independently and checkpoint only after the full provider page is ingested.
 - A retryable provider failure requeues the overall sync run unless max attempts has been reached.
 - Accounts over the configured address cap are terminal `FAILED` during worker execution.
 

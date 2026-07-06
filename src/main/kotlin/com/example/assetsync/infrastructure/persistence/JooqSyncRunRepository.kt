@@ -3,14 +3,19 @@ package com.example.assetsync.infrastructure.persistence
 import com.example.assetsync.application.sync.ClaimedSyncRun
 import com.example.assetsync.application.sync.NewQueuedSyncRun
 import com.example.assetsync.application.sync.SyncRun
+import com.example.assetsync.application.sync.SyncRunContinuationRequeueResult
 import com.example.assetsync.application.sync.SyncRunRepository
+import com.example.assetsync.application.sync.SyncRunRequeueReason
 import com.example.assetsync.application.sync.SyncRunStatus
 import com.example.assetsync.application.sync.SyncTargetType
 import com.example.assetsync.infrastructure.persistence.jooq.generated.tables.records.SyncRunsRecord
 import com.example.assetsync.infrastructure.persistence.jooq.generated.tables.references.SYNC_RUNS
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.node.ObjectNode
 import java.time.Instant
 import java.util.UUID
 import org.jooq.DSLContext
+import org.jooq.JSONB
 import org.jooq.Record
 import org.jooq.SelectFieldOrAsterisk
 import org.jooq.impl.DSL
@@ -19,6 +24,7 @@ import org.springframework.stereotype.Repository
 @Repository
 class JooqSyncRunRepository(
     private val dsl: DSLContext,
+    private val objectMapper: ObjectMapper,
 ) : SyncRunRepository {
 
     override fun insertQueued(syncRun: NewQueuedSyncRun): SyncRun? =
@@ -37,6 +43,10 @@ class JooqSyncRunRepository(
             .set(SYNC_RUNS.UPDATED_AT, syncRun.updatedAt.toOffsetDateTime())
             .set(SYNC_RUNS.QUEUED_AT, syncRun.queuedAt.toOffsetDateTime())
             .set(SYNC_RUNS.ATTEMPTS, 0)
+            .set(SYNC_RUNS.FAILURE_ATTEMPTS, 0)
+            .set(SYNC_RUNS.CONTINUATION_COUNT, 0)
+            .set(SYNC_RUNS.RUN_CHECKPOINT, JSONB.valueOf("{}"))
+            .setNull(SYNC_RUNS.LAST_REQUEUE_REASON)
             .set(SYNC_RUNS.NEXT_ATTEMPT_AT, syncRun.nextAttemptAt.toOffsetDateTime())
             .onConflict(SYNC_RUNS.TARGET_TYPE, SYNC_RUNS.TARGET_ID)
             .where(inFlightStatusCondition())
@@ -151,8 +161,9 @@ class JooqSyncRunRepository(
         lastError: String,
         finishedAt: Instant,
         updatedAt: Instant,
-    ): Boolean =
-        dsl
+        failureAttempts: Int?,
+    ): Boolean {
+        var update = dsl
             .update(SYNC_RUNS)
             .set(SYNC_RUNS.STATUS, SyncRunStatus.FAILED.name)
             .set(SYNC_RUNS.EVENTS_SEEN, eventsSeen)
@@ -161,8 +172,13 @@ class JooqSyncRunRepository(
             .set(SYNC_RUNS.FINISHED_AT, finishedAt.toOffsetDateTime())
             .clearLockFields()
             .set(SYNC_RUNS.UPDATED_AT, updatedAt.toOffsetDateTime())
+        if (failureAttempts != null) {
+            update = update.set(SYNC_RUNS.FAILURE_ATTEMPTS, failureAttempts)
+        }
+        return update
             .whereCurrentClaim(id = id, lockedBy = lockedBy, lockToken = lockToken, attempts = attempts)
             .execute() == 1
+    }
 
     override fun requeueFenced(
         id: UUID,
@@ -181,11 +197,106 @@ class JooqSyncRunRepository(
             .set(SYNC_RUNS.EVENTS_SEEN, eventsSeen)
             .set(SYNC_RUNS.EVENTS_CHANGED, eventsChanged)
             .set(SYNC_RUNS.LAST_ERROR, lastError)
+            .set(SYNC_RUNS.LAST_REQUEUE_REASON, SyncRunRequeueReason.FAILURE.name)
             .set(SYNC_RUNS.NEXT_ATTEMPT_AT, nextAttemptAt.toOffsetDateTime())
             .setNull(SYNC_RUNS.FINISHED_AT)
             .clearLockFields()
             .set(SYNC_RUNS.UPDATED_AT, updatedAt.toOffsetDateTime())
             .whereCurrentClaim(id = id, lockedBy = lockedBy, lockToken = lockToken, attempts = attempts)
+            .execute() == 1
+
+    override fun requeueContinuationFenced(
+        id: UUID,
+        lockedBy: String,
+        lockToken: UUID,
+        attempts: Int,
+        eventsSeen: Int,
+        eventsChanged: Int,
+        reason: SyncRunRequeueReason,
+        runCheckpoint: ObjectNode,
+        nextAttemptAt: Instant,
+        maxContinuationsPerRun: Int,
+        maxErrorLength: Int,
+        updatedAt: Instant,
+    ): SyncRunContinuationRequeueResult {
+        require(maxContinuationsPerRun >= 0) { "maxContinuationsPerRun must not be negative." }
+        require(maxErrorLength > 0) { "maxErrorLength must be positive." }
+
+        val nextContinuation = SYNC_RUNS.CONTINUATION_COUNT.plus(1)
+        val withinLimit = nextContinuation.le(maxContinuationsPerRun)
+        val updated = dsl
+            .update(SYNC_RUNS)
+            .set(
+                SYNC_RUNS.STATUS,
+                DSL.`when`(withinLimit, SyncRunStatus.QUEUED.name).otherwise(SyncRunStatus.FAILED.name),
+            )
+            .set(SYNC_RUNS.EVENTS_SEEN, eventsSeen)
+            .set(SYNC_RUNS.EVENTS_CHANGED, eventsChanged)
+            .set(
+                SYNC_RUNS.LAST_ERROR,
+                DSL.`when`(
+                    withinLimit,
+                    DSL.inline(null, SYNC_RUNS.LAST_ERROR.dataType),
+                ).otherwise("continuation limit exceeded".take(maxErrorLength)),
+            )
+            .set(SYNC_RUNS.LAST_REQUEUE_REASON, reason.name)
+            .set(
+                SYNC_RUNS.CONTINUATION_COUNT,
+                DSL.`when`(withinLimit, nextContinuation).otherwise(SYNC_RUNS.CONTINUATION_COUNT),
+            )
+            .set(SYNC_RUNS.RUN_CHECKPOINT, JSONB.valueOf(runCheckpoint.toString()))
+            .set(
+                SYNC_RUNS.NEXT_ATTEMPT_AT,
+                DSL.`when`(withinLimit, nextAttemptAt.toOffsetDateTime()).otherwise(SYNC_RUNS.NEXT_ATTEMPT_AT),
+            )
+            .set(
+                SYNC_RUNS.FINISHED_AT,
+                DSL.`when`(
+                    withinLimit,
+                    DSL.inline(null, SYNC_RUNS.FINISHED_AT.dataType),
+                ).otherwise(updatedAt.toOffsetDateTime()),
+            )
+            .clearLockFields()
+            .set(SYNC_RUNS.UPDATED_AT, updatedAt.toOffsetDateTime())
+            .whereCurrentClaim(id = id, lockedBy = lockedBy, lockToken = lockToken, attempts = attempts)
+            .returningResult(SYNC_RUNS.STATUS)
+            .fetchOne { requireNotNull(it.get(SYNC_RUNS.STATUS)) }
+
+        return when (updated) {
+            SyncRunStatus.QUEUED.name -> SyncRunContinuationRequeueResult.REQUEUED
+            SyncRunStatus.FAILED.name -> SyncRunContinuationRequeueResult.FAILED_LIMIT_EXCEEDED
+            null -> SyncRunContinuationRequeueResult.STALE_CLAIM
+            else -> error("Unexpected continuation requeue status: $updated")
+        }
+    }
+
+    override fun requeueFailureFenced(
+        id: UUID,
+        lockedBy: String,
+        lockToken: UUID,
+        attempts: Int,
+        expectedFailureAttempts: Int,
+        newFailureAttempts: Int,
+        eventsSeen: Int,
+        eventsChanged: Int,
+        lastError: String,
+        nextAttemptAt: Instant,
+        updatedAt: Instant,
+    ): Boolean =
+        dsl
+            .update(SYNC_RUNS)
+            .set(SYNC_RUNS.STATUS, SyncRunStatus.QUEUED.name)
+            .set(SYNC_RUNS.EVENTS_SEEN, eventsSeen)
+            .set(SYNC_RUNS.EVENTS_CHANGED, eventsChanged)
+            .set(SYNC_RUNS.FAILURE_ATTEMPTS, newFailureAttempts)
+            .set(SYNC_RUNS.LAST_ERROR, lastError)
+            .set(SYNC_RUNS.LAST_REQUEUE_REASON, SyncRunRequeueReason.FAILURE.name)
+            .set(SYNC_RUNS.NEXT_ATTEMPT_AT, nextAttemptAt.toOffsetDateTime())
+            .setNull(SYNC_RUNS.FINISHED_AT)
+            .clearLockFields()
+            .set(SYNC_RUNS.UPDATED_AT, updatedAt.toOffsetDateTime())
+            .whereCurrentClaim(id = id, lockedBy = lockedBy, lockToken = lockToken, attempts = attempts)
+            .and(SYNC_RUNS.FAILURE_ATTEMPTS.eq(expectedFailureAttempts))
             .execute() == 1
 
     override fun heartbeatFenced(
@@ -208,17 +319,18 @@ class JooqSyncRunRepository(
     override fun recoverExpiredRunning(
         now: Instant,
         limit: Int,
-        maxAttempts: Int,
-        retryNextAttemptAt: (SyncRun) -> Instant,
+        maxFailureAttempts: Int,
+        retryNextAttemptAt: (SyncRun, Int) -> Instant,
         maxErrorLength: Int,
     ): List<SyncRun> {
         require(limit > 0) { "limit must be positive." }
-        require(maxAttempts > 0) { "maxAttempts must be positive." }
+        require(maxFailureAttempts > 0) { "maxFailureAttempts must be positive." }
         require(maxErrorLength > 0) { "maxErrorLength must be positive." }
 
         return findExpiredRunning(now = now, limit = limit).mapNotNull { expired ->
-            val terminal = expired.attempts >= maxAttempts
-            val nextAttemptAt = if (terminal) now else retryNextAttemptAt(expired)
+            val newFailureAttempts = expired.failureAttempts + 1
+            val terminal = newFailureAttempts >= maxFailureAttempts
+            val nextAttemptAt = if (terminal) now else retryNextAttemptAt(expired, newFailureAttempts)
             val error = "expired RUNNING lease; previous owner=${expired.lockedBy ?: "unknown"}"
                 .take(maxErrorLength)
             val update = dsl
@@ -226,7 +338,9 @@ class JooqSyncRunRepository(
                 .set(SYNC_RUNS.STATUS, if (terminal) SyncRunStatus.FAILED.name else SyncRunStatus.QUEUED.name)
                 .set(SYNC_RUNS.FINISHED_AT, if (terminal) now.toOffsetDateTime() else null)
                 .set(SYNC_RUNS.NEXT_ATTEMPT_AT, nextAttemptAt.toOffsetDateTime())
+                .set(SYNC_RUNS.FAILURE_ATTEMPTS, newFailureAttempts)
                 .set(SYNC_RUNS.LAST_ERROR, error)
+                .set(SYNC_RUNS.LAST_REQUEUE_REASON, SyncRunRequeueReason.FAILURE.name)
                 .clearLockFields()
                 .set(SYNC_RUNS.UPDATED_AT, now.toOffsetDateTime())
                 .where(SYNC_RUNS.ID.eq(expired.id))
@@ -305,9 +419,19 @@ class JooqSyncRunRepository(
             lockToken = get(SYNC_RUNS.LOCK_TOKEN),
             lockedUntil = get(SYNC_RUNS.LOCKED_UNTIL)?.toInstant(),
             heartbeatAt = get(SYNC_RUNS.HEARTBEAT_AT)?.toInstant(),
+            failureAttempts = requireNotNull(get(SYNC_RUNS.FAILURE_ATTEMPTS)),
+            continuationCount = requireNotNull(get(SYNC_RUNS.CONTINUATION_COUNT)),
+            runCheckpoint = get(SYNC_RUNS.RUN_CHECKPOINT).toObjectNode(),
+            lastRequeueReason = get(SYNC_RUNS.LAST_REQUEUE_REASON)?.let { SyncRunRequeueReason.valueOf(it) },
             createdAt = requireNotNull(get(SYNC_RUNS.CREATED_AT)).toInstant(),
             updatedAt = requireNotNull(get(SYNC_RUNS.UPDATED_AT)).toInstant(),
         )
+
+    private fun JSONB?.toObjectNode(): ObjectNode {
+        val node = objectMapper.readTree(this?.data() ?: "{}")
+        require(node is ObjectNode) { "Expected JSON object for sync run checkpoint." }
+        return node.deepCopy()
+    }
 
     private fun inFlightStatusCondition() =
         SYNC_RUNS.STATUS.`in`(SyncRunStatus.QUEUED.name, SyncRunStatus.RUNNING.name)
@@ -344,6 +468,10 @@ class JooqSyncRunRepository(
             SYNC_RUNS.EVENTS_CHANGED,
             SYNC_RUNS.LAST_ERROR,
             SYNC_RUNS.ATTEMPTS,
+            SYNC_RUNS.FAILURE_ATTEMPTS,
+            SYNC_RUNS.CONTINUATION_COUNT,
+            SYNC_RUNS.RUN_CHECKPOINT,
+            SYNC_RUNS.LAST_REQUEUE_REASON,
             SYNC_RUNS.NEXT_ATTEMPT_AT,
             SYNC_RUNS.LOCKED_BY,
             SYNC_RUNS.LOCK_TOKEN,
