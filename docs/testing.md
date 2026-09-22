@@ -158,6 +158,15 @@ The current Gradle project runs both unit and integration tests under `test`; th
 ./gradlew bootRun
 ```
 
+The Alchemy live smoke is env-gated and skipped unless `ALCHEMY_LIVE_SMOKE=true`; it needs a real key, Docker, and an address with Sepolia USDC history (procedure in `docs/alchemy-runbook.md`):
+
+```bash
+ALCHEMY_LIVE_SMOKE=true ASSET_SYNC_PROVIDER_ALCHEMY_API_KEY='<key>' ALCHEMY_LIVE_SMOKE_ADDRESS='0x...' \
+./gradlew test --tests 'com.example.assetsync.e2e.AlchemyLiveSmokeTests'
+```
+
+The `ALCHEMY_LIVE_SMOKE*` variables are declared as test inputs, so a changed gate or target re-runs the task; add `--rerun` to repeat an unchanged successful smoke.
+
 If jOOQ generation is configured as a separate task:
 
 ```bash

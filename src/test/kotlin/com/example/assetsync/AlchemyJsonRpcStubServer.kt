@@ -12,7 +12,8 @@ import java.util.concurrent.CopyOnWriteArrayList
  * In-test stand-in for an Alchemy JSON-RPC endpoint: records every request (path, authorization
  * header, JSON-RPC method and params, raw body) and answers either through a programmable
  * [responder] or with the fixed status, body, and `Retry-After` fields. Tests point the endpoint
- * templates at it, so `{network}` becomes a path segment here instead of a subdomain.
+ * templates at it, so `{network}` becomes a path segment here instead of a subdomain. It binds
+ * 127.0.0.1 explicitly (see [LOOPBACK]).
  */
 class AlchemyJsonRpcStubServer : AutoCloseable {
 
@@ -49,7 +50,7 @@ class AlchemyJsonRpcStubServer : AutoCloseable {
 
     private val objectMapper = jacksonObjectMapper()
 
-    private val server: HttpServer = HttpServer.create(InetSocketAddress(0), 0).apply {
+    private val server: HttpServer = HttpServer.create(InetSocketAddress(LOOPBACK, 0), 0).apply {
         createContext("/") { exchange ->
             val body = exchange.requestBody.readAllBytes().toString(StandardCharsets.UTF_8)
             val parsed = runCatching { objectMapper.readTree(body) }.getOrNull()
@@ -78,9 +79,9 @@ class AlchemyJsonRpcStubServer : AutoCloseable {
     val port: Int
         get() = server.address.port
 
-    fun headerEndpointTemplate(): String = "http://localhost:$port/{network}/v2/"
+    fun headerEndpointTemplate(): String = "http://$LOOPBACK:$port/{network}/v2/"
 
-    fun pathEndpointTemplate(): String = "http://localhost:$port/{network}/v2/{apiKey}"
+    fun pathEndpointTemplate(): String = "http://$LOOPBACK:$port/{network}/v2/{apiKey}"
 
     fun reset() {
         requests.clear()
@@ -95,6 +96,12 @@ class AlchemyJsonRpcStubServer : AutoCloseable {
     }
 
     companion object {
+        /**
+         * Bound and addressed as 127.0.0.1 on purpose: a wildcard bind with SO_REUSEADDR can share a
+         * port with another process's loopback listener, and `localhost` may resolve to ::1, either
+         * of which sends a request to the wrong server.
+         */
+        const val LOOPBACK = "127.0.0.1"
         const val DEFAULT_BODY = """{"jsonrpc":"2.0","id":1,"result":"0x10"}"""
 
         fun result(json: String): StubResponse = StubResponse("""{"jsonrpc":"2.0","id":1,"result":$json}""")

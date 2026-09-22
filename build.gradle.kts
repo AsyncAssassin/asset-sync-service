@@ -92,6 +92,17 @@ tasks.withType<Test> {
     inputs.files(fileTree("docs") { include("*.md") }, ".gitignore")
         .withPropertyName("repositoryFilesReadByTests")
         .withPathSensitivity(PathSensitivity.RELATIVE)
+    // The env-gated Alchemy live smoke (AlchemyLiveSmokeTests) is switched on and parameterized by
+    // environment variables, which Gradle does not track by default. Declaring the non-secret ones
+    // as inputs re-runs the tests when the gate or the target changes; the API key stays out of
+    // the task history on purpose.
+    listOf(
+        "ALCHEMY_LIVE_SMOKE",
+        "ALCHEMY_LIVE_SMOKE_CHAIN_ID",
+        "ALCHEMY_LIVE_SMOKE_ASSET",
+        "ALCHEMY_LIVE_SMOKE_ADDRESS",
+        "ALCHEMY_LIVE_SMOKE_FROM_BLOCK",
+    ).forEach { name -> inputs.property(name, System.getenv(name) ?: "") }
 }
 
 // Disable the plain jar so `build/libs` holds exactly one artifact (the boot jar). This keeps the

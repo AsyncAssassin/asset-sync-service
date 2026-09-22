@@ -31,7 +31,7 @@ class HttpChainProviderHealthIndicatorTests {
     private val responseStatus = AtomicInteger(200)
     private val responseBody = AtomicReference("""{"events":[],"nextCursor":"health-final","hasMore":false}""")
     private val retryAfterHeader = AtomicReference<String?>(null)
-    private val server: HttpServer = HttpServer.create(InetSocketAddress(0), 0).apply {
+    private val server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
         createContext("/") { exchange ->
             val code = responseStatus.get()
             val body = if (code == 200) responseBody.get().toByteArray() else "boom".toByteArray()
@@ -44,7 +44,7 @@ class HttpChainProviderHealthIndicatorTests {
     }
 
     private val provider = HttpChainProvider(
-        RestClient.builder().baseUrl("http://localhost:${server.address.port}").build(),
+        RestClient.builder().baseUrl("http://127.0.0.1:${server.address.port}").build(),
     )
     private val indicator = HttpChainProviderHealthIndicator(provider)
 
@@ -85,7 +85,7 @@ class HttpChainProviderHealthIndicatorTests {
         responseStatus.set(200)
         responseBody.set("""{"events":[],"hasMore":false,"nextCursor":"${"x".repeat(200)}"}""")
         val cappedProvider = HttpChainProvider(
-            chainProviderRestClient = RestClient.builder().baseUrl("http://localhost:${server.address.port}").build(),
+            chainProviderRestClient = RestClient.builder().baseUrl("http://127.0.0.1:${server.address.port}").build(),
             objectMapper = jacksonObjectMapper(),
             syncProperties = SyncProperties(
                 pagination = SyncProperties.Pagination(maxProviderPageBytes = 32),

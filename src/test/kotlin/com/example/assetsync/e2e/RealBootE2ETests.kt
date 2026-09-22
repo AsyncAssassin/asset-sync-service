@@ -178,7 +178,7 @@ class RealBootE2ETests(
         )
 
     companion object {
-        private val providerStub: HttpServer = HttpServer.create(InetSocketAddress(0), 0).apply {
+        private val providerStub: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             createContext("/") { exchange ->
                 val body = """
                     {"events":[{"txHash":"0xe2e-tx","eventIndex":0,"address":"0xe2eaddr","asset":"USDC",
@@ -197,7 +197,7 @@ class RealBootE2ETests(
         @JvmStatic
         @DynamicPropertySource
         fun providerProperties(registry: DynamicPropertyRegistry) {
-            registry.add("asset-sync.provider.base-url") { "http://localhost:${providerStub.address.port}" }
+            registry.add("asset-sync.provider.base-url") { "http://127.0.0.1:${providerStub.address.port}" }
         }
 
         @JvmStatic

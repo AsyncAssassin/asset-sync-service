@@ -151,7 +151,7 @@ class AlchemyJsonRpcClientTests {
         val closedPort = ServerSocket(0).use { it.localPort }
         val client = client(
             authMode = AlchemyAuthMode.PATH,
-            pathEndpointTemplate = "http://localhost:$closedPort/{network}/v2/{apiKey}",
+            pathEndpointTemplate = "http://127.0.0.1:$closedPort/{network}/v2/{apiKey}",
         )
 
         val exception = assertThrows<ChainProviderUnavailableException> { client.blockNumber("eth-sepolia") }
