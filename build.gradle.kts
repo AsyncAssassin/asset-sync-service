@@ -9,7 +9,7 @@ group = "com.example"
 version = "0.2.0"
 description = "Asset sync backend service"
 
-// Jackson: Spring Boot 3.5.15 manages jackson-bom 2.21.4, which sits inside the vulnerable range of
+// Jackson: Spring Boot 3.5.16 (like 3.5.15) manages jackson-bom 2.21.4, which sits inside the vulnerable range of
 // GHSA-5jmj-h7xm-6q6v (CVE-2026-54515, ">= 2.19.0, < 2.21.5"). Pin the BOM to the latest 2.21.x
 // patch instead (all modules used here are published at 2.21.7; verified on Maven Central
 // 2026-09-22). `jackson-bom.version` is the property Boot's dependency management honors; the
