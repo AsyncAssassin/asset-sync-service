@@ -14,12 +14,17 @@ All notable changes to this project are documented in this file. The format is b
 - `docs/alchemy-runbook.md` (key, rollout, inspection, failure actions) and the env-gated `AlchemyLiveSmokeTests` against Alchemy Sepolia, skipped in CI.
 - `ProviderConfigurationException` as a terminal sync failure class for rejected credentials, unmapped chains, missing registry rows, and blocks that exceed the page size; it never consumes the retry budget.
 
+### Security
+
+- springdoc-openapi 2.9.1 ships a swagger-ui with the DOMPurify fix for CVE-2026-75838 (GHSA-748c-f84h-hp2v).
+
 ### Changed
 
 - **Breaking:** watched-address registration rejects assets that are not registered and enabled for the chain with `404` and the title `Unsupported asset`; local, test, and demo flows keep working through the seeded `local-evm` `USDC` row.
 - Graceful shutdown drains in-flight sync runs for up to `asset-sync.sync.worker.shutdown-timeout` and requeues runs interrupted afterwards without consuming their retry budget.
 - `401` and `403` produced by the security filter chain are `ProblemDetail` responses with `requestId`; `401` keeps the `WWW-Authenticate: Basic` challenge.
 - `ASSET_SYNC_PROVIDER_BASE_URL` in the `prod` profile is required only for the `http` provider type; a blank value still fails the boot there, while `alchemy` ignores it. Provider connect and read timeouts now live in the base configuration for every profile.
+- Toolchain: Kotlin 2.4.20 with `kotlin-stdlib`/`kotlin-reflect` aligned through the Boot BOM's `kotlin.version`, Spring Boot 3.5.16, Gradle 9.7.1, and GitHub Actions `checkout` v7, `setup-java` v6, and `gradle/actions` v6; the Jackson BOM override stays because Boot 3.5.16 still manages 2.21.4.
 
 ## [0.2.0] - 2026-09-22
 
