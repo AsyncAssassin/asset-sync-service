@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
+import java.time.Duration
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -27,6 +28,8 @@ class AlchemyJsonRpcStubServer : AutoCloseable {
         val body: String,
         val status: Int = 200,
         val retryAfter: String? = null,
+        /** Held back before the response is written, to trigger the client's read timeout. */
+        val delay: Duration? = null,
     )
 
     val requests = CopyOnWriteArrayList<RecordedRequest>()
@@ -63,8 +66,11 @@ class AlchemyJsonRpcStubServer : AutoCloseable {
             val bytes = response.body.toByteArray(StandardCharsets.UTF_8)
             exchange.responseHeaders.add("Content-Type", "application/json")
             response.retryAfter?.let { exchange.responseHeaders.add("Retry-After", it) }
-            exchange.sendResponseHeaders(response.status, bytes.size.toLong())
-            exchange.responseBody.use { it.write(bytes) }
+            response.delay?.let { Thread.sleep(it.toMillis()) }
+            runCatching {
+                exchange.sendResponseHeaders(response.status, bytes.size.toLong())
+                exchange.responseBody.use { it.write(bytes) }
+            }
         }
         start()
     }

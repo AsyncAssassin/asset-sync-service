@@ -1,6 +1,7 @@
 package com.example.assetsync.e2e
 
 import com.example.assetsync.AlchemyJsonRpcStubServer
+import com.example.assetsync.AlchemyRolloutDatabase
 import com.example.assetsync.AssetSyncServiceApplication
 import com.example.assetsync.application.sync.ChainProviderPort
 import com.example.assetsync.application.sync.ProviderConfigurationException
@@ -12,8 +13,6 @@ import com.example.assetsync.infrastructure.provider.HttpChainProviderHealthIndi
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProvider
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProviderHealthIndicator
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyJsonRpcClient
-import java.nio.file.Path
-import java.sql.DriverManager
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -21,12 +20,6 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
-import liquibase.Contexts
-import liquibase.LabelExpression
-import liquibase.Liquibase
-import liquibase.database.DatabaseFactory
-import liquibase.database.jvm.JdbcConnection
-import liquibase.resource.DirectoryResourceAccessor
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
@@ -230,28 +223,7 @@ class AlchemyProviderBootIntegrationTests(
         private val stub = AlchemyJsonRpcStubServer()
 
         init {
-            prepareDatabaseForAlchemyRollout()
-        }
-
-        /**
-         * Applies the migrations up front and disables the seeded `local-evm` chain, which has no
-         * Alchemy network; without this step the first `alchemy` boot stops at the preflight.
-         */
-        private fun prepareDatabaseForAlchemyRollout() {
-            DriverManager.getConnection(postgres.jdbcUrl, postgres.username, postgres.password).use { connection ->
-                val database = DatabaseFactory.getInstance().findCorrectDatabaseImplementation(JdbcConnection(connection))
-                database.defaultSchemaName = requireNotNull(connection.schema)
-                database.liquibaseSchemaName = requireNotNull(connection.schema)
-                DirectoryResourceAccessor(Path.of("src/main/resources")).use { resourceAccessor ->
-                    Liquibase("db/changelog/db.changelog-master.yaml", resourceAccessor, database)
-                        .update(Contexts(), LabelExpression())
-                }
-                // Liquibase leaves the connection in manual-commit mode; switch back so the update is committed.
-                connection.autoCommit = true
-                connection.createStatement().use { statement ->
-                    statement.executeUpdate("UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm'")
-                }
-            }
+            AlchemyRolloutDatabase.prepare(postgres.jdbcUrl, postgres.username, postgres.password)
         }
 
         @JvmStatic

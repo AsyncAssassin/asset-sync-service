@@ -82,6 +82,7 @@ Required cases:
 | Sync shutdown | draining finishes an in-flight run, interruption requeues without failure budget, a stopped worker refuses claims |
 | Asset registry | changeset 015 seeds and constraints, unknown and disabled asset rejection, disabled chain precedence, Sepolia casing normalization, rollout preflight query |
 | Provider selection | `prod` boots with the HTTP bridge by default and rejects a blank `base-url`; `type=alchemy` boots without `base-url`, wires only Alchemy beans, probes `eth-sepolia` with a bearer token, exposes health without the key, and fails fast on a missing key, HTTP 401, an enabled chain without a network mapping, and legacy watched addresses; `local` keeps the fake provider |
+| Alchemy sync | the real worker against the Alchemy adapter and a scripted JSON-RPC stub in path auth mode: `registration-safe` idle start without backfill, ingestion and confirmation of whole pages below the finality frontier with outbox events, cursor and high-water advancement, retry from the durable cursor after HTTP 500 and after a transport failure with a scrubbed `last_error`, `Retry-After` on 429, and continuation across claims without failure attempts |
 
 Testcontainers expectations:
 
