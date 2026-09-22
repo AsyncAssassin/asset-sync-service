@@ -13,7 +13,6 @@ import com.example.assetsync.application.transaction.ObservedTransactionConflict
 import com.example.assetsync.application.transaction.WatchedAddressNotFoundException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
-import java.net.URI
 import org.springframework.dao.DataAccessException
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.http.HttpHeaders
@@ -399,12 +398,14 @@ class ApiExceptionHandler {
         properties: Map<String, Any?> = emptyMap(),
         headers: HttpHeaders? = null,
     ): ResponseEntity<ProblemDetail> {
-        val problem = ProblemDetail.forStatusAndDetail(status, detail)
-        problem.type = URI.create("https://asset-sync-service/errors/$type")
-        problem.title = title
-        problem.instance = URI.create(request.requestURI)
-        request.getAttribute(REQUEST_ID_ATTRIBUTE)?.let { problem.setProperty("requestId", it) }
-        properties.forEach(problem::setProperty)
+        val problem = ProblemDetails.build(
+            status = status,
+            type = type,
+            title = title,
+            detail = detail,
+            request = request,
+            properties = properties,
+        )
         val response = ResponseEntity.status(status)
         headers?.let { response.headers(it) }
         return response.body(problem)

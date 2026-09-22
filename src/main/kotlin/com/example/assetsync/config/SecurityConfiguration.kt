@@ -1,11 +1,12 @@
 package com.example.assetsync.config
 
+import com.example.assetsync.api.error.ProblemDetailAccessDeniedHandler
+import com.example.assetsync.api.error.ProblemDetailAuthenticationEntryPoint
 import javax.sql.DataSource
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Profile
 import org.springframework.http.HttpMethod
-import org.springframework.security.config.Customizer
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity
 import org.springframework.security.config.http.SessionCreationPolicy
@@ -33,10 +34,16 @@ class SecurityConfiguration {
      * with role-scoped access. Reads need READ or OPERATOR; mutations need OPERATOR. Health probes
      * stay open; the simulator path is open because it is a demo-only in-process aid (absent in prod).
      * CSRF is disabled deliberately — this is a stateless API with no browser session/cookie auth.
+     * 401 and 403 are written as ProblemDetail by the entry point and access-denied handler from
+     * `api.error`, so security failures share the error shape of the API layer.
      */
     @Bean
     @Profile("!local & !test")
-    fun protectedSecurityFilterChain(http: HttpSecurity): SecurityFilterChain =
+    fun protectedSecurityFilterChain(
+        http: HttpSecurity,
+        authenticationEntryPoint: ProblemDetailAuthenticationEntryPoint,
+        accessDeniedHandler: ProblemDetailAccessDeniedHandler,
+    ): SecurityFilterChain =
         http
             .csrf { it.disable() }
             .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
@@ -54,7 +61,11 @@ class SecurityConfiguration {
                     .requestMatchers("/actuator/**").hasAnyRole("READ", "OPERATOR")
                     .anyRequest().authenticated()
             }
-            .httpBasic(Customizer.withDefaults())
+            .exceptionHandling {
+                it.authenticationEntryPoint(authenticationEntryPoint)
+                it.accessDeniedHandler(accessDeniedHandler)
+            }
+            .httpBasic { it.authenticationEntryPoint(authenticationEntryPoint) }
             .build()
 
     @Bean

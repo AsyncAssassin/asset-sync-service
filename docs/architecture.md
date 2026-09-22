@@ -772,6 +772,8 @@ Duplicate no-op response:
 ### Error Cases
 
 - `400 Bad Request`: invalid request shape, invalid amount, invalid enum value, negative confirmation count, or watched-address pagination outside the supported bounds.
+- `401 Unauthorized`: missing or invalid HTTP Basic credentials in protected profiles; the response keeps the `WWW-Authenticate: Basic` challenge.
+- `403 Forbidden`: authenticated caller without the required role in protected profiles.
 - `404 Not Found`: account, watched address, unsupported chain, sync run, or route not found.
 - `405 Method Not Allowed`: unsupported HTTP method for a known route, with an `Allow` header.
 - `409 Conflict`: duplicate watched address or immutable observed transaction field mismatch.

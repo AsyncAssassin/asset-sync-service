@@ -80,6 +80,17 @@ class RealBootE2ETests(
         )
         assertEquals(HttpStatus.UNAUTHORIZED, anonymous.statusCode)
         assertTrue(anonymous.headers.containsKey("X-Request-Id"), "401 responses must carry the request id")
+        //    The 401 is a ProblemDetail that echoes the request id and keeps the Basic challenge.
+        assertTrue(anonymous.headers.getFirst(HttpHeaders.WWW_AUTHENTICATE)?.startsWith("Basic") == true, "401 must keep the Basic challenge")
+        assertTrue(anonymous.headers.contentType?.isCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON) == true, "401 must be a ProblemDetail")
+        assertTrue(anonymous.body?.contains("errors/unauthorized") == true, "401 body: ${anonymous.body}")
+        val anonymousRequestId = anonymous.headers.getFirst("X-Request-Id")
+        assertTrue(anonymous.body?.contains("\"requestId\":\"$anonymousRequestId\"") == true, "401 body must echo the request id: ${anonymous.body}")
+        val badCredentials = restTemplate
+            .withBasicAuth("e2e-reader", "wrong-pw")
+            .getForEntity("/api/v1/accounts/00000000-0000-0000-0000-000000000000", String::class.java)
+        assertEquals(HttpStatus.UNAUTHORIZED, badCredentials.statusCode)
+        assertTrue(badCredentials.body?.contains("errors/unauthorized") == true, "bad credentials body: ${badCredentials.body}")
 
         // 3) Operator creates an account + watched address (mutations require OPERATOR).
         val accountId = operator()
@@ -99,10 +110,10 @@ class RealBootE2ETests(
             HttpStatus.OK,
             reader().getForEntity("/api/v1/accounts/$accountId", String::class.java).statusCode,
         )
-        assertEquals(
-            HttpStatus.FORBIDDEN,
-            reader().postForEntity("/api/v1/addresses/$addressId/sync", HttpEntity<Void>(HttpHeaders()), String::class.java).statusCode,
-        )
+        val forbidden = reader().postForEntity("/api/v1/addresses/$addressId/sync", HttpEntity<Void>(HttpHeaders()), String::class.java)
+        assertEquals(HttpStatus.FORBIDDEN, forbidden.statusCode)
+        assertTrue(forbidden.headers.contentType?.isCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON) == true, "403 must be a ProblemDetail")
+        assertTrue(forbidden.body?.contains("errors/forbidden") == true, "403 body: ${forbidden.body}")
 
         // 5) Operator sync drives the REAL HttpChainProvider -> in-test stub -> ingestion.
         val sync = operator()

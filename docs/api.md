@@ -494,7 +494,7 @@ Possible statuses are `QUEUED`, `RUNNING`, `SUCCEEDED`, and `FAILED`. Legacy `ST
 
 ## 13. ProblemDetail Error Mapping
 
-All errors produced by the API layer use `ProblemDetail`, including framework-level routing failures such as unknown paths, unsupported methods, and unsupported content types. The `type` field is a stable service-owned URI. Implementations may add properties for correlation and domain identifiers, but must not expose internal stack traces. Under the protected profiles, `401` and `403` are produced by the Spring Security filter chain before a request reaches the API layer; those responses carry `WWW-Authenticate` and `X-Request-Id` headers but no `ProblemDetail` body.
+All errors produced by the API layer use `ProblemDetail`, including framework-level routing failures such as unknown paths, unsupported methods, and unsupported content types. The `type` field is a stable service-owned URI. Implementations may add properties for correlation and domain identifiers, but must not expose internal stack traces. Under the protected profiles, `401` and `403` are produced by the Spring Security filter chain before a request reaches Spring MVC; a dedicated authentication entry point and access-denied handler write the same `ProblemDetail` shape, including `requestId`, and `401` responses keep the `WWW-Authenticate: Basic` challenge.
 
 Common mappings:
 
@@ -505,6 +505,8 @@ Common mappings:
 | Invalid enum value | 400 | `https://asset-sync-service/errors/validation-failed` |
 | Missing required request parameter | 400 | `https://asset-sync-service/errors/invalid-request` |
 | Watched address pagination outside the supported bounds | 400 | `https://asset-sync-service/errors/invalid-pagination` |
+| Missing or invalid HTTP Basic credentials in protected profiles | 401 | `https://asset-sync-service/errors/unauthorized` |
+| Authenticated caller without the required role in protected profiles | 403 | `https://asset-sync-service/errors/forbidden` |
 | Account, watched address, unsupported chain, or sync run not found | 404 | `https://asset-sync-service/errors/not-found` |
 | Unknown route | 404 | `https://asset-sync-service/errors/not-found` |
 | Unsupported request method, with an `Allow` header | 405 | `https://asset-sync-service/errors/method-not-allowed` |

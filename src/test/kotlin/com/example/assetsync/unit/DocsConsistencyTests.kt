@@ -21,8 +21,7 @@ class DocsConsistencyTests {
     private val changesDirectory = Path.of("src/main/resources/db/changelog/changes")
     private val metricsSource =
         Path.of("src/main/kotlin/com/example/assetsync/application/observability/AssetSyncMetrics.kt")
-    private val exceptionHandlerSource =
-        Path.of("src/main/kotlin/com/example/assetsync/api/error/ApiExceptionHandler.kt")
+    private val apiErrorSources = Path.of("src/main/kotlin/com/example/assetsync/api/error")
 
     @Test
     fun `every changeset file is included by the master changelog exactly once`() {
@@ -57,11 +56,12 @@ class DocsConsistencyTests {
     @Test
     fun `every problem detail type is documented in the api specification`() {
         val apiDoc = Files.readString(Path.of("docs/api.md"))
+        val apiErrorSource = apiErrorSources.listDirectoryEntries("*.kt").joinToString("\n") { Files.readString(it) }
         val types = Regex("type = \"([a-z-]+)\"")
-            .findAll(Files.readString(exceptionHandlerSource))
+            .findAll(apiErrorSource)
             .map { it.groupValues[1] }
             .toSortedSet()
-        assertTrue(types.isNotEmpty(), "expected literal ProblemDetail types in ApiExceptionHandler")
+        assertTrue(types.isNotEmpty(), "expected literal ProblemDetail types in the api/error package")
 
         val undocumented = types.filterNot { apiDoc.contains("errors/$it`") }
         assertTrue(undocumented.isEmpty(), "docs/api.md must map every ProblemDetail type; missing: $undocumented")
