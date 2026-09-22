@@ -97,7 +97,8 @@ class AlchemyJsonRpcClient(
         deadline: Instant? = null,
         allowNullResult: Boolean = false,
     ): JsonNode {
-        val sample = metrics?.startAlchemyRpcTimer()
+        val meters = metrics
+        val sample = meters?.startAlchemyRpcTimer()
         return try {
             rateLimiter?.acquire(deadline)
             val payload = objectMapper.writeValueAsBytes(
@@ -120,8 +121,8 @@ class AlchemyJsonRpcClient(
                     },
             ) { "Alchemy exchange returned no result." }
             logger.debug("alchemy_rpc_succeeded network={} method={}", network, method)
-            if (sample != null) {
-                metrics?.recordAlchemyRpc(network, method, RESULT_SUCCEEDED, sample)
+            if (meters != null && sample != null) {
+                meters.recordAlchemyRpc(network, method, RESULT_SUCCEEDED, sample)
             }
             result
         } catch (exception: ProviderConfigurationException) {
