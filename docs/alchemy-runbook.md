@@ -22,7 +22,7 @@ Mainnet is deliberately not mapped and the seeded `eth-mainnet` chain and asset 
 | `ASSET_SYNC_PROVIDER_ALCHEMY_START_MODE` | `registration-safe` (new addresses start at the current safe block, no backfill) or `configured-block` with `ASSET_SYNC_PROVIDER_ALCHEMY_ETH_SEPOLIA_START_BLOCK` for a bounded historical backfill |
 | `ASSET_SYNC_PROVIDER_BASE_URL` | not needed |
 
-The other Alchemy settings keep their defaults: `safe` finality, `max-window-blocks=5000`, `max-rpc-calls-per-fetch=6`, token bucket 6 burst / 3 per second.
+The other Alchemy settings keep their defaults: `safe` finality, `max-window-blocks=5000`, `max-rpc-calls-per-fetch=8`, token bucket 6 burst / 3 per second.
 
 ## 3. Database Preparation
 
@@ -76,8 +76,8 @@ SELECT block_height, event_index, direction, amount, status FROM observed_transa
 
 - `/actuator/health` (authenticated) shows `alchemyChainProvider` with `provider`, `authMode`, `networks`, `state` (`probe-succeeded`, `fetch-succeeded`, `fetch-failed`) and the scrubbed `error`; it never shows an endpoint or the key.
 - Logs: `alchemy_preflight_succeeded` at startup, `alchemy_provider_page_fetch_succeeded` per page (mode, blocks, events, RPC calls, fallbacks), `alchemy_rpc_failed` and `alchemy_provider_page_fetch_failed` on errors, `alchemy_finality_tag_unavailable` once per network when the tag falls back to depth.
-- Cost: an idle address costs about 30 CU for the two head calls plus two transfer calls (120 CU each) per 5000-block window; dense regions cost one extra call per block that had to be drained alone (`scan.oneBlockFallbacks` in the checkpoint).
-- Meters on `/actuator/prometheus`: `asset.sync.provider.alchemy.rpc` and `asset.sync.provider.alchemy.rpc.duration` per network, method, and result, `asset.sync.provider.alchemy.block.fallbacks`, and `asset.sync.provider.alchemy.skipped.rows` per reason; a rising `UNAVAILABLE` or `CONFIGURATION` result count is the earliest signal of provider trouble.
+- Cost: an idle address costs about 30 CU for the two head calls plus two transfer calls (120 CU each) per 5000-block window; dense stretches cost the narrowing attempts (`scan.narrowings` in the checkpoint) plus one extra call per block that still had to be drained alone (`scan.oneBlockFallbacks`).
+- Meters on `/actuator/prometheus`: `asset.sync.provider.alchemy.rpc` and `asset.sync.provider.alchemy.rpc.duration` per network, method, and result, `asset.sync.provider.alchemy.block.fallbacks`, `asset.sync.provider.alchemy.narrowings`, and `asset.sync.provider.alchemy.skipped.rows` per reason; a rising `UNAVAILABLE` or `CONFIGURATION` result count is the earliest signal of provider trouble.
 
 ## 6. Failures And Actions
 

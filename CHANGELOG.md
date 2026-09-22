@@ -12,7 +12,7 @@ All notable changes to this project are documented in this file. The format is b
 - Alchemy ERC-20 transfer adapter: finality-lagged range scan with a one-block fallback for paged windows, whole-block emission sorted by block and log index, a block-boundary cursor `{"v":1,"p":"alchemy","nextBlock":N}`, decimal-adjusted amounts from `rawContract.value` and registry decimals, self-transfer and wrong-token skips recorded in the checkpoint, `registration-safe` and `configured-block` start modes, a per-fetch RPC and time budget, and a local token bucket in front of every JSON-RPC call.
 - Integration tests that drive the real sync worker against the Alchemy adapter and a scripted JSON-RPC stub: idle start, ingestion below the finality frontier, retry from the durable cursor with a scrubbed `last_error`, `Retry-After` on 429, and continuation across claims.
 - `docs/alchemy-runbook.md` (key, rollout, inspection, failure actions) and the env-gated `AlchemyLiveSmokeTests` against Alchemy Sepolia, skipped in CI.
-- Micrometer meters for the Alchemy adapter: JSON-RPC calls and latency per network, method, and result, one-block fallbacks, and skipped rows.
+- Micrometer meters for the Alchemy adapter: JSON-RPC calls and latency per network, method, and result, one-block fallbacks, narrowings, and skipped rows.
 - A documentation drift guard for environment variables: every `${...}` placeholder in the main configuration must be listed in the README, which now documents the worker, recovery, retention, pagination, and `prod` datasource variables it was missing.
 - `ProviderConfigurationException` as a terminal sync failure class for rejected credentials, unmapped chains, missing registry rows, and blocks that exceed the page size; it never consumes the retry budget.
 
@@ -26,6 +26,7 @@ All notable changes to this project are documented in this file. The format is b
 - Graceful shutdown drains in-flight sync runs for up to `asset-sync.sync.worker.shutdown-timeout` and requeues runs interrupted afterwards without consuming their retry budget.
 - `401` and `403` produced by the security filter chain are `ProblemDetail` responses with `requestId`; `401` keeps the `WWW-Authenticate: Basic` challenge.
 - `ASSET_SYNC_PROVIDER_BASE_URL` in the `prod` profile is required only for the `http` provider type; a blank value still fails the boot there, while `alchemy` ignores it. Provider connect and read timeouts now live in the base configuration for every profile.
+- The Alchemy adapter narrows a paged window to the blocks before its page boundary and re-queries them before draining the boundary block alone, so dense stretches no longer cost three calls per block; `max-rpc-calls-per-fetch` defaults to `8` so the narrowing fits the default budget.
 - Toolchain: Kotlin 2.4.20 with `kotlin-stdlib`/`kotlin-reflect` aligned through the Boot BOM's `kotlin.version`, Spring Boot 3.5.16, Gradle 9.7.1, and GitHub Actions `checkout` v7, `setup-java` v6, and `gradle/actions` v6; the Jackson BOM override stays because Boot 3.5.16 still manages 2.21.4.
 
 ## [0.2.0] - 2026-09-22

@@ -89,8 +89,9 @@ asset-sync:
       finality-mode: ${ASSET_SYNC_PROVIDER_ALCHEMY_FINALITY_MODE:safe}
       finality-depth-fallback: ${ASSET_SYNC_PROVIDER_ALCHEMY_FINALITY_DEPTH_FALLBACK:64}
       max-window-blocks: ${ASSET_SYNC_PROVIDER_ALCHEMY_MAX_WINDOW_BLOCKS:5000}
-      # Hard minimum 4: latest block, finality block, inbound transfers, outbound transfers.
-      max-rpc-calls-per-fetch: ${ASSET_SYNC_PROVIDER_ALCHEMY_MAX_RPC_CALLS_PER_FETCH:6}
+      # Hard minimum 4: latest block, finality block, inbound transfers, outbound transfers. The
+      # default leaves room for narrowing a paged window before draining one block alone.
+      max-rpc-calls-per-fetch: ${ASSET_SYNC_PROVIDER_ALCHEMY_MAX_RPC_CALLS_PER_FETCH:8}
       rate-limit-capacity: ${ASSET_SYNC_PROVIDER_ALCHEMY_RATE_LIMIT_CAPACITY:6}
       rate-limit-refill-per-second: ${ASSET_SYNC_PROVIDER_ALCHEMY_RATE_LIMIT_REFILL_PER_SECOND:3.0}
   sync:

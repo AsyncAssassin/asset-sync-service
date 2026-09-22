@@ -36,9 +36,11 @@ import org.slf4j.LoggerFactory
  * frontier. The scan asks `alchemy_getAssetTransfers` for the whole window (at most
  * `max-window-blocks`) once per direction; a window answered without `pageKey` is complete for
  * every block in it, so empty stretches cost two calls instead of two calls per block. A window
- * that comes back paged is too dense to trust across pages, so the adapter drains the first block
- * alone (`fromBlock == toBlock`), following `pageKey` in memory, and then continues with the rest
- * of the window. Durable progress moves only past fully drained blocks: the returned cursor is
+ * that comes back paged is not trusted across pages, but its first page still shows the last block
+ * it reached, and ascending order means every block before that boundary was covered in full: the
+ * adapter narrows the range to those blocks and re-queries them while the RPC budget allows, then
+ * drains the boundary block alone (`fromBlock == toBlock`), following `pageKey` in memory, and
+ * continues with the rest of the window. Durable progress moves only past fully drained blocks: the returned cursor is
  * always a block boundary, events are emitted for whole blocks only, and a block that cannot be
  * finished inside the RPC and time budget is left for the next fetch or, if nothing was finished,
  * reported as a retryable outage that keeps the checkpoint.
@@ -108,8 +110,8 @@ class AlchemyChainProvider(
         /** Every block of the scanned range is drained; `events` are sorted and cover all of them. */
         data class Complete(val events: List<ChainProviderObservedEvent>) : ScanResult
 
-        /** The range came back paged, so it is too dense to trust across pages. */
-        data object Paged : ScanResult
+        /** The range came back paged; `boundaryBlock` is the last block its first page reached. */
+        data class Paged(val boundaryBlock: Long) : ScanResult
 
         /** The RPC or time budget ran out before the range was drained. */
         data object Exhausted : ScanResult
@@ -138,6 +140,7 @@ class AlchemyChainProvider(
         private lateinit var mapper: AlchemyTransferMapper
         private var latestBlockHeight: Long = 0
         private var oneBlockFallbacks = 0
+        private var narrowings = 0
 
         fun run(): ChainProviderEventsPage {
             network = properties.networkFor(request.chainId)?.network
@@ -272,6 +275,7 @@ class AlchemyChainProvider(
             val windowEnd = minOf(safeBlockHeight, start + properties.maxWindowBlocks - 1)
             val emitted = mutableListOf<ChainProviderObservedEvent>()
             var candidate = start
+            var rangeEnd = windowEnd
             var blocksFullyDrained = 0L
             while (candidate <= windowEnd) {
                 if (emitted.size >= request.limit) {
@@ -281,7 +285,28 @@ class AlchemyChainProvider(
                     requireProgress(blocksFullyDrained, candidate)
                     break
                 }
-                when (val range = scanRange(from = candidate, to = windowEnd)) {
+                if (rangeEnd == candidate) {
+                    // The window came back paged and no boundary lies ahead of this block: drain it alone.
+                    oneBlockFallbacks += 1
+                    metrics?.recordAlchemyBlockFallback(network)
+                    when (val block = drainBlock(candidate)) {
+                        is ScanResult.Complete -> {
+                            if (appendBlocks(block.events, emitted) != null) {
+                                break
+                            }
+                            blocksFullyDrained += 1
+                            candidate += 1
+                            rangeEnd = windowEnd
+                        }
+                        ScanResult.Exhausted -> {
+                            requireProgress(blocksFullyDrained, candidate)
+                            break
+                        }
+                        is ScanResult.Paged -> error("a drained block cannot be paged")
+                    }
+                    continue
+                }
+                when (val range = scanRange(from = candidate, to = rangeEnd)) {
                     is ScanResult.Complete -> {
                         val cutoff = appendBlocks(range.events, emitted)
                         if (cutoff != null) {
@@ -289,26 +314,20 @@ class AlchemyChainProvider(
                             candidate = cutoff
                             break
                         }
-                        blocksFullyDrained += windowEnd - candidate + 1
-                        candidate = windowEnd + 1
+                        blocksFullyDrained += rangeEnd - candidate + 1
+                        candidate = rangeEnd + 1
+                        rangeEnd = windowEnd
                     }
-                    ScanResult.Paged -> {
-                        oneBlockFallbacks += 1
-                        metrics?.recordAlchemyBlockFallback(network)
-                        when (val block = drainBlock(candidate)) {
-                            is ScanResult.Complete -> {
-                                val cutoff = appendBlocks(block.events, emitted)
-                                if (cutoff != null) {
-                                    break
-                                }
-                                blocksFullyDrained += 1
-                                candidate += 1
-                            }
-                            ScanResult.Exhausted -> {
-                                requireProgress(blocksFullyDrained, candidate)
-                                break
-                            }
-                            ScanResult.Paged -> error("a drained block cannot be paged")
+                    is ScanResult.Paged -> {
+                        // Ascending order means every block before the page boundary was covered in
+                        // full: re-query those as a complete range while the budget still leaves room
+                        // for that attempt and for draining the boundary block afterwards.
+                        rangeEnd = if (range.boundaryBlock > candidate && budget.remainingCalls >= NARROWING_RESERVE) {
+                            narrowings += 1
+                            metrics?.recordAlchemyNarrowing(network)
+                            range.boundaryBlock - 1
+                        } else {
+                            candidate
                         }
                     }
                     ScanResult.Exhausted -> {
@@ -357,15 +376,18 @@ class AlchemyChainProvider(
             val inbound = fetchStream(from = from, to = to, direction = Direction.INBOUND, pageKey = null)
                 ?: return ScanResult.Exhausted
             if (inbound.pageKey != null) {
-                return ScanResult.Paged
+                return ScanResult.Paged(boundaryBlock = lastBlock(inbound, default = from))
             }
             val outbound = fetchStream(from = from, to = to, direction = Direction.OUTBOUND, pageKey = null)
                 ?: return ScanResult.Exhausted
             if (outbound.pageKey != null) {
-                return ScanResult.Paged
+                return ScanResult.Paged(boundaryBlock = lastBlock(outbound, default = from))
             }
             return ScanResult.Complete(merge(inbound.outcomes, outbound.outcomes))
         }
+
+        private fun lastBlock(page: StreamPage, default: Long): Long =
+            page.outcomes.maxOfOrNull { it.blockHeight } ?: default
 
         private fun drainBlock(block: Long): ScanResult {
             val inbound = drainStream(block = block, direction = Direction.INBOUND) ?: return ScanResult.Exhausted
@@ -478,7 +500,7 @@ class AlchemyChainProvider(
                 blocksFullyDrained = blocksFullyDrained,
             )
             logger.info(
-                "alchemy_provider_page_fetch_succeeded chainId={} address={} asset={} mode={} startBlock={} nextBlock={} safe={} latest={} events={} hasMore={} rpcCalls={} oneBlockFallbacks={}",
+                "alchemy_provider_page_fetch_succeeded chainId={} address={} asset={} mode={} startBlock={} nextBlock={} safe={} latest={} events={} hasMore={} rpcCalls={} oneBlockFallbacks={} narrowings={}",
                 identity.chainId,
                 identity.address,
                 identity.asset,
@@ -491,6 +513,7 @@ class AlchemyChainProvider(
                 hasMore,
                 budget.rpcCalls,
                 oneBlockFallbacks,
+                narrowings,
             )
             return ChainProviderEventsPage(
                 events = events,
@@ -523,6 +546,7 @@ class AlchemyChainProvider(
             scan.put("lastScannedBlock", nextBlock - 1)
             scan.put("blocksFullyDrained", blocksFullyDrained)
             scan.put("oneBlockFallbacks", oneBlockFallbacks)
+            scan.put("narrowings", narrowings)
             scan.put("rpcCalls", budget.rpcCalls)
             node.put("nextBlock", nextBlock)
             node.put("latestBlockHeight", latestBlockHeight)
@@ -547,6 +571,9 @@ class AlchemyChainProvider(
 
         /** Share of the provider timeout after which no new block scan starts. */
         const val SOFT_DEADLINE_FRACTION = 0.75
+
+        /** Calls that must remain for a narrowed range attempt plus a one-block drain after it. */
+        const val NARROWING_RESERVE = 4
 
         const val SKIP_SELF_TRANSFER = "SELF_TRANSFER"
         const val SKIP_WRONG_TOKEN = "WRONG_TOKEN"

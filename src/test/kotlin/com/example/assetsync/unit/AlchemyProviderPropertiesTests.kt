@@ -33,7 +33,7 @@ class AlchemyProviderPropertiesTests {
         assertEquals("https://{network}.g.alchemy.com/v2/{apiKey}", properties.pathEndpointTemplate)
         assertEquals(AlchemyAuthMode.HEADER, properties.authMode)
         assertEquals(AlchemyStartMode.REGISTRATION_SAFE, properties.startMode)
-        assertEquals(6, properties.maxRpcCallsPerFetch)
+        assertEquals(8, properties.maxRpcCallsPerFetch)
         assertEquals("eth-sepolia", properties.networkFor("eth-sepolia")?.network)
         assertEquals(null, properties.networkFor("local-evm"))
     }

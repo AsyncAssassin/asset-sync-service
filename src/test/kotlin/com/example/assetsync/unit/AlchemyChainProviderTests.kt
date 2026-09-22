@@ -263,6 +263,61 @@ class AlchemyChainProviderTests {
     }
 
     @Test
+    fun `a paged window narrows to the blocks before the page boundary and drains only the boundary block alone`() {
+        chain.pageSize = 2
+        chain.transfers += Transfer(block = 101, logIndex = 1, from = other, to = watched)
+        chain.transfers += Transfer(block = 104, logIndex = 1, from = other, to = watched)
+        chain.transfers += Transfer(block = 104, logIndex = 2, from = other, to = watched)
+        chain.transfers += Transfer(block = 104, logIndex = 3, from = other, to = watched)
+
+        val page = provider(properties(maxRpcCallsPerFetch = 20, maxWindowBlocks = 8)).fetchObservedEventsPage(request(cursor = cursor(100)))
+
+        assertEquals(
+            listOf(
+                Triple(100L, 107L, "in"),
+                Triple(100L, 103L, "in"),
+                Triple(100L, 103L, "out"),
+                Triple(104L, 107L, "in"),
+                Triple(104L, 104L, "in"),
+                Triple(104L, 104L, "in"),
+                Triple(104L, 104L, "out"),
+                Triple(105L, 107L, "in"),
+                Triple(105L, 107L, "out"),
+            ),
+            chain.transfersCalls.map { Triple(it.fromBlock, it.toBlock, it.direction) },
+            "the paged window is re-queried up to block 103, then block 104 is drained alone through its pageKey, then the rest is one range",
+        )
+        assertEquals("pk:in:104:104:2", chain.transfersCalls[5].pageKey, "the continuation resumes after the two rows of page one")
+        assertEquals(listOf(101L to 1, 104L to 1, 104L to 2, 104L to 3), page.events.map { it.blockHeight to it.eventIndex })
+        assertEquals(cursor(108), page.nextCursor)
+        assertTrue(page.hasMore)
+        assertMetadata(page, mode = "one-block", blocksFullyDrained = 8, nextBlock = 108, rpcCalls = 11, oneBlockFallbacks = 1)
+        assertEquals(1, page.metadata!!.get("scan").get("narrowings").asInt())
+        assertEquals(1.0, counter("asset.sync.provider.alchemy.narrowings", "network", "eth-sepolia"))
+    }
+
+    @Test
+    fun `narrowing is skipped when the budget could not also drain the boundary block`() {
+        chain.pageSize = 2
+        chain.transfers += Transfer(block = 101, logIndex = 1, from = other, to = watched)
+        chain.transfers += Transfer(block = 104, logIndex = 1, from = other, to = watched)
+        chain.transfers += Transfer(block = 104, logIndex = 2, from = other, to = watched)
+        chain.transfers += Transfer(block = 104, logIndex = 3, from = other, to = watched)
+
+        // Six calls: two head calls, one paged attempt, then three remain, below the narrowing reserve.
+        val page = provider(properties(maxRpcCallsPerFetch = 6, maxWindowBlocks = 8)).fetchObservedEventsPage(request(cursor = cursor(100)))
+
+        assertEquals(
+            listOf(Triple(100L, 107L, "in"), Triple(100L, 100L, "in"), Triple(100L, 100L, "out")),
+            chain.transfersCalls.map { Triple(it.fromBlock, it.toBlock, it.direction) },
+        )
+        assertEquals(emptyList(), page.events)
+        assertEquals(cursor(101), page.nextCursor)
+        assertEquals(0, page.metadata!!.get("scan").get("narrowings").asInt())
+        assertEquals(0.0, counter("asset.sync.provider.alchemy.narrowings", "network", "eth-sepolia"))
+    }
+
+    @Test
     fun `continuation pages with lower log indexes are sorted in rather than skipped`() {
         chain.pageSize = 1
         chain.descendingPages = true
@@ -304,7 +359,7 @@ class AlchemyChainProviderTests {
 
         val exhausted = assertThrows<ChainProviderUnavailableException> { provider(properties(maxRpcCallsPerFetch = 4)).fetchObservedEventsPage(request(cursor = cursor(100))) }
         assertTrue(exhausted.message!!.contains("budget exhausted before block 100 was fully drained"), exhausted.message)
-        assertTrue(exhausted.message!!.contains("4 of 4 RPC calls"), exhausted.message)
+        assertTrue(exhausted.message!!.contains("3 of 4 RPC calls"), "one call is left after the paged attempt, too few to drain a block: ${exhausted.message}")
 
         chain.transfers.clear()
         chain.transfersCalls.clear()

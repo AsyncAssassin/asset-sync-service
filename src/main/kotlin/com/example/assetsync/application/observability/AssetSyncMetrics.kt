@@ -210,6 +210,13 @@ class AssetSyncMetrics(
             .increment()
     }
 
+    /** A paged window the Alchemy adapter narrowed to the blocks before its page boundary. */
+    fun recordAlchemyNarrowing(network: String) {
+        meterRegistry
+            .counter("asset.sync.provider.alchemy.narrowings", "network", network)
+            .increment()
+    }
+
     /** Transfer rows the Alchemy adapter skipped before emission; `reason` names the policy. */
     fun recordAlchemySkippedRows(network: String, reason: String, count: Int) {
         if (count <= 0) {

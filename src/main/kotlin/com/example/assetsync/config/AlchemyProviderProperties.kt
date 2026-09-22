@@ -23,7 +23,7 @@ class AlchemyProviderProperties(
     val finalityMode: AlchemyFinalityMode = AlchemyFinalityMode.SAFE,
     val finalityDepthFallback: Long = 64,
     val maxWindowBlocks: Int = 5000,
-    val maxRpcCallsPerFetch: Int = 6,
+    val maxRpcCallsPerFetch: Int = 8,
     val rateLimitCapacity: Int = 6,
     val rateLimitRefillPerSecond: Double = 3.0,
 ) {
