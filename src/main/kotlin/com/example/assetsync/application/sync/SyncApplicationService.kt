@@ -673,8 +673,8 @@ class SyncApplicationService(
         page.events.forEach { event ->
             if (
                 blockHeight == null ||
-                event.blockHeight > blockHeight!! ||
-                (event.blockHeight == blockHeight && (eventIndex == null || event.eventIndex > eventIndex!!))
+                event.blockHeight > blockHeight ||
+                (event.blockHeight == blockHeight && (eventIndex == null || event.eventIndex > eventIndex))
             ) {
                 blockHeight = event.blockHeight
                 eventIndex = event.eventIndex

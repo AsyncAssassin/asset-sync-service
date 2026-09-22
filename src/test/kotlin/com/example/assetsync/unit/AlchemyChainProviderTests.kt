@@ -116,10 +116,11 @@ class AlchemyChainProviderTests {
         assertEquals(200L, page.latestBlockHeight)
         assertEquals(180L, page.safeBlockHeight)
         assertMetadata(page, mode = "range", blocksFullyDrained = 50, nextBlock = 150, rpcCalls = 4, oneBlockFallbacks = 0)
-        assertEquals(contract, page.metadata!!.get("contractAddress").asText())
-        assertEquals(0, page.metadata!!.get("skippedSelfTransfers").asInt())
-        assertEquals(0, page.metadata!!.get("skippedWrongTokenRows").asInt())
-        assertTrue(page.metadata!!.get("blockComplete").asBoolean())
+        val metadata = requireNotNull(page.metadata)
+        assertEquals(contract, metadata.get("contractAddress").asText())
+        assertEquals(0, metadata.get("skippedSelfTransfers").asInt())
+        assertEquals(0, metadata.get("skippedWrongTokenRows").asInt())
+        assertTrue(metadata.get("blockComplete").asBoolean())
         assertTrue(page.nextCursor!!.length < 128)
         assertTrue(objectMapper.writeValueAsBytes(page.metadata).size < 1024, "metadata must stay far below the checkpoint limit")
     }
@@ -147,8 +148,9 @@ class AlchemyChainProviderTests {
         assertEquals(emptyList(), page.events, "no backfill before registration")
         assertFalse(page.hasMore)
         assertEquals(cursor(181), page.nextCursor)
-        assertEquals(181L, page.metadata!!.get("initialStartBlock").asLong())
-        assertFalse(page.metadata!!.get("highWaterAdjusted").asBoolean())
+        val idleMetadata = requireNotNull(page.metadata)
+        assertEquals(181L, idleMetadata.get("initialStartBlock").asLong())
+        assertFalse(idleMetadata.get("highWaterAdjusted").asBoolean())
         assertMetadata(page, mode = "idle", blocksFullyDrained = 0, nextBlock = 181, rpcCalls = 2, oneBlockFallbacks = 0)
 
         // The next fetch resumes from the recorded cursor once the frontier moved on.
@@ -193,8 +195,9 @@ class AlchemyChainProviderTests {
 
         assertEquals(121L, chain.transfersCalls.first().fromBlock)
         assertEquals(listOf(121L), page.events.map { it.blockHeight })
-        assertTrue(page.metadata!!.get("highWaterAdjusted").asBoolean())
-        assertEquals(90L, page.metadata!!.get("initialStartBlock").asLong())
+        val metadata = requireNotNull(page.metadata)
+        assertTrue(metadata.get("highWaterAdjusted").asBoolean())
+        assertEquals(90L, metadata.get("initialStartBlock").asLong())
         assertEquals(cursor(171), page.nextCursor)
     }
 
@@ -319,9 +322,10 @@ class AlchemyChainProviderTests {
         assertEquals(emptyList(), page.events)
         assertEquals(cursor(150), page.nextCursor)
         assertTrue(page.hasMore)
-        assertEquals(1, page.metadata!!.get("skippedSelfTransfers").asInt())
-        assertEquals(1, page.metadata!!.get("skippedWrongTokenRows").asInt())
-        assertEquals(0, page.metadata!!.get("skippedBelowHighWater").asInt())
+        val metadata = requireNotNull(page.metadata)
+        assertEquals(1, metadata.get("skippedSelfTransfers").asInt())
+        assertEquals(1, metadata.get("skippedWrongTokenRows").asInt())
+        assertEquals(0, metadata.get("skippedBelowHighWater").asInt())
     }
 
     @Test
@@ -329,8 +333,9 @@ class AlchemyChainProviderTests {
         val safe = provider(properties(finalityMode = AlchemyFinalityMode.SAFE)).fetchObservedEventsPage(request(cursor = cursor(100)))
         assertEquals("safe", stub.requests[1].params!!.get(0).asText())
         assertEquals(180L, safe.safeBlockHeight)
-        assertFalse(safe.metadata!!.get("finalityFallback").asBoolean())
-        assertEquals("safe", safe.metadata!!.get("finalityMode").asText())
+        val safeMetadata = requireNotNull(safe.metadata)
+        assertFalse(safeMetadata.get("finalityFallback").asBoolean())
+        assertEquals("safe", safeMetadata.get("finalityMode").asText())
 
         stub.requests.clear()
         val finalized = provider(properties(finalityMode = AlchemyFinalityMode.FINALIZED)).fetchObservedEventsPage(request(cursor = cursor(100)))

@@ -18,6 +18,10 @@ description = "Asset sync backend service"
 // No exploit path exists in this codebase either way (no @JsonIgnoreProperties, no @JsonFormat
 // case-insensitive properties, no default/polymorphic typing).
 extra["jackson-bom.version"] = "2.21.7"
+// Kotlin: the Boot BOM manages kotlin-stdlib/kotlin-reflect at its own Kotlin version (1.9.25 for
+// Boot 3.5.x), which would leave the runtime library behind the 2.4 compiler. Pin the BOM's
+// property to the plugin version so compiler, stdlib, and reflect move together.
+extra["kotlin.version"] = "2.4.20"
 
 java {
     toolchain {

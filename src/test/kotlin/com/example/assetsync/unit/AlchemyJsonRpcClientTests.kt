@@ -79,8 +79,8 @@ class AlchemyJsonRpcClientTests {
         stub.retryAfter = "2"
         val before = Instant.now()
         val throttled = assertThrows<ChainProviderUnavailableException> { client().blockNumber("eth-sepolia") }
-        assertNotNull(throttled.retryAfter)
-        assertTrue(throttled.retryAfter!!.isAfter(before))
+        val retryAfter = assertNotNull(throttled.retryAfter)
+        assertTrue(retryAfter.isAfter(before))
         assertTrue(throttled.message!!.contains("HTTP 429"), throttled.message)
 
         stub.retryAfter = null

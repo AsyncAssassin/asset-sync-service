@@ -103,8 +103,8 @@ class HttpChainProviderHealthIndicatorTests {
 
         val throttled = assertThrows<ChainProviderUnavailableException> { provider.fetchObservedEventsPage(pageRequest()) }
 
-        assertNotNull(throttled.retryAfter)
-        assertTrue(throttled.retryAfter!!.isAfter(before))
+        val retryAfter = assertNotNull(throttled.retryAfter)
+        assertTrue(retryAfter.isAfter(before))
 
         retryAfterHeader.set("not-a-date")
         val invalidRetryAfter = assertThrows<ChainProviderUnavailableException> { provider.fetchObservedEventsPage(pageRequest()) }
