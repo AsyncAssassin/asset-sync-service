@@ -27,7 +27,7 @@ Target areas:
 - Immutable field comparison.
 - Outbox idempotency key generation.
 - Application command validation helpers where not covered by API tests.
-- Alchemy provider configuration: static validation rules, rollout rules, JSON-RPC error classification, secret scrubbing in header and path auth modes, and health details.
+- Alchemy provider configuration and adapter: static validation rules, rollout rules, JSON-RPC error classification, secret scrubbing in header and path auth modes, health details, the cursor codec, transfer mapping from a captured-shape fixture, amount conversion, the range scan with its one-block fallback, `pageKey` hazards, budget exhaustion, finality and start modes, and the rate limiter.
 - Documentation drift guards: every changeset file, meter name, and `ProblemDetail` type in the code must appear in the docs.
 
 Required cases:

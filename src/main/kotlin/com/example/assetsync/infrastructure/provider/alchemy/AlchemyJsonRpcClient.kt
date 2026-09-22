@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import java.io.InputStream
 import java.net.URI
+import java.time.Instant
 import java.util.concurrent.atomic.AtomicLong
 import org.slf4j.LoggerFactory
 import org.springframework.http.HttpHeaders
@@ -24,13 +25,15 @@ import org.springframework.web.client.RestClient
  * API key, and every exception it throws carries a bounded, scrubbed message: never the endpoint,
  * the authorization header, or the provider's error text. HTTP 401/403 and the JSON-RPC
  * `-32600` envelope are configuration failures (terminal for a sync run); 429, 408, 5xx, and
- * transport errors are retryable outages; malformed payloads are provider-data failures.
+ * transport errors are retryable outages; malformed payloads are provider-data failures. The
+ * optional local rate limiter runs before every request, bounded by the caller's deadline.
  */
 class AlchemyJsonRpcClient(
     private val restClient: RestClient,
     private val properties: AlchemyProviderProperties,
     private val objectMapper: ObjectMapper = jacksonObjectMapper(),
     private val maxResponseBytes: Int = DEFAULT_MAX_RESPONSE_BYTES,
+    private val rateLimiter: AlchemyRateLimiter? = null,
 ) {
 
     private val logger = LoggerFactory.getLogger(AlchemyJsonRpcClient::class.java)
@@ -38,11 +41,60 @@ class AlchemyJsonRpcClient(
     private val requestIds = AtomicLong()
 
     /** `eth_blockNumber`: the cheapest call that proves the key, the endpoint, and the auth mode work. */
-    fun blockNumber(network: String): Long =
-        parseHexQuantity(call(network = network, method = "eth_blockNumber", params = emptyList()), "eth_blockNumber result")
+    fun blockNumber(network: String, deadline: Instant? = null): Long =
+        parseHexQuantity(
+            call(network = network, method = "eth_blockNumber", params = emptyList(), deadline = deadline),
+            "eth_blockNumber result",
+        )
 
-    fun call(network: String, method: String, params: List<Any?>): JsonNode =
+    /**
+     * `eth_getBlockByNumber(tag, false)` for a finality tag such as `safe` or `finalized`; null
+     * when the node answers with a null block (tag unknown or not yet available).
+     */
+    fun blockNumberByTag(network: String, tag: String, deadline: Instant? = null): Long? {
+        val block = call(
+            network = network,
+            method = "eth_getBlockByNumber",
+            params = listOf(tag, false),
+            deadline = deadline,
+            allowNullResult = true,
+        )
+        if (block.isNull) {
+            return null
+        }
+        if (!block.isObject) {
+            throw ProviderDataInvalidException("Alchemy eth_getBlockByNumber result for tag $tag is not a block object.")
+        }
+        val number = block.get("number")
+            ?: throw ProviderDataInvalidException("Alchemy eth_getBlockByNumber result for tag $tag has no number.")
+        return parseHexQuantity(number, "eth_getBlockByNumber number for tag $tag")
+    }
+
+    /** `alchemy_getAssetTransfers` for one stream of one block range; `pageKey` stays in memory. */
+    fun assetTransfers(network: String, params: AlchemyTransfersParams, deadline: Instant? = null): AlchemyTransfersResult {
+        val result = call(network = network, method = "alchemy_getAssetTransfers", params = listOf(params), deadline = deadline)
+        val parsed = try {
+            objectMapper.treeToValue(result, AlchemyTransfersResult::class.java)
+        } catch (exception: JsonProcessingException) {
+            throw ProviderDataInvalidException("Alchemy transfers response for network $network has an unexpected shape.")
+        } catch (exception: IllegalArgumentException) {
+            throw ProviderDataInvalidException("Alchemy transfers response for network $network has an unexpected shape.")
+        }
+        if (parsed.transfers == null) {
+            throw ProviderDataInvalidException("Alchemy transfers response for network $network is missing the transfers field.")
+        }
+        return parsed
+    }
+
+    fun call(
+        network: String,
+        method: String,
+        params: List<Any?>,
+        deadline: Instant? = null,
+        allowNullResult: Boolean = false,
+    ): JsonNode =
         try {
+            rateLimiter?.acquire(deadline)
             val payload = objectMapper.writeValueAsBytes(
                 JsonRpcRequest(id = requestIds.incrementAndGet(), method = method, params = params),
             )
@@ -58,7 +110,9 @@ class AlchemyJsonRpcClient(
                         }
                     }
                     .body(payload)
-                    .exchange { _, response -> handleResponse(network = network, method = method, response = response) },
+                    .exchange { _, response ->
+                        handleResponse(network = network, method = method, response = response, allowNullResult = allowNullResult)
+                    },
             ) { "Alchemy exchange returned no result." }
             logger.debug("alchemy_rpc_succeeded network={} method={}", network, method)
             result
@@ -93,11 +147,12 @@ class AlchemyJsonRpcClient(
         network: String,
         method: String,
         response: RestClient.RequestHeadersSpec.ConvertibleClientHttpResponse,
+        allowNullResult: Boolean,
     ): JsonNode {
         val status = response.statusCode
         val code = status.value()
         return when {
-            status.is2xxSuccessful -> parseResult(network = network, method = method, body = response.body)
+            status.is2xxSuccessful -> parseResult(network = network, method = method, body = response.body, allowNullResult = allowNullResult)
             code == HttpStatus.UNAUTHORIZED.value() || code == HttpStatus.FORBIDDEN.value() ->
                 throw ProviderConfigurationException(
                     "Alchemy returned HTTP $code for network $network; check the API key, the app status, and its allowlist.",
@@ -116,7 +171,7 @@ class AlchemyJsonRpcClient(
         }
     }
 
-    private fun parseResult(network: String, method: String, body: InputStream): JsonNode {
+    private fun parseResult(network: String, method: String, body: InputStream, allowNullResult: Boolean): JsonNode {
         val bytes = ProviderHttpSupport.readBounded(body, maxResponseBytes) {
             ProviderDataInvalidException("Alchemy response for $method on network $network exceeded the configured byte limit.")
         }
@@ -134,6 +189,9 @@ class AlchemyJsonRpcClient(
         }
         val result = node.get("result")
         if (result == null || result.isNull) {
+            if (allowNullResult && result != null) {
+                return result
+            }
             throw ProviderDataInvalidException("Alchemy JSON-RPC response for $method on network $network has no result.")
         }
         return result

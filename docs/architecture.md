@@ -185,6 +185,19 @@ On shutdown the worker acts as a Spring `SmartLifecycle` in the web server's gra
 
 Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. Retryable provider failures, including 429 throttling, increment `failure_attempts`. Provider configuration failures (`ProviderConfigurationException`: rejected credentials, a chain without a provider network mapping, a fetch the configured provider cannot serve) are terminal like malformed pages, so they never burn the retry budget on attempts that cannot succeed.
 
+### Alchemy Provider Page Building
+
+The Alchemy adapter serves one watched address and one ERC-20 registry asset per `fetchObservedEventsPage`:
+
+1. Resolve the network mapping and the enabled asset config; decode `request.cursor` as `{"v":1,"p":"alchemy","nextBlock":N}` (any other shape is provider-data invalid, never a restart from genesis).
+2. `eth_blockNumber`, then the finality frontier: `eth_getBlockByNumber("safe"|"finalized", false)` or latest minus `finality-depth-fallback` (`depth` mode, or fallback when the tag is unavailable, flagged in the checkpoint).
+3. Start block: the cursor, else the frontier plus one under `registration-safe` (no backfill before registration) or the configured per-chain block under `configured-block`; a stored event high-water at or above the start moves it to the next block and is flagged as `highWaterAdjusted`. A start above the frontier returns an idle page with the same cursor and fresh heights.
+4. Scan at most `max-window-blocks` up to the frontier: one `alchemy_getAssetTransfers` call per direction (`toAddress` for `INBOUND`, `fromAddress` for `OUTBOUND`, `category=["erc20"]`, the registry contract, `order=asc`, `maxCount=1000`). A range answered without `pageKey` is complete for every block in it. A paged range is too dense to trust across pages, so the first block is drained alone with `fromBlock == toBlock`, following `pageKey` in memory with loop, restart, and window checks, and the scan continues with the rest of the window.
+5. Merge both streams by `uniqueId`, skip self-transfers and rows of another contract (counted in the checkpoint), map `uniqueId` `:log:{n}` to `eventIndex`, `rawContract.value` and registry decimals to `amount`, `latest - blockHeight + 1` to `confirmations`, emit `SEEN` and let the confirmation policy promote it, and sort by `(blockHeight, eventIndex, txHash)`.
+6. Emit whole blocks only, up to `request.limit`; the first block that does not fit becomes `nextBlock`, and one block with more events than the limit is a terminal `ProviderConfigurationException` because the page contract cannot split a block.
+
+Durable progress moves only past fully drained blocks: `nextCursor` is always a block boundary, `hasMore` is `nextBlock <= safe`, and a block that cannot be finished within `max-rpc-calls-per-fetch` and the provider timeout is left for the next fetch, or reported as a retryable `ChainProviderUnavailableException` when nothing was finished. `pageKey` never reaches `provider_cursor` or `checkpoint`. The checkpoint metadata stays under 1 KiB: provider, chain, network, asset, contract, scan mode and counters, `nextBlock`, latest and safe heights, finality mode and fallback flag, `initialStartBlock`, and skip counters.
+
 ### Manual Account Sync Traversal
 
 ```mermaid

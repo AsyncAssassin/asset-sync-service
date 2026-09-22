@@ -1,11 +1,14 @@
 package com.example.assetsync.config
 
+import com.example.assetsync.application.account.AssetConfigRepository
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProvider
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProviderHealthIndicator
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyJsonRpcClient
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyPreflightReport
+import com.example.assetsync.infrastructure.provider.alchemy.AlchemyRateLimiter
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyStartupPreflight
 import com.fasterxml.jackson.databind.ObjectMapper
+import java.time.Clock
 import org.jooq.DSLContext
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.boot.context.properties.EnableConfigurationProperties
@@ -41,17 +44,27 @@ class AlchemyProviderConfiguration {
     }
 
     @Bean
+    fun alchemyRateLimiter(properties: AlchemyProviderProperties, clock: Clock): AlchemyRateLimiter =
+        AlchemyRateLimiter(
+            capacity = properties.rateLimitCapacity,
+            refillPerSecond = properties.rateLimitRefillPerSecond,
+            clock = clock,
+        )
+
+    @Bean
     fun alchemyJsonRpcClient(
         @Qualifier("alchemyRestClient") alchemyRestClient: RestClient,
         properties: AlchemyProviderProperties,
         objectMapper: ObjectMapper,
         syncProperties: SyncProperties,
+        alchemyRateLimiter: AlchemyRateLimiter,
     ): AlchemyJsonRpcClient =
         AlchemyJsonRpcClient(
             restClient = alchemyRestClient,
             properties = properties,
             objectMapper = objectMapper,
             maxResponseBytes = syncProperties.pagination.maxProviderPageBytes,
+            rateLimiter = alchemyRateLimiter,
         )
 
     /**
@@ -72,8 +85,21 @@ class AlchemyProviderConfiguration {
     fun alchemyChainProvider(
         properties: AlchemyProviderProperties,
         alchemyPreflightReport: AlchemyPreflightReport,
+        alchemyJsonRpcClient: AlchemyJsonRpcClient,
+        assetConfigRepository: AssetConfigRepository,
+        objectMapper: ObjectMapper,
+        syncProperties: SyncProperties,
+        clock: Clock,
     ): AlchemyChainProvider =
-        AlchemyChainProvider(properties = properties, preflight = alchemyPreflightReport)
+        AlchemyChainProvider(
+            properties = properties,
+            preflight = alchemyPreflightReport,
+            client = alchemyJsonRpcClient,
+            assetConfigRepository = assetConfigRepository,
+            objectMapper = objectMapper,
+            providerTimeout = syncProperties.providerTimeout,
+            clock = clock,
+        )
 
     @Bean
     fun alchemyChainProviderHealthIndicator(alchemyChainProvider: AlchemyChainProvider): AlchemyChainProviderHealthIndicator =

@@ -133,6 +133,8 @@ Expected behavior:
 - Events already committed before the timeout remain valid.
 - The cursor checkpoint is not advanced for the failed page.
 - No long-lived database locks are held while waiting for provider response.
+- Under the Alchemy provider, a repeated `pageKey`, a restarted continuation page, a row outside the requested block window, a safe frontier above the latest block, and an exhausted per-fetch RPC or time budget before the first block was drained are all retryable: the cursor stays on its block boundary and the next attempt rescans from it. A budget exhausted after at least one drained block returns that prefix instead.
+- The local token bucket waits for a token only within the fetch deadline; a wait that cannot be met is a retryable outage rather than a provider 429.
 
 Operational signal:
 
@@ -146,6 +148,7 @@ Scenario:
 - The HTTP provider omits required `events` or `hasMore`.
 - The provider returns too many events, an oversized cursor/body/checkpoint, `hasMore=true` without cursor progress, wrong address/asset, invalid high-water fields, or insufficient final resume state. A final empty page may omit `nextCursor` only when it supplies durable block high-water such as `safeBlockHeight` or `latestBlockHeight`.
 - The provider returns events out of non-decreasing `(blockHeight, eventIndex, txHash)` order, or a page whose first event is behind the stored `last_processed_block_height` / `last_processed_event_index` checkpoint.
+- The Alchemy adapter meets a row it cannot map honestly: a `uniqueId` without the ERC-20 `:log:{n}` suffix or not matching the transaction hash, a non-hex `blockNum` or `rawContract.value`, a `rawContract.decimal` that disagrees with the registry, a missing address or contract, a category other than `erc20`, a row on the wrong side of the watched address, or a malformed provider cursor.
 
 Expected behavior:
 
@@ -317,7 +320,7 @@ Operational signal:
 
 Scenario:
 
-- The configured provider rejects the credentials (HTTP 401/403 or a JSON-RPC `-32600` envelope), an enabled chain has no provider network mapping, active watched addresses lack an enabled asset config, or the configured provider cannot serve the requested fetch.
+- The configured provider rejects the credentials (HTTP 401/403 or a JSON-RPC `-32600` envelope), an enabled chain has no provider network mapping, active watched addresses lack an enabled asset config, `start-mode=configured-block` has no start block for the chain, or one block holds more events for the watched address than `asset-sync.sync.pagination.page-size`, which the page contract cannot split.
 
 Expected behavior:
 

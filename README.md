@@ -33,7 +33,8 @@
 - Idempotent transaction lifecycle transitions: `SEEN`, `CONFIRMED`, and `REVERTED`.
 - Outbox event creation for meaningful transaction state changes.
 - Manual sync by watched address or account through a page-based `ChainProviderPort` (`FakeChainProvider` in `local`/`test`, `HttpChainProvider` or `AlchemyChainProvider` elsewhere, selected by `asset-sync.provider.type`).
-- Provider selection by configuration: the `alchemy` type binds its own settings, validates them and the asset registry at startup, probes every required Alchemy network with the configured credentials, and keeps the API key out of logs, errors, and health details; `eth-sepolia` is the first mapped chain, and the transfer fetch itself arrives in a later version.
+- Provider selection by configuration: the `alchemy` type binds its own settings, validates them and the asset registry at startup, probes every required Alchemy network with the configured credentials, and keeps the API key out of logs, errors, and health details; `eth-sepolia` is the first mapped chain.
+- Alchemy ERC-20 adapter: finality-lagged range scans with a one-block fallback for dense windows, whole-block emission sorted by block and log index, a block-boundary cursor, decimal-adjusted amounts from raw base units and registry decimals, self-transfer and wrong-token skips, a per-fetch RPC and time budget, and a local rate limiter.
 - Per-watched-address provider cursors, checkpoint leases, and bounded continuation requeue for large syncs.
 - Sync run inspection.
 - Scheduled outbox publishing to structured logs.
@@ -384,7 +385,7 @@ Runtime configuration:
 | `ASSET_SYNC_PROVIDER_ALCHEMY_RATE_LIMIT_CAPACITY` | `6` | Local token bucket burst |
 | `ASSET_SYNC_PROVIDER_ALCHEMY_RATE_LIMIT_REFILL_PER_SECOND` | `3.0` | Local token bucket refill rate |
 
-The chain-to-network mapping lives under `asset-sync.provider.alchemy.networks` in `application.yml`; `eth-sepolia` is the first and only mapped chain. Map keys contain dashes, so further chains are added in YAML or through `SPRING_APPLICATION_JSON`, not through environment variables. The finality, window, RPC-cap, and rate-limit settings are validated now and drive the adapter once it ships.
+The chain-to-network mapping lives under `asset-sync.provider.alchemy.networks` in `application.yml`; `eth-sepolia` is the first and only mapped chain. Map keys contain dashes, so further chains are added in YAML or through `SPRING_APPLICATION_JSON`, not through environment variables. `max-window-blocks` bounds the block range of one page fetch, `max-rpc-calls-per-fetch` bounds its JSON-RPC calls, and the rate-limit settings size the local token bucket in front of every call.
 
 With `type=alchemy` the service validates the configuration and the registry before the sync worker starts: the key must be set, every enabled chain with enabled asset configs must map to a network, every mapped network must answer an `eth_blockNumber` probe with the configured credentials, and no active watched address may lack an enabled asset config. A violation stops the process with a `ProviderConfigurationException` whose message names the chains or `(chain_id, asset)` pairs and the operator action, never the key. The seeded `local-evm` chain is enabled and has no Alchemy network, so the first `alchemy` boot on a fresh database applies the migrations and then stops at that rule; disable the chain and restart:
 
@@ -392,7 +393,7 @@ With `type=alchemy` the service validates the configuration and the registry bef
 UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm';
 ```
 
-The Alchemy transfer fetch is not implemented in this version. An `alchemy` deployment boots, probes, and reports health, but every sync run against it fails terminally with `ProviderConfigurationException` and does not consume retry attempts. Keep `http` for syncing until the adapter ships.
+A page fetch under `alchemy` asks for the latest block and the finality frontier (the `safe` or `finalized` tag, or latest minus `finality-depth-fallback` in `depth` mode or when the tag is unavailable), then scans from the cursor's next block up to the frontier, at most `max-window-blocks` per fetch, with one `alchemy_getAssetTransfers` call per direction for the whole range. A range answered without `pageKey` is complete for every block in it, so quiet stretches cost two calls; a range that comes back paged is drained one block at a time (`fromBlock == toBlock`) with `pageKey` followed only in memory. Events are emitted for whole blocks only, sorted by block and log index, with amounts converted from `rawContract.value` and the registry decimals; self-transfers and rows of another contract are skipped and counted in the checkpoint. The cursor is always a block boundary (`{"v":1,"p":"alchemy","nextBlock":N}`), a new watched address starts just above the frontier under `registration-safe` and at the configured block under `configured-block`, and a block that cannot be finished within the RPC and time budget is retried from the same cursor. One block holding more events for the watched address than `asset-sync.sync.pagination.page-size` is a terminal configuration error, because the page contract cannot split a block.
 
 ## Reliability Highlights
 
@@ -462,7 +463,7 @@ This service does not provide custody, signing, private key storage, wallet func
 Future extensions, not implemented as of `v0.2.0`:
 
 - Transaction read/list endpoints.
-- Real blockchain/indexer backend integration beyond the generic HTTP page contract; the Alchemy provider type ships its configuration, credential handling, and rollout preflight first, and the ERC-20 transfer adapter follows.
+- Provider coverage beyond Alchemy ERC-20 transfers and the generic HTTP page contract: native and internal transfers, ERC-721/1155, and a second provider on the same asset registry.
 - Provider-specific block-range scans.
 - External broker adapter for the outbox.
 - Balance projection read models.
