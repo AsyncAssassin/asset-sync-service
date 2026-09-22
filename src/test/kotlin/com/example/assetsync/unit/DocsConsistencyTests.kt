@@ -11,8 +11,8 @@ import kotlin.test.assertTrue
 /**
  * Guards against the documentation drifting away from the code. Each check derives its
  * expectations from the source of truth under `src/` and asserts that the owning document still
- * mentions every item, so adding a changeset, a meter, or a ProblemDetail type without documenting
- * it fails the build. Paths are relative to the project directory, which is Gradle's working
+ * mentions every item, so adding a changeset, a meter, a ProblemDetail type, or an environment
+ * placeholder without documenting it fails the build. Paths are relative to the project directory, which is Gradle's working
  * directory for tests (the same convention as GeneratedJooqSourceControlTests).
  */
 class DocsConsistencyTests {
@@ -22,6 +22,7 @@ class DocsConsistencyTests {
     private val metricsSource =
         Path.of("src/main/kotlin/com/example/assetsync/application/observability/AssetSyncMetrics.kt")
     private val apiErrorSources = Path.of("src/main/kotlin/com/example/assetsync/api/error")
+    private val configurationSources = Path.of("src/main/resources")
 
     @Test
     fun `every changeset file is included by the master changelog exactly once`() {
@@ -65,6 +66,20 @@ class DocsConsistencyTests {
 
         val undocumented = types.filterNot { apiDoc.contains("errors/$it`") }
         assertTrue(undocumented.isEmpty(), "docs/api.md must map every ProblemDetail type; missing: $undocumented")
+    }
+
+    @Test
+    fun `every environment placeholder in the main configuration is documented in the readme`() {
+        val readme = Files.readString(Path.of("README.md"))
+        val placeholders = configurationSources.listDirectoryEntries("application*.yml")
+            .flatMap { file ->
+                Regex("\\$\\{([A-Z][A-Z0-9_]+)").findAll(Files.readString(file)).map { it.groupValues[1] }.toList()
+            }
+            .toSortedSet()
+        assertTrue(placeholders.isNotEmpty(), "expected environment placeholders in application*.yml")
+
+        val undocumented = placeholders.filterNot { readme.contains("`$it`") }
+        assertTrue(undocumented.isEmpty(), "README.md must document every environment variable; missing: $undocumented")
     }
 
     private fun includedChangesets(): List<String> =

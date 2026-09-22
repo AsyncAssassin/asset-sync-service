@@ -93,7 +93,7 @@ tasks.withType<Test> {
     // The documentation drift guards (DocsConsistencyTests) and the generated-source guard read
     // these files at test time. Declaring them as inputs makes Gradle re-run the tests when only
     // the docs change instead of treating the task as up-to-date.
-    inputs.files(fileTree("docs") { include("*.md") }, ".gitignore")
+    inputs.files(fileTree("docs") { include("*.md") }, ".gitignore", "README.md")
         .withPropertyName("repositoryFilesReadByTests")
         .withPathSensitivity(PathSensitivity.RELATIVE)
     // The env-gated Alchemy live smoke (AlchemyLiveSmokeTests) is switched on and parameterized by

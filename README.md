@@ -325,6 +325,8 @@ Database configuration for the `local` profile:
 | `ASSET_SYNC_DB_MAX_POOL_SIZE` | `10` | Hikari max pool size |
 | `ASSET_SYNC_DB_MIN_IDLE` | `1` | Hikari minimum idle connections |
 
+The `prod` profile takes the datasource only from `ASSET_SYNC_DB_URL`, `ASSET_SYNC_DB_USER`, and `ASSET_SYNC_DB_PASSWORD`, with no defaults, and provisions its operator account from `ASSET_SYNC_ADMIN_USERNAME` and `ASSET_SYNC_ADMIN_PASSWORD`.
+
 Runtime configuration:
 
 | Variable | Default | Purpose |
@@ -361,6 +363,26 @@ Runtime configuration:
 | `ASSET_SYNC_WORKER_MAX_IN_FLIGHT_RUNS` | `1000` | Soft cap for `QUEUED + RUNNING` sync runs |
 | `ASSET_SYNC_WORKER_SHUTDOWN_TIMEOUT` | `20s` | How long a shutdown waits for in-flight sync runs before interrupting them |
 | `ASSET_SYNC_SHUTDOWN_PHASE_TIMEOUT` | `30s` | Upper bound for one graceful-shutdown phase; the web server and the sync worker drain concurrently within it |
+| `ASSET_SYNC_WORKER_FIXED_DELAY` | `5s` | Delay between worker claim ticks |
+| `ASSET_SYNC_WORKER_INITIAL_DELAY` | `10s` | Initial delay before the first worker claim |
+| `ASSET_SYNC_WORKER_RETRY_BACKOFF_BASE_DELAY` | `30s` | Base delay of the jittered retry backoff for failed sync runs |
+| `ASSET_SYNC_WORKER_RETRY_BACKOFF_MAX_DELAY` | `15m` | Maximum retry backoff; also caps a provider `Retry-After` |
+| `ASSET_SYNC_WORKER_MAX_ERROR_LENGTH` | `1024` | Stored sync run error limit |
+| `ASSET_SYNC_ACCOUNT_SYNC_BATCH_SIZE` | `100` | Watched addresses loaded per batch while an account sync traverses its addresses |
+| `ASSET_SYNC_MAX_ACCOUNT_SYNC_ADDRESSES` | `1000` | Maximum watched addresses an account sync may traverse |
+| `ASSET_SYNC_STALE_RUN_TIMEOUT` | `30m` | Age after which the recovery job abandons a legacy `STARTED` sync run |
+| `ASSET_SYNC_PAGINATION_CURSOR_LEASE_RETRY_DELAY` | `5s` | Requeue delay when an address's cursor lease is busy |
+| `ASSET_SYNC_PAGINATION_CONTINUATION_REQUEUE_DELAY` | `1s` | Requeue delay for a healthy continuation |
+| `ASSET_SYNC_PAGINATION_MAX_CURSOR_LENGTH` | `4096` | Longest provider cursor accepted in a page |
+| `ASSET_SYNC_PAGINATION_MAX_CHECKPOINT_JSON_LENGTH` | `16384` | Largest page checkpoint metadata accepted, in bytes |
+| `ASSET_SYNC_RECOVERY_ENABLED` | `true` | Enables the recovery job for expired leases and stale runs |
+| `ASSET_SYNC_RECOVERY_BATCH_SIZE` | `100` | Rows handled per recovery tick |
+| `ASSET_SYNC_RECOVERY_FIXED_DELAY` | `5m` | Delay between recovery ticks |
+| `ASSET_SYNC_RECOVERY_INITIAL_DELAY` | `5m` | Initial delay before the first recovery tick |
+| `ASSET_SYNC_OUTBOX_PUBLISHED_RETENTION` | `7d` | Age after which published outbox rows are deleted when retention is enabled |
+| `ASSET_SYNC_OUTBOX_RETENTION_BATCH_SIZE` | `1000` | Published rows deleted per retention tick |
+| `ASSET_SYNC_OUTBOX_RETENTION_FIXED_DELAY` | `1h` | Delay between retention ticks |
+| `ASSET_SYNC_OUTBOX_RETENTION_INITIAL_DELAY` | `5m` | Initial delay before the first retention tick |
 
 ### Chain Provider
 
