@@ -397,6 +397,7 @@ Notes:
 - `sync_runs` are operational records and the durable queue for async sync.
 - They do not participate in observed transaction idempotency.
 - Healthy provider pagination continuations increment `continuation_count`, not `failure_attempts`.
+- Requeues caused by a rejected executor submission or by a worker shutdown also carry `last_requeue_reason = FAILURE` but leave `failure_attempts` unchanged; `last_error` names the cause.
 - Retryable provider failures, 429 throttling, capacity failures, and expired `RUNNING` recovery increment `failure_attempts`.
 - The partial unique in-flight index intentionally excludes legacy `STARTED`.
 

@@ -186,10 +186,14 @@ data class SyncProperties(
         val retryBackoffMaxDelay: Duration = Duration.ofMinutes(15),
         val maxInFlightRuns: Int = 1_000,
         val maxErrorLength: Int = 1_024,
+        val shutdownTimeout: Duration = Duration.ofSeconds(20),
     ) {
         init {
             require(!fixedDelay.isNegative && !fixedDelay.isZero) {
                 "asset-sync.sync.worker.fixed-delay must be positive."
+            }
+            require(!shutdownTimeout.isNegative && !shutdownTimeout.isZero) {
+                "asset-sync.sync.worker.shutdown-timeout must be positive."
             }
             require(!initialDelay.isNegative) {
                 "asset-sync.sync.worker.initial-delay must not be negative."

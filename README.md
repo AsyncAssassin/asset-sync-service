@@ -356,6 +356,8 @@ Runtime configuration:
 | `ASSET_SYNC_WORKER_HEARTBEAT_INTERVAL` | `20s` | Heartbeat cadence while a worker owns a run |
 | `ASSET_SYNC_WORKER_MAX_ATTEMPTS` | `5` | Retryable failure attempts before sync becomes terminal `FAILED` |
 | `ASSET_SYNC_WORKER_MAX_IN_FLIGHT_RUNS` | `1000` | Soft cap for `QUEUED + RUNNING` sync runs |
+| `ASSET_SYNC_WORKER_SHUTDOWN_TIMEOUT` | `20s` | How long a shutdown waits for in-flight sync runs before interrupting them |
+| `ASSET_SYNC_SHUTDOWN_PHASE_TIMEOUT` | `30s` | Upper bound for one graceful-shutdown phase; the web server and the sync worker drain concurrently within it |
 
 ## Reliability Highlights
 
@@ -369,6 +371,7 @@ Runtime configuration:
 - Provider sync is page-based. Each watched address has a `sync_cursors` row; the worker acquires a cursor lease, fetches one bounded page, ingests the full page, and only then advances the checkpoint.
 - Healthy page/account continuations increment `continuation_count`, while retryable failures and 429 backpressure increment `failure_attempts`.
 - Duplicate in-flight sync requests for the same address/account return the existing run instead of starting duplicate provider work.
+- Graceful shutdown stops claiming, drains in-flight sync runs up to the worker shutdown timeout, and requeues any run interrupted afterwards without consuming its retry budget.
 - Publishing is at-least-once; downstream consumers should deduplicate by event id or idempotency key.
 - Failed publishes store a bounded error message, use bounded retry backoff, and become terminal `DEAD` rows at max attempts.
 - A publish that succeeds but cannot be marked `PUBLISHED` is treated as a completion failure, not a publish failure: attempts are not incremented and the leased row is retried after the lease expires.

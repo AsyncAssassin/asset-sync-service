@@ -8,6 +8,11 @@ spring:
       connection-init-sql: "SET statement_timeout TO '30s'; SET lock_timeout TO '5s'"
   liquibase:
     enabled: false
+  lifecycle:
+    # Upper bound for one graceful-shutdown phase. The web server drains in-flight HTTP requests and
+    # the sync worker drains in-flight runs concurrently inside this window; keep
+    # asset-sync.sync.worker.shutdown-timeout plus its 5s interrupt grace below it.
+    timeout-per-shutdown-phase: ${ASSET_SYNC_SHUTDOWN_PHASE_TIMEOUT:30s}
 
 server:
   port: ${SERVER_PORT:8080}
@@ -90,6 +95,7 @@ asset-sync:
       retry-backoff-max-delay: ${ASSET_SYNC_WORKER_RETRY_BACKOFF_MAX_DELAY:15m}
       max-in-flight-runs: ${ASSET_SYNC_WORKER_MAX_IN_FLIGHT_RUNS:1000}
       max-error-length: ${ASSET_SYNC_WORKER_MAX_ERROR_LENGTH:1024}
+      shutdown-timeout: ${ASSET_SYNC_WORKER_SHUTDOWN_TIMEOUT:20s}
   outbox:
     batch-size: ${ASSET_SYNC_OUTBOX_BATCH_SIZE:50}
     retry-backoff-base-delay: ${ASSET_SYNC_OUTBOX_RETRY_BACKOFF_BASE_DELAY:30s}

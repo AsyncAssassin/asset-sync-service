@@ -295,7 +295,25 @@ Expected behavior:
 - Duplicate future provider events are safe because observed-event ingestion is idempotent.
 - This is at-least-once sync execution, not exactly-once provider work.
 
-## 16. Future Failure Modes
+## 16. Graceful Shutdown During Sync Execution
+
+Scenario:
+
+- The process receives a shutdown signal while the worker owns one or more `RUNNING` sync runs.
+
+Expected behavior:
+
+- The worker stops claiming new runs immediately and lets in-flight runs finish for up to `asset-sync.sync.worker.shutdown-timeout`; the web server drains HTTP requests concurrently within `spring.lifecycle.timeout-per-shutdown-phase`.
+- Runs that finish inside the window complete normally.
+- Runs still in flight afterwards are interrupted. An interrupted run is requeued as `QUEUED` with `last_requeue_reason = FAILURE` and a `last_error` naming the shutdown; `failure_attempts` is not incremented, so restarts never consume retry budget.
+- The cursor lease of an interrupted run is released before the run is requeued; if the release fails, the lease expires and recovery clears it.
+- Already committed page events remain valid; the next claim resumes from the durable checkpoint.
+
+Operational signal:
+
+- Log `sync_worker_draining`, `sync_worker_drain_timeout`, `sync_run_requeued_on_interrupt`, and `sync_worker_stopped` with the worker id.
+
+## 17. Future Failure Modes
 
 Deferred areas:
 

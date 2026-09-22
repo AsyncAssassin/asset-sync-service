@@ -180,6 +180,8 @@ The provider call is outside the observed event ingestion transaction and outsid
 
 The page contract is append-only. Events inside a page must arrive in non-decreasing `(blockHeight, eventIndex, txHash)` order, and the first event of a page must not sit behind the stored `last_processed_block_height` / `last_processed_event_index` checkpoint; a page that violates either rule is rejected as terminal provider-data-invalid and the checkpoint does not move. Lifecycle updates for events that are already behind the checkpoint therefore never travel through the sync path: they arrive through `POST /api/v1/observed-events`, and provider adapters are expected to emit only finalized events.
 
+On shutdown the worker acts as a Spring `SmartLifecycle` in the web server's graceful-shutdown phase: it stops claiming, waits up to `asset-sync.sync.worker.shutdown-timeout` for in-flight runs, then interrupts the rest. Interrupted runs return to `QUEUED` without consuming their retry budget, and their cursor leases are released first.
+
 Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. Retryable provider failures, including 429 throttling, increment `failure_attempts`.
 
 ### Manual Account Sync Traversal
@@ -1050,6 +1052,10 @@ Provider timeout:
 - Already ingested committed events remain valid.
 - POST already returned `202 Accepted`; clients observe the outcome through `GET /api/v1/sync-runs/{id}`.
 
+Process shutdown during sync:
+- The worker stops claiming, drains in-flight runs up to `worker.shutdown-timeout`, then interrupts the rest.
+- Interrupted runs return to `QUEUED` without consuming `failure_attempts`; already committed page events remain valid.
+
 App crashes after DB commit before publish:
 - Outbox poller resumes after restart and publishes pending events.
 
@@ -1108,7 +1114,7 @@ Metrics, as registered by `AssetSyncMetrics`:
 - `asset.sync.provider.fetch.duration{targetType,status}`: timer around one provider page fetch.
 - `asset.sync.provider.pages{targetType,result}`: counter of validated pages (`SUCCEEDED`, `FAILED`, `MALFORMED`).
 - `asset.sync.provider.page.events{targetType}`: distribution summary of events per provider page.
-- `asset.sync.cursor.leases{result}`: counter of cursor lease operations (`ACQUIRED`, `BUSY`, `EXTENDED`, `LOST`, `RELEASED`).
+- `asset.sync.cursor.leases{result}`: counter of cursor lease operations (`ACQUIRED`, `BUSY`, `EXTENDED`, `LOST`, `RELEASED`, `RELEASE_FAILED`).
 - `asset.sync.cursor.checkpoints{result}`: counter of checkpoint advances (`ADVANCED`, `STALE`).
 - `asset.sync.outbox.batches{result}`: counter of poller batches (`EMPTY`, `SUCCEEDED`, `FAILED`, `PARTIAL_FAILURE`).
 - `asset.sync.outbox.events{eventType,status}`: counter of per-event outcomes (`PUBLISHED`, `FAILED`, `DEAD`, `COMPLETION_FAILED`).

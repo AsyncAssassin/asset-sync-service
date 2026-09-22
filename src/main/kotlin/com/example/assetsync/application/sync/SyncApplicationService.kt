@@ -100,10 +100,15 @@ class SyncApplicationService(
                     )
             }
         } catch (throwable: Throwable) {
-            if (throwable is InterruptedException) {
+            // Thread.interrupted() also clears the flag on purpose: HikariCP refuses to lend a
+            // connection to an interrupted thread, and the requeue below has to reach the database.
+            val interrupted = Thread.interrupted() || throwable.causedByInterruption()
+            if (interrupted) {
+                handleInterruptedClaim(claim = claim, progress = progress, throwable = throwable)
                 Thread.currentThread().interrupt()
+            } else {
+                handleClaimFailure(claim = claim, progress = progress, throwable = throwable)
             }
-            handleClaimFailure(claim = claim, progress = progress, throwable = throwable)
         } finally {
             heartbeat.cancel(false)
         }
@@ -418,10 +423,22 @@ class SyncApplicationService(
             }
         } finally {
             cursorHeartbeat.cancel()
+            releaseCursorLeaseQuietly(claim = claim, watchedAddressId = watchedAddress.id, lockToken = cursorLockToken)
+        }
+    }
+
+    /**
+     * Releases the cursor lease without letting the release change the outcome of the page loop:
+     * the interrupt flag is parked so HikariCP still lends a connection during shutdown, and a
+     * failed release is logged rather than thrown because the lease expires and recovery clears it.
+     */
+    private fun releaseCursorLeaseQuietly(claim: ClaimedSyncRun, watchedAddressId: UUID, lockToken: UUID) {
+        val wasInterrupted = Thread.interrupted()
+        try {
             val released = syncCursorRepository.releaseCursorLeaseFenced(
-                watchedAddressId = watchedAddress.id,
+                watchedAddressId = watchedAddressId,
                 lockedBy = claim.lockedBy,
-                lockToken = cursorLockToken,
+                lockToken = lockToken,
                 updatedAt = Instant.now(clock),
             )
             metrics.recordCursorLease(if (released) "RELEASED" else "LOST")
@@ -429,9 +446,22 @@ class SyncApplicationService(
                 "cursor_lease_released syncRunId={} targetType={} watchedAddressId={} released={}",
                 claim.run.id,
                 claim.run.targetType,
-                watchedAddress.id,
+                watchedAddressId,
                 released,
             )
+        } catch (exception: RuntimeException) {
+            metrics.recordCursorLease("RELEASE_FAILED")
+            logger.warn(
+                "cursor_lease_release_failed syncRunId={} targetType={} watchedAddressId={} error={}",
+                claim.run.id,
+                claim.run.targetType,
+                watchedAddressId,
+                exception.conciseMessage(),
+            )
+        } finally {
+            if (wasInterrupted) {
+                Thread.currentThread().interrupt()
+            }
         }
     }
 
@@ -777,6 +807,46 @@ class SyncApplicationService(
         )
     }
 
+    /**
+     * A worker thread is interrupted only while the process shuts down, so the run goes back to
+     * the queue through the budget-neutral requeue path instead of counting as a provider failure.
+     * Already committed page events stay valid; the next claim resumes from the durable checkpoint.
+     */
+    private fun handleInterruptedClaim(claim: ClaimedSyncRun, progress: SyncProgress, throwable: Throwable) {
+        val requeued = try {
+            syncRunLifecycleService.requeue(
+                claim = claim,
+                eventsSeen = progress.eventsSeen,
+                eventsChanged = progress.eventsChanged,
+                lastError = INTERRUPTED_REQUEUE_ERROR,
+            )
+        } catch (markException: Throwable) {
+            throwable.addSuppressed(markException)
+            logger.error(
+                "sync_run_interrupt_requeue_failed syncRunId={} targetType={} targetId={} originalError={} markError={}",
+                claim.run.id,
+                claim.run.targetType,
+                claim.run.targetId,
+                throwable.conciseMessage(),
+                markException.conciseMessage(),
+            )
+            return
+        }
+        logger.warn(
+            "sync_run_requeued_on_interrupt syncRunId={} targetType={} targetId={} attempts={} requeued={} cause={}",
+            claim.run.id,
+            claim.run.targetType,
+            claim.run.targetId,
+            claim.attempts,
+            requeued,
+            throwable.conciseMessage(),
+        )
+    }
+
+    private fun Throwable.causedByInterruption(): Boolean =
+        generateSequence(this) { current -> current.cause?.takeIf { it !== current } }
+            .any { it is InterruptedException }
+
     private fun handleClaimFailure(claim: ClaimedSyncRun, progress: SyncProgress, throwable: Throwable) {
         val error = throwable.conciseMessage().take(syncProperties.worker.maxErrorLength)
         val terminal = isTerminalFailure(throwable)
@@ -926,6 +996,7 @@ class SyncApplicationService(
     }
 
     private companion object {
+        const val INTERRUPTED_REQUEUE_ERROR = "worker interrupted during shutdown; requeued without consuming retry budget"
         const val ACCOUNT_NEXT_OFFSET_FIELD = "accountNextOffset"
         const val ACCOUNT_SKIPPED_BUSY_FIELD = "accountSkippedBusy"
         const val ACCOUNT_WRAPPED_FIELD = "accountWrapped"

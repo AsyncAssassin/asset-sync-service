@@ -78,6 +78,7 @@ Required cases:
 | Provider pages | missing required fields, explicit empty page, high-water-only final page, byte cap, cursor progress, multi-page success |
 | Sync continuation | page failure retry from checkpoint, continuation count separate from failure attempts |
 | Account traversal | busy early address is skipped while later addresses are processed |
+| Sync shutdown | draining finishes an in-flight run, interruption requeues without failure budget, a stopped worker refuses claims |
 
 Testcontainers expectations:
 

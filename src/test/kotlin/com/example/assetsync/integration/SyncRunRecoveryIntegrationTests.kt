@@ -256,6 +256,7 @@ class SyncRunRecoveryIntegrationTests(
             syncRunLifecycleService = syncRunLifecycleService,
             syncApplicationService = syncApplicationService,
             syncWorkerExecutor = rejectingExecutor(),
+            syncProviderExecutor = rejectingExecutor(),
             syncWorkerPermitSemaphore = Semaphore(1),
             syncProperties = syncProperties,
             applicationName = "test-asset-sync",
