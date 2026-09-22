@@ -398,6 +398,7 @@ Coverage highlights:
 - Outbox retry and concurrency tests, including `FOR UPDATE SKIP LOCKED`.
 - Observability tests for health and metrics.
 - GitHub Actions CI runs Gradle checks, `bootJar`, `docker compose config`, and a generated jOOQ tracking guard.
+- Dependabot proposes weekly Gradle and GitHub Actions updates as pull requests that run the same CI.
 
 Verification commands:
 

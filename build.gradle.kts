@@ -13,7 +13,8 @@ description = "Asset sync backend service"
 // GHSA-5jmj-h7xm-6q6v (CVE-2026-54515, ">= 2.19.0, < 2.21.5"). Pin the BOM to the latest 2.21.x
 // patch instead (all modules used here are published at 2.21.7; verified on Maven Central
 // 2026-09-22). `jackson-bom.version` is the property Boot's dependency management honors; the
-// `jackson.version` property is ignored. Drop the override once Spring Boot manages >= 2.21.5.
+// `jackson.version` property is ignored. Drop the override once Spring Boot manages >= 2.21.5;
+// Dependabot (.github/dependabot.yml) proposes the Boot bump that makes that possible.
 // No exploit path exists in this codebase either way (no @JsonIgnoreProperties, no @JsonFormat
 // case-insensitive properties, no default/polymorphic typing).
 extra["jackson-bom.version"] = "2.21.7"
