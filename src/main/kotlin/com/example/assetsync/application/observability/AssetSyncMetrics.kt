@@ -176,6 +176,56 @@ class AssetSyncMetrics(
             .increment()
     }
 
+    fun startAlchemyRpcTimer(): Timer.Sample =
+        Timer.start(meterRegistry)
+
+    /** One Alchemy JSON-RPC call; `result` is `SUCCEEDED`, `UNAVAILABLE`, `INVALID`, or `CONFIGURATION`. */
+    fun recordAlchemyRpc(network: String, method: String, result: String, sample: Timer.Sample) {
+        meterRegistry
+            .counter(
+                "asset.sync.provider.alchemy.rpc",
+                "network",
+                network,
+                "method",
+                method,
+                "result",
+                result,
+            )
+            .increment()
+        sample.stop(
+            Timer
+                .builder("asset.sync.provider.alchemy.rpc.duration")
+                .description("Alchemy JSON-RPC call duration.")
+                .tag("network", network)
+                .tag("method", method)
+                .tag("result", result)
+                .register(meterRegistry),
+        )
+    }
+
+    /** A block the Alchemy adapter had to drain alone because its window came back paged. */
+    fun recordAlchemyBlockFallback(network: String) {
+        meterRegistry
+            .counter("asset.sync.provider.alchemy.block.fallbacks", "network", network)
+            .increment()
+    }
+
+    /** Transfer rows the Alchemy adapter skipped before emission; `reason` names the policy. */
+    fun recordAlchemySkippedRows(network: String, reason: String, count: Int) {
+        if (count <= 0) {
+            return
+        }
+        meterRegistry
+            .counter(
+                "asset.sync.provider.alchemy.skipped.rows",
+                "network",
+                network,
+                "reason",
+                reason,
+            )
+            .increment(count.toDouble())
+    }
+
     private fun recordProviderFetchResult(
         targetType: SyncTargetType,
         status: String,

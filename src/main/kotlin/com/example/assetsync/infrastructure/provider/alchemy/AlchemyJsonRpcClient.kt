@@ -1,5 +1,6 @@
 package com.example.assetsync.infrastructure.provider.alchemy
 
+import com.example.assetsync.application.observability.AssetSyncMetrics
 import com.example.assetsync.application.sync.ChainProviderUnavailableException
 import com.example.assetsync.application.sync.ProviderConfigurationException
 import com.example.assetsync.application.sync.ProviderDataInvalidException
@@ -10,6 +11,7 @@ import com.fasterxml.jackson.core.JsonProcessingException
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import io.micrometer.core.instrument.Timer
 import java.io.InputStream
 import java.net.URI
 import java.time.Instant
@@ -26,7 +28,8 @@ import org.springframework.web.client.RestClient
  * the authorization header, or the provider's error text. HTTP 401/403 and the JSON-RPC
  * `-32600` envelope are configuration failures (terminal for a sync run); 429, 408, 5xx, and
  * transport errors are retryable outages; malformed payloads are provider-data failures. The
- * optional local rate limiter runs before every request, bounded by the caller's deadline.
+ * optional local rate limiter runs before every request, bounded by the caller's deadline, and the
+ * optional metrics record every call with its outcome and duration.
  */
 class AlchemyJsonRpcClient(
     private val restClient: RestClient,
@@ -34,6 +37,7 @@ class AlchemyJsonRpcClient(
     private val objectMapper: ObjectMapper = jacksonObjectMapper(),
     private val maxResponseBytes: Int = DEFAULT_MAX_RESPONSE_BYTES,
     private val rateLimiter: AlchemyRateLimiter? = null,
+    private val metrics: AssetSyncMetrics? = null,
 ) {
 
     private val logger = LoggerFactory.getLogger(AlchemyJsonRpcClient::class.java)
@@ -92,8 +96,9 @@ class AlchemyJsonRpcClient(
         params: List<Any?>,
         deadline: Instant? = null,
         allowNullResult: Boolean = false,
-    ): JsonNode =
-        try {
+    ): JsonNode {
+        val sample = metrics?.startAlchemyRpcTimer()
+        return try {
             rateLimiter?.acquire(deadline)
             val payload = objectMapper.writeValueAsBytes(
                 JsonRpcRequest(id = requestIds.incrementAndGet(), method = method, params = params),
@@ -115,21 +120,23 @@ class AlchemyJsonRpcClient(
                     },
             ) { "Alchemy exchange returned no result." }
             logger.debug("alchemy_rpc_succeeded network={} method={}", network, method)
+            sample?.let { metrics?.recordAlchemyRpc(network, method, RESULT_SUCCEEDED, it) }
             result
         } catch (exception: ProviderConfigurationException) {
-            throw logged(network, method, exception)
+            throw failed(network, method, exception, sample, RESULT_CONFIGURATION)
         } catch (exception: ChainProviderUnavailableException) {
-            throw logged(network, method, exception)
+            throw failed(network, method, exception, sample, RESULT_UNAVAILABLE)
         } catch (exception: ProviderDataInvalidException) {
-            throw logged(network, method, exception)
+            throw failed(network, method, exception, sample, RESULT_INVALID)
         } catch (exception: RuntimeException) {
             // Transport failures from RestClient embed the request URL, which carries the key in path
             // mode: rethrow a scrubbed, bounded message and deliberately drop the original cause.
             val message = scrubber
                 .scrub("Alchemy request failed for network $network: ${exception.javaClass.simpleName}: ${exception.message}")
                 .take(MAX_MESSAGE_LENGTH)
-            throw logged(network, method, ChainProviderUnavailableException(message))
+            throw failed(network, method, ChainProviderUnavailableException(message), sample, RESULT_UNAVAILABLE)
         }
+    }
 
     private fun endpointFor(network: String): URI =
         when (properties.authMode) {
@@ -222,8 +229,15 @@ class AlchemyJsonRpcClient(
         return text.substring(2).toLong(radix = 16)
     }
 
-    private fun <T : RuntimeException> logged(network: String, method: String, exception: T): T {
+    private fun <T : RuntimeException> failed(
+        network: String,
+        method: String,
+        exception: T,
+        sample: Timer.Sample?,
+        result: String,
+    ): T {
         logger.warn("alchemy_rpc_failed network={} method={} error={}", network, method, scrubber.scrub(exception.message))
+        sample?.let { metrics?.recordAlchemyRpc(network, method, result, it) }
         return exception
     }
 
@@ -236,6 +250,10 @@ class AlchemyJsonRpcClient(
 
     companion object {
         const val DEFAULT_MAX_RESPONSE_BYTES = 1024 * 1024
+        const val RESULT_SUCCEEDED = "SUCCEEDED"
+        const val RESULT_UNAVAILABLE = "UNAVAILABLE"
+        const val RESULT_INVALID = "INVALID"
+        const val RESULT_CONFIGURATION = "CONFIGURATION"
         private const val MAX_MESSAGE_LENGTH = 240
         private const val JSON_RPC_PARSE_ERROR = -32700
         private const val JSON_RPC_INVALID_REQUEST = -32600

@@ -1,6 +1,7 @@
 package com.example.assetsync.config
 
 import com.example.assetsync.application.account.AssetConfigRepository
+import com.example.assetsync.application.observability.AssetSyncMetrics
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProvider
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProviderHealthIndicator
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyJsonRpcClient
@@ -58,6 +59,7 @@ class AlchemyProviderConfiguration {
         objectMapper: ObjectMapper,
         syncProperties: SyncProperties,
         alchemyRateLimiter: AlchemyRateLimiter,
+        assetSyncMetrics: AssetSyncMetrics,
     ): AlchemyJsonRpcClient =
         AlchemyJsonRpcClient(
             restClient = alchemyRestClient,
@@ -65,6 +67,7 @@ class AlchemyProviderConfiguration {
             objectMapper = objectMapper,
             maxResponseBytes = syncProperties.pagination.maxProviderPageBytes,
             rateLimiter = alchemyRateLimiter,
+            metrics = assetSyncMetrics,
         )
 
     /**
@@ -90,6 +93,7 @@ class AlchemyProviderConfiguration {
         objectMapper: ObjectMapper,
         syncProperties: SyncProperties,
         clock: Clock,
+        assetSyncMetrics: AssetSyncMetrics,
     ): AlchemyChainProvider =
         AlchemyChainProvider(
             properties = properties,
@@ -99,6 +103,7 @@ class AlchemyProviderConfiguration {
             objectMapper = objectMapper,
             providerTimeout = syncProperties.providerTimeout,
             clock = clock,
+            metrics = assetSyncMetrics,
         )
 
     @Bean

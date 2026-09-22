@@ -77,6 +77,7 @@ SELECT block_height, event_index, direction, amount, status FROM observed_transa
 - `/actuator/health` (authenticated) shows `alchemyChainProvider` with `provider`, `authMode`, `networks`, `state` (`probe-succeeded`, `fetch-succeeded`, `fetch-failed`) and the scrubbed `error`; it never shows an endpoint or the key.
 - Logs: `alchemy_preflight_succeeded` at startup, `alchemy_provider_page_fetch_succeeded` per page (mode, blocks, events, RPC calls, fallbacks), `alchemy_rpc_failed` and `alchemy_provider_page_fetch_failed` on errors, `alchemy_finality_tag_unavailable` once per network when the tag falls back to depth.
 - Cost: an idle address costs about 30 CU for the two head calls plus two transfer calls (120 CU each) per 5000-block window; dense regions cost one extra call per block that had to be drained alone (`scan.oneBlockFallbacks` in the checkpoint).
+- Meters on `/actuator/prometheus`: `asset.sync.provider.alchemy.rpc` and `asset.sync.provider.alchemy.rpc.duration` per network, method, and result, `asset.sync.provider.alchemy.block.fallbacks`, and `asset.sync.provider.alchemy.skipped.rows` per reason; a rising `UNAVAILABLE` or `CONFIGURATION` result count is the earliest signal of provider trouble.
 
 ## 6. Failures And Actions
 

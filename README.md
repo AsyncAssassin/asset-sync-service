@@ -442,7 +442,7 @@ A page fetch under `alchemy` asks for the latest block and the finality frontier
 - Health component details (database, chain provider) are shown to authenticated callers in protected profiles and to everyone in `local`; anonymous probes see only the aggregate status.
 - Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere; the Alchemy indicator shows the auth mode, the probed networks, and the state, never an endpoint or the key.
 - Structured logs include account, watched-address, transaction, sync-run, provider, and outbox identifiers.
-- Micrometer meters cover observed event ingestion, transaction transitions, immutable conflicts, sync runs and continuations, provider fetches, latency and pages, cursor leases and checkpoints, outbox batches, events, backlog, dead-letter count, and scheduler tick failures.
+- Micrometer meters cover observed event ingestion, transaction transitions, immutable conflicts, sync runs and continuations, provider fetches, latency and pages, cursor leases and checkpoints, outbox batches, events, backlog, dead-letter count, scheduler tick failures, and the Alchemy adapter's JSON-RPC calls, latency, one-block fallbacks, and skipped rows.
 - `local` and `test` profiles permit all endpoints. Other profiles enable HTTP Basic for API, Swagger, and Actuator endpoints except health probes; their `401` and `403` responses use the same `ProblemDetail` format as API errors, and `401` keeps the `WWW-Authenticate: Basic` challenge.
 
 ## Testing

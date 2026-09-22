@@ -1154,6 +1154,10 @@ Metrics, as registered by `AssetSyncMetrics`:
 - `asset.sync.provider.fetch.duration{targetType,status}`: timer around one provider page fetch.
 - `asset.sync.provider.pages{targetType,result}`: counter of validated pages (`SUCCEEDED`, `FAILED`, `MALFORMED`).
 - `asset.sync.provider.page.events{targetType}`: distribution summary of events per provider page.
+- `asset.sync.provider.alchemy.rpc{network,method,result}`: counter of Alchemy JSON-RPC calls (`SUCCEEDED`, `UNAVAILABLE`, `INVALID`, `CONFIGURATION`).
+- `asset.sync.provider.alchemy.rpc.duration{network,method,result}`: timer around one Alchemy JSON-RPC call.
+- `asset.sync.provider.alchemy.block.fallbacks{network}`: counter of blocks the Alchemy adapter drained alone because their window came back paged.
+- `asset.sync.provider.alchemy.skipped.rows{network,reason}`: counter of transfer rows skipped before emission (`SELF_TRANSFER`, `WRONG_TOKEN`, `BELOW_HIGH_WATER`).
 - `asset.sync.cursor.leases{result}`: counter of cursor lease operations (`ACQUIRED`, `BUSY`, `EXTENDED`, `LOST`, `RELEASED`, `RELEASE_FAILED`).
 - `asset.sync.cursor.checkpoints{result}`: counter of checkpoint advances (`ADVANCED`, `STALE`).
 - `asset.sync.outbox.batches{result}`: counter of poller batches (`EMPTY`, `SUCCEEDED`, `FAILED`, `PARTIAL_FAILURE`).

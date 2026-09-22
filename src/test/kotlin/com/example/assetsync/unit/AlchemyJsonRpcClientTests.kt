@@ -1,12 +1,15 @@
 package com.example.assetsync.unit
 
 import com.example.assetsync.AlchemyJsonRpcStubServer
+import com.example.assetsync.application.observability.AssetSyncMetrics
+import com.example.assetsync.application.outbox.OutboxEventRepository
 import com.example.assetsync.application.sync.ChainProviderUnavailableException
 import com.example.assetsync.application.sync.ProviderConfigurationException
 import com.example.assetsync.application.sync.ProviderDataInvalidException
 import com.example.assetsync.config.AlchemyAuthMode
 import com.example.assetsync.config.AlchemyProviderProperties
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyJsonRpcClient
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import java.net.ServerSocket
 import java.time.Instant
 import kotlin.test.AfterTest
@@ -17,6 +20,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.assertThrows
+import org.mockito.Mockito
 import org.springframework.web.client.RestClient
 
 /**
@@ -29,6 +33,8 @@ class AlchemyJsonRpcClientTests {
 
     private val apiKey = "secret-key-123"
     private val stub = AlchemyJsonRpcStubServer()
+    private val meterRegistry = SimpleMeterRegistry()
+    private val metrics = AssetSyncMetrics(meterRegistry, Mockito.mock(OutboxEventRepository::class.java))
 
     @AfterTest
     fun tearDown() {
@@ -40,6 +46,8 @@ class AlchemyJsonRpcClientTests {
         stub.responseBody = """{"jsonrpc":"2.0","id":1,"result":"0x1a"}"""
 
         assertEquals(26, client().blockNumber("eth-sepolia"))
+        assertEquals(1.0, rpcCount("SUCCEEDED"))
+        assertEquals(1L, meterRegistry.find("asset.sync.provider.alchemy.rpc.duration").tag("method", "eth_blockNumber").timer()?.count())
 
         val request = stub.requests.single()
         assertEquals("/eth-sepolia/v2/", request.path)
@@ -71,6 +79,8 @@ class AlchemyJsonRpcClientTests {
                 assertNoSecret(exception.message)
             }
         }
+        assertEquals(4.0, rpcCount("CONFIGURATION"))
+        assertEquals(0.0, rpcCount("SUCCEEDED"))
     }
 
     @Test
@@ -161,7 +171,11 @@ class AlchemyJsonRpcClientTests {
         assertNoSecret(exception.message)
         assertNull(exception.cause, "the original cause embeds the unscrubbed url and must be dropped")
         assertTrue(exception.message!!.length <= 240)
+        assertEquals(1.0, rpcCount("UNAVAILABLE"))
     }
+
+    private fun rpcCount(result: String): Double =
+        meterRegistry.find("asset.sync.provider.alchemy.rpc").tag("result", result).counters().sumOf { it.count() }
 
     private fun client(
         authMode: AlchemyAuthMode = AlchemyAuthMode.HEADER,
@@ -177,6 +191,7 @@ class AlchemyJsonRpcClientTests {
                 pathEndpointTemplate = pathEndpointTemplate,
             ),
             maxResponseBytes = maxResponseBytes,
+            metrics = metrics,
         )
 
     private fun assertNoSecret(message: String?) {

@@ -6,6 +6,8 @@ import com.example.assetsync.ScriptedAlchemyChain
 import com.example.assetsync.ScriptedAlchemyChain.Transfer
 import com.example.assetsync.application.account.AssetConfig
 import com.example.assetsync.application.account.AssetConfigRepository
+import com.example.assetsync.application.observability.AssetSyncMetrics
+import com.example.assetsync.application.outbox.OutboxEventRepository
 import com.example.assetsync.application.sync.ChainProviderEventsPage
 import com.example.assetsync.application.sync.ChainProviderEventsPageRequest
 import com.example.assetsync.application.sync.ChainProviderUnavailableException
@@ -23,6 +25,7 @@ import com.example.assetsync.infrastructure.provider.alchemy.AlchemyPreflightRep
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyRequiredChain
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import java.math.BigDecimal
 import java.time.Clock
 import java.time.Duration
@@ -34,6 +37,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.assertThrows
+import org.mockito.Mockito
 import org.springframework.web.client.RestClient
 
 /**
@@ -59,6 +63,8 @@ class AlchemyChainProviderTests {
         enabled = true,
     )
     private val objectMapper: ObjectMapper = jacksonObjectMapper()
+    private val meterRegistry = SimpleMeterRegistry()
+    private val metrics = AssetSyncMetrics(meterRegistry, Mockito.mock(OutboxEventRepository::class.java))
     private val stub = AlchemyJsonRpcStubServer()
     private val chain = ScriptedAlchemyChain(watchedAddress = watched, contractAddress = contract).also { stub.responder = it.responder() }
 
@@ -251,6 +257,9 @@ class AlchemyChainProviderTests {
         assertMetadata(page, mode = "one-block", blocksFullyDrained = 50, nextBlock = 150, rpcCalls = 8, oneBlockFallbacks = 1)
         assertFalse(page.nextCursor!!.contains("pk:"))
         assertFalse(objectMapper.writeValueAsString(page.metadata).contains("pk:"), "pageKey never reaches durable state")
+        assertEquals(1.0, counter("asset.sync.provider.alchemy.block.fallbacks", "network", "eth-sepolia"))
+        assertEquals(6.0, counter("asset.sync.provider.alchemy.rpc", "method", "alchemy_getAssetTransfers", "result", "SUCCEEDED"))
+        assertEquals(8.0, meterRegistry.find("asset.sync.provider.alchemy.rpc.duration").timers().sumOf { it.count().toDouble() })
     }
 
     @Test
@@ -326,6 +335,9 @@ class AlchemyChainProviderTests {
         assertEquals(1, metadata.get("skippedSelfTransfers").asInt())
         assertEquals(1, metadata.get("skippedWrongTokenRows").asInt())
         assertEquals(0, metadata.get("skippedBelowHighWater").asInt())
+        assertEquals(1.0, counter("asset.sync.provider.alchemy.skipped.rows", "reason", "SELF_TRANSFER"))
+        assertEquals(1.0, counter("asset.sync.provider.alchemy.skipped.rows", "reason", "WRONG_TOKEN"))
+        assertEquals(0.0, counter("asset.sync.provider.alchemy.skipped.rows", "reason", "BELOW_HIGH_WATER"))
     }
 
     @Test
@@ -418,6 +430,9 @@ class AlchemyChainProviderTests {
         assertEquals(page.safeBlockHeight, metadata.get("safeBlockHeight").asLong())
     }
 
+    private fun counter(name: String, vararg tags: String): Double =
+        meterRegistry.find(name).tags(*tags).counter()?.count() ?: 0.0
+
     private fun cursor(nextBlock: Long): String = """{"v":1,"p":"alchemy","nextBlock":$nextBlock}"""
 
     private fun properties(
@@ -451,7 +466,7 @@ class AlchemyChainProviderTests {
                 requiredChains = listOf(AlchemyRequiredChain("eth-sepolia", setOf("ERC20"))),
                 probedBlockHeights = mapOf("eth-sepolia" to 1L),
             ),
-            client = AlchemyJsonRpcClient(restClient = RestClient.builder().build(), properties = properties, objectMapper = objectMapper),
+            client = AlchemyJsonRpcClient(restClient = RestClient.builder().build(), properties = properties, objectMapper = objectMapper, metrics = metrics),
             assetConfigRepository = object : AssetConfigRepository {
                 override fun findEnabledByChainIdAndAsset(chainId: String, asset: String): AssetConfig? =
                     assetConfig?.takeIf { it.chainId == chainId && it.asset == asset }
@@ -459,6 +474,7 @@ class AlchemyChainProviderTests {
             objectMapper = objectMapper,
             providerTimeout = providerTimeout,
             clock = clock,
+            metrics = metrics,
         )
 
     private fun request(

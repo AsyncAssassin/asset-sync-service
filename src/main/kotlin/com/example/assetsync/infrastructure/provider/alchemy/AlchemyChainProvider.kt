@@ -1,6 +1,7 @@
 package com.example.assetsync.infrastructure.provider.alchemy
 
 import com.example.assetsync.application.account.AssetConfigRepository
+import com.example.assetsync.application.observability.AssetSyncMetrics
 import com.example.assetsync.application.sync.ChainProviderEventsPage
 import com.example.assetsync.application.sync.ChainProviderEventsPageRequest
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
@@ -50,6 +51,7 @@ class AlchemyChainProvider(
     private val objectMapper: ObjectMapper = jacksonObjectMapper(),
     private val providerTimeout: Duration = Duration.ofSeconds(10),
     private val clock: Clock = Clock.systemUTC(),
+    private val metrics: AssetSyncMetrics? = null,
 ) : ChainProviderPort {
 
     private val logger = LoggerFactory.getLogger(AlchemyChainProvider::class.java)
@@ -292,6 +294,7 @@ class AlchemyChainProvider(
                     }
                     ScanResult.Paged -> {
                         oneBlockFallbacks += 1
+                        metrics?.recordAlchemyBlockFallback(network)
                         when (val block = drainBlock(candidate)) {
                             is ScanResult.Complete -> {
                                 val cutoff = appendBlocks(block.events, emitted)
@@ -461,6 +464,11 @@ class AlchemyChainProvider(
             blocksFullyDrained: Long,
         ): ChainProviderEventsPage {
             val hasMore = nextBlock <= safeBlockHeight
+            metrics?.let { meters ->
+                meters.recordAlchemySkippedRows(network, SKIP_SELF_TRANSFER, skips.selfTransfers.size)
+                meters.recordAlchemySkippedRows(network, SKIP_WRONG_TOKEN, skips.wrongTokenRows.size)
+                meters.recordAlchemySkippedRows(network, SKIP_BELOW_HIGH_WATER, skips.belowHighWater)
+            }
             val metadata = metadata(
                 nextBlock = nextBlock,
                 safeBlockHeight = safeBlockHeight,
@@ -539,6 +547,10 @@ class AlchemyChainProvider(
 
         /** Share of the provider timeout after which no new block scan starts. */
         const val SOFT_DEADLINE_FRACTION = 0.75
+
+        const val SKIP_SELF_TRANSFER = "SELF_TRANSFER"
+        const val SKIP_WRONG_TOKEN = "WRONG_TOKEN"
+        const val SKIP_BELOW_HIGH_WATER = "BELOW_HIGH_WATER"
 
         private const val MAX_ERROR_LENGTH = 240
 
