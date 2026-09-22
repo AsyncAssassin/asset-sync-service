@@ -10,9 +10,10 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory
 import org.springframework.web.client.RestClient
 
 /**
- * Wires the real HTTP chain provider used by every non-local/test profile (demo, e2e, prod).
- * Under `local`/`test` the fake provider is active instead, so this RestClient bean is not created
- * there and the mandatory `base-url` is not required.
+ * Wires the HTTP bridge chain provider: the default `asset-sync.provider.type=http` for every
+ * non-local/test profile (demo, e2e, prod). Under `local`/`test` the fake provider is active, and
+ * under `type=alchemy` the beans in `AlchemyProviderConfiguration` replace it; in both cases this
+ * RestClient bean is not created and the mandatory `base-url` is not required.
  */
 @Configuration
 @EnableConfigurationProperties(ProviderProperties::class)
@@ -20,6 +21,7 @@ class ProviderConfiguration {
 
     @Bean
     @Profile("!local & !test")
+    @ConditionalOnHttpChainProvider
     fun chainProviderRestClient(properties: ProviderProperties): RestClient {
         require(properties.baseUrl.isNotBlank()) {
             "asset-sync.provider.base-url must be set for the active profile."
@@ -35,8 +37,14 @@ class ProviderConfiguration {
     }
 }
 
+/** Which `ChainProviderPort` implementation serves non-local/test profiles. */
+enum class ProviderType { HTTP, ALCHEMY }
+
 @ConfigurationProperties(prefix = "asset-sync.provider")
 data class ProviderProperties(
+    /** Selector for the provider beans; the raw property value also drives the bean conditions. */
+    val type: ProviderType = ProviderType.HTTP,
+    /** HTTP bridge endpoint; required only when [type] is [ProviderType.HTTP]. */
     val baseUrl: String = "",
     val connectTimeout: Duration = Duration.ofSeconds(2),
     val readTimeout: Duration = Duration.ofSeconds(5),

@@ -1,18 +1,21 @@
 package com.example.assetsync.infrastructure.provider
 
+import com.example.assetsync.config.ConditionalOnHttpChainProvider
 import org.springframework.boot.actuate.health.Health
 import org.springframework.boot.actuate.health.HealthIndicator
 import org.springframework.context.annotation.Profile
 import org.springframework.stereotype.Component
 
 /**
- * Reflects the real chain provider's last observed connectivity rather than a constant UP.
+ * Reflects the HTTP bridge provider's last observed connectivity rather than a constant UP.
  * Before any fetch it reports UP (nothing known yet); a failed fetch reports DOWN with the error.
  * It contributes to the aggregate `/actuator/health` but is intentionally not in the readiness
- * group, so a transient provider outage does not flap liveness/readiness probes.
+ * group, so a transient provider outage does not flap liveness/readiness probes. It shares the
+ * HTTP provider condition, so `type=alchemy` never asks for an `HttpChainProvider` bean.
  */
 @Component
 @Profile("!local & !test")
+@ConditionalOnHttpChainProvider
 class HttpChainProviderHealthIndicator(
     private val httpChainProvider: HttpChainProvider,
 ) : HealthIndicator {

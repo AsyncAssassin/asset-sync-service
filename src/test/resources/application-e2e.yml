@@ -1,7 +1,8 @@
 # Standalone e2e profile (NOT composed with `test`). The protected security chain and the real
-# HttpChainProvider are active here. Datasource comes from Testcontainers @ServiceConnection; the
-# provider base-url is overridden per-test by @DynamicPropertySource (an in-test JDK HttpServer). Both
-# schedulers are OFF so the e2e assertions are deterministic — the test drives the poller/sweeper.
+# HttpChainProvider (provider type http, the default) are active here. Datasource comes from
+# Testcontainers @ServiceConnection; the provider base-url is overridden per-test by
+# @DynamicPropertySource (an in-test JDK HttpServer). Both schedulers are OFF so the e2e assertions
+# are deterministic — the test drives the poller/sweeper.
 spring:
   liquibase:
     enabled: true

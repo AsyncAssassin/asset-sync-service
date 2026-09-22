@@ -1,13 +1,25 @@
 package com.example.assetsync.e2e
 
+import com.example.assetsync.AssetSyncServiceApplication
+import com.example.assetsync.application.sync.ChainProviderPort
+import com.example.assetsync.infrastructure.provider.HttpChainProvider
+import com.example.assetsync.infrastructure.provider.HttpChainProviderHealthIndicator
+import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProvider
+import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProviderHealthIndicator
 import java.util.UUID
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.builder.SpringApplicationBuilder
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.web.client.TestRestTemplate
+import org.springframework.context.ApplicationContext
 import org.springframework.http.HttpStatus
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.context.DynamicPropertyRegistry
@@ -21,7 +33,9 @@ import org.testcontainers.utility.DockerImageName
  * It proves: the env-driven datasource boots (N2), the dedicated Liquibase datasource applies the
  * migrations incl. the users table (N5), and the env-provisioned prod admin can authenticate
  * against the DB-backed store (N4). Fail-fast on missing secrets is verified separately (a bootRun
- * with no env dies with an unresolved-placeholder error).
+ * with no env dies with an unresolved-placeholder error). It also pins the provider wiring of a
+ * default prod context: the HTTP bridge beans and nothing Alchemy-specific, and a blank
+ * `base-url` still fails the boot.
  */
 @ActiveProfiles("prod")
 @AutoConfigureObservability
@@ -36,6 +50,7 @@ import org.testcontainers.utility.DockerImageName
 )
 class ProdProfileBootIntegrationTests(
     @Autowired private val restTemplate: TestRestTemplate,
+    @Autowired private val context: ApplicationContext,
 ) {
 
     @Test
@@ -58,6 +73,47 @@ class ProdProfileBootIntegrationTests(
                 .getForEntity("/api/v1/accounts/${UUID.randomUUID()}", String::class.java)
                 .statusCode,
         )
+
+        // Missing asset-sync.provider.type means the HTTP bridge: one port, the bridge RestClient and
+        // health indicator, and no Alchemy bean at all.
+        assertEquals(1, context.getBeansOfType(ChainProviderPort::class.java).size)
+        assertTrue(context.getBean(ChainProviderPort::class.java) is HttpChainProvider)
+        assertTrue(context.containsBean("chainProviderRestClient"))
+        assertEquals(1, context.getBeansOfType(HttpChainProviderHealthIndicator::class.java).size)
+        assertFalse(context.containsBean("alchemyRestClient"))
+        assertTrue(context.getBeansOfType(AlchemyChainProvider::class.java).isEmpty())
+        assertTrue(context.getBeansOfType(AlchemyChainProviderHealthIndicator::class.java).isEmpty())
+    }
+
+    @Test
+    fun `http provider type still requires the base url`() {
+        val thrown = assertFailsWith<Throwable> {
+            SpringApplicationBuilder(AssetSyncServiceApplication::class.java)
+                .profiles("prod")
+                .run(
+                    "--server.port=0",
+                    "--spring.main.banner-mode=off",
+                    "--spring.datasource.url=${postgres.jdbcUrl}",
+                    "--spring.datasource.username=${postgres.username}",
+                    "--spring.datasource.password=${postgres.password}",
+                    "--spring.liquibase.url=${postgres.jdbcUrl}",
+                    "--spring.liquibase.user=${postgres.username}",
+                    "--spring.liquibase.password=${postgres.password}",
+                    "--ASSET_SYNC_ADMIN_USERNAME=prod-admin",
+                    "--ASSET_SYNC_ADMIN_PASSWORD=prod-admin-pw",
+                    "--asset-sync.outbox.scheduler.enabled=false",
+                    "--asset-sync.outbox.retention.enabled=false",
+                    "--asset-sync.sync.recovery.enabled=false",
+                    "--asset-sync.sync.worker.enabled=false",
+                    "--asset-sync.provider.type=http",
+                    "--asset-sync.provider.base-url=",
+                )
+                .close()
+        }
+
+        val cause = generateSequence(thrown) { it.cause }
+            .firstOrNull { it.message?.contains("asset-sync.provider.base-url must be set") == true }
+        assertNotNull(cause, "expected the base-url requirement in the failure chain of: $thrown")
     }
 
     companion object {

@@ -8,12 +8,15 @@ All notable changes to this project are documented in this file. The format is b
 
 - `asset_configs` registry (changeset 015) keyed by chain and asset, seeded with `USDC` on `local-evm`, `eth-sepolia`, and `eth-mainnet` (disabled), plus the `eth-sepolia` and `eth-mainnet` chain configs; EVM identity normalization now covers those chains.
 - Dependabot configuration for weekly Gradle and GitHub Actions updates, grouped by Spring, Kotlin, and Jackson; major bumps of Spring Boot and springdoc are ignored so patch releases keep arriving.
+- Chain provider selection through `asset-sync.provider.type` (`http` by default, `alchemy`): the HTTP bridge beans exist only for `http`; `alchemy` binds `asset-sync.provider.alchemy.*`, validates the settings and the asset registry at startup, probes every required Alchemy network with `eth_blockNumber` using header (default) or path authentication, keeps the API key out of logs, errors, health details, and `sync_runs.last_error`, and maps `eth-sepolia` as the first chain. The Alchemy transfer fetch is not implemented yet, so sync runs against it fail terminally.
+- `ProviderConfigurationException` as a terminal sync failure class for rejected credentials, unmapped chains, and unserved fetches; it never consumes the retry budget.
 
 ### Changed
 
 - **Breaking:** watched-address registration rejects assets that are not registered and enabled for the chain with `404` and the title `Unsupported asset`; local, test, and demo flows keep working through the seeded `local-evm` `USDC` row.
 - Graceful shutdown drains in-flight sync runs for up to `asset-sync.sync.worker.shutdown-timeout` and requeues runs interrupted afterwards without consuming their retry budget.
 - `401` and `403` produced by the security filter chain are `ProblemDetail` responses with `requestId`; `401` keeps the `WWW-Authenticate: Basic` challenge.
+- `ASSET_SYNC_PROVIDER_BASE_URL` in the `prod` profile is required only for the `http` provider type; a blank value still fails the boot there, while `alchemy` ignores it. Provider connect and read timeouts now live in the base configuration for every profile.
 
 ## [0.2.0] - 2026-09-22
 

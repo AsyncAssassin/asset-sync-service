@@ -313,7 +313,25 @@ Operational signal:
 
 - Log `sync_worker_draining`, `sync_worker_drain_timeout`, `sync_run_requeued_on_interrupt`, and `sync_worker_stopped` with the worker id.
 
-## 17. Future Failure Modes
+## 17. Provider Configuration Failure
+
+Scenario:
+
+- The configured provider rejects the credentials (HTTP 401/403 or a JSON-RPC `-32600` envelope), an enabled chain has no provider network mapping, active watched addresses lack an enabled asset config, or the configured provider cannot serve the requested fetch.
+
+Expected behavior:
+
+- At startup with `asset-sync.provider.type=alchemy`, the preflight fails the process before the sync worker starts: static validation (key, auth mode, templates, numeric caps, `max-rpc-calls-per-fetch >= 4`), the registry rules, and one `eth_blockNumber` probe per required network. The failure is a `ProviderConfigurationException` whose message names the chains or `(chain_id, asset)` pairs and the operator action, never the key or the endpoint.
+- During a sync run, `ProviderConfigurationException` is terminal: the run is marked `FAILED` at once, `failure_attempts` is not spent on retries that cannot succeed, and the checkpoint does not move.
+- `sync_runs.last_error`, log lines, health details, and exception messages are scrubbed of the API key; transport failures that embed a request URL are rethrown with a bounded scrubbed message and without their cause.
+
+Operational signal:
+
+- Startup log `alchemy_preflight_succeeded` with the probed networks, or the startup failure with the scrubbed message.
+- Log `alchemy_rpc_failed` and `alchemy_provider_page_fetch_failed` with the scrubbed error.
+- Health component `alchemyChainProvider` with `provider`, `authMode`, `networks`, `state`, and the scrubbed `error`.
+
+## 18. Future Failure Modes
 
 Deferred areas:
 

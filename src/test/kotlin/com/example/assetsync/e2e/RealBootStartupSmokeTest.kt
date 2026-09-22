@@ -1,13 +1,19 @@
 package com.example.assetsync.e2e
 
 import com.example.assetsync.TestcontainersConfiguration
+import com.example.assetsync.application.sync.ChainProviderPort
+import com.example.assetsync.infrastructure.provider.FakeChainProvider
+import com.example.assetsync.infrastructure.provider.HttpChainProvider
+import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProvider
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.web.client.TestRestTemplate
+import org.springframework.context.ApplicationContext
 import org.springframework.context.annotation.Import
 import org.springframework.http.HttpStatus
 import org.springframework.test.context.ActiveProfiles
@@ -38,6 +44,7 @@ import org.springframework.test.context.ActiveProfiles
 )
 class RealBootStartupSmokeTest(
     @Autowired private val restTemplate: TestRestTemplate,
+    @Autowired private val context: ApplicationContext,
 ) {
 
     @Test
@@ -54,5 +61,14 @@ class RealBootStartupSmokeTest(
             prometheus.body?.contains("asset_sync") == true,
             "Prometheus scrape must expose application meters (asset_sync_*).",
         )
+
+        // `local` keeps the fake provider whatever asset-sync.provider.type says: no HTTP bridge or
+        // Alchemy bean is created, so neither base-url nor an API key is required here.
+        assertEquals(1, context.getBeansOfType(ChainProviderPort::class.java).size)
+        assertTrue(context.getBean(ChainProviderPort::class.java) is FakeChainProvider)
+        assertTrue(context.getBeansOfType(HttpChainProvider::class.java).isEmpty())
+        assertTrue(context.getBeansOfType(AlchemyChainProvider::class.java).isEmpty())
+        assertFalse(context.containsBean("chainProviderRestClient"))
+        assertFalse(context.containsBean("alchemyRestClient"))
     }
 }

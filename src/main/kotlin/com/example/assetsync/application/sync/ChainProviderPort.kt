@@ -84,3 +84,14 @@ class ProviderDataInvalidException(
     message: String,
     cause: Throwable? = null,
 ) : RuntimeException(message, cause)
+
+/**
+ * Deterministic provider configuration, credential, or rollout failure: a rejected API key, a
+ * chain without a provider mapping, a fetch the configured provider cannot serve. Retrying cannot
+ * fix it, so it is terminal for a sync run and never consumes the failure budget as a transient
+ * outage would. Messages must already be scrubbed of secrets when the exception is created.
+ */
+class ProviderConfigurationException(
+    message: String,
+    cause: Throwable? = null,
+) : RuntimeException(message, cause)

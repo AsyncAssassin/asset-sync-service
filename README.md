@@ -22,7 +22,7 @@
 | Reliability | Natural keys, PostgreSQL constraints, row locks, transactional outbox, retry/backoff |
 | Observability | Actuator health/readiness/metrics/Prometheus, structured domain logs |
 | Testing | Unit tests plus Testcontainers PostgreSQL integration tests |
-| External systems | Docker Compose PostgreSQL; fake provider in `local`/`test`; HTTP provider adapter in non-local/test profiles; bundled provider simulator plus seeded dataset in `demo` |
+| External systems | Docker Compose PostgreSQL; fake provider in `local`/`test`; HTTP bridge or Alchemy provider selected by `asset-sync.provider.type` elsewhere; bundled provider simulator plus seeded dataset in `demo` |
 
 ## Implemented Features
 
@@ -32,7 +32,8 @@
 - Asset registry: watched-address registration accepts only assets enabled for the chain in `asset_configs`, seeded with `USDC` on `local-evm` and `eth-sepolia` and a disabled `eth-mainnet` row.
 - Idempotent transaction lifecycle transitions: `SEEN`, `CONFIRMED`, and `REVERTED`.
 - Outbox event creation for meaningful transaction state changes.
-- Manual sync by watched address or account through a page-based `ChainProviderPort` (`FakeChainProvider` in `local`/`test`, `HttpChainProvider` in non-local/test profiles).
+- Manual sync by watched address or account through a page-based `ChainProviderPort` (`FakeChainProvider` in `local`/`test`, `HttpChainProvider` or `AlchemyChainProvider` elsewhere, selected by `asset-sync.provider.type`).
+- Provider selection by configuration: the `alchemy` type binds its own settings, validates them and the asset registry at startup, probes every required Alchemy network with the configured credentials, and keeps the API key out of logs, errors, and health details; `eth-sepolia` is the first mapped chain, and the transfer fetch itself arrives in a later version.
 - Per-watched-address provider cursors, checkpoint leases, and bounded continuation requeue for large syncs.
 - Sync run inspection.
 - Scheduled outbox publishing to structured logs.
@@ -360,6 +361,39 @@ Runtime configuration:
 | `ASSET_SYNC_WORKER_SHUTDOWN_TIMEOUT` | `20s` | How long a shutdown waits for in-flight sync runs before interrupting them |
 | `ASSET_SYNC_SHUTDOWN_PHASE_TIMEOUT` | `30s` | Upper bound for one graceful-shutdown phase; the web server and the sync worker drain concurrently within it |
 
+### Chain Provider
+
+`asset-sync.provider.type` selects the `ChainProviderPort` implementation for every profile except `local` and `test`, which always use the fake provider. Each provider type has its own beans behind one shared condition, so an `http` deployment never binds or validates Alchemy settings and an `alchemy` deployment never needs the HTTP bridge endpoint.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ASSET_SYNC_PROVIDER_TYPE` | `http` | `http` for the normalized HTTP bridge (the simulator in `demo`, an indexer in `prod`), `alchemy` for Alchemy JSON-RPC |
+| `ASSET_SYNC_PROVIDER_BASE_URL` | none in `prod` | HTTP bridge endpoint; required when the type is `http`, ignored for `alchemy` |
+| `ASSET_SYNC_PROVIDER_CONNECT_TIMEOUT` | `2s` | Connect timeout for provider HTTP requests |
+| `ASSET_SYNC_PROVIDER_READ_TIMEOUT` | `5s` | Read timeout for provider HTTP requests |
+| `ASSET_SYNC_PROVIDER_ALCHEMY_API_KEY` | none | Alchemy API key; required for `alchemy`, never logged or shown in health or error details |
+| `ASSET_SYNC_PROVIDER_ALCHEMY_AUTH_MODE` | `header` | `header` sends `Authorization: Bearer`; `path` embeds the key in the URL and exists only for compatibility |
+| `ASSET_SYNC_PROVIDER_ALCHEMY_ENDPOINT_TEMPLATE` | `https://{network}.g.alchemy.com/v2/` | Header-mode endpoint; `{network}` is replaced per chain |
+| `ASSET_SYNC_PROVIDER_ALCHEMY_PATH_ENDPOINT_TEMPLATE` | `https://{network}.g.alchemy.com/v2/{apiKey}` | Path-mode endpoint |
+| `ASSET_SYNC_PROVIDER_ALCHEMY_START_MODE` | `registration-safe` | `registration-safe` starts a new watched address at the current safe block; `configured-block` starts at the per-chain start block |
+| `ASSET_SYNC_PROVIDER_ALCHEMY_ETH_SEPOLIA_START_BLOCK` | none | Start block for `eth-sepolia`; required only with `configured-block` |
+| `ASSET_SYNC_PROVIDER_ALCHEMY_FINALITY_MODE` | `safe` | `safe`, `finalized`, or `depth` |
+| `ASSET_SYNC_PROVIDER_ALCHEMY_FINALITY_DEPTH_FALLBACK` | `64` | Blocks behind the latest block used by `depth` mode or as the fallback |
+| `ASSET_SYNC_PROVIDER_ALCHEMY_MAX_WINDOW_BLOCKS` | `5000` | Candidate blocks one page fetch may scan |
+| `ASSET_SYNC_PROVIDER_ALCHEMY_MAX_RPC_CALLS_PER_FETCH` | `6` | JSON-RPC calls per page fetch; startup rejects values below `4` |
+| `ASSET_SYNC_PROVIDER_ALCHEMY_RATE_LIMIT_CAPACITY` | `6` | Local token bucket burst |
+| `ASSET_SYNC_PROVIDER_ALCHEMY_RATE_LIMIT_REFILL_PER_SECOND` | `3.0` | Local token bucket refill rate |
+
+The chain-to-network mapping lives under `asset-sync.provider.alchemy.networks` in `application.yml`; `eth-sepolia` is the first and only mapped chain. Map keys contain dashes, so further chains are added in YAML or through `SPRING_APPLICATION_JSON`, not through environment variables. The finality, window, RPC-cap, and rate-limit settings are validated now and drive the adapter once it ships.
+
+With `type=alchemy` the service validates the configuration and the registry before the sync worker starts: the key must be set, every enabled chain with enabled asset configs must map to a network, every mapped network must answer an `eth_blockNumber` probe with the configured credentials, and no active watched address may lack an enabled asset config. A violation stops the process with a `ProviderConfigurationException` whose message names the chains or `(chain_id, asset)` pairs and the operator action, never the key. The seeded `local-evm` chain is enabled and has no Alchemy network, so the first `alchemy` boot on a fresh database applies the migrations and then stops at that rule; disable the chain and restart:
+
+```sql
+UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm';
+```
+
+The Alchemy transfer fetch is not implemented in this version. An `alchemy` deployment boots, probes, and reports health, but every sync run against it fails terminally with `ProviderConfigurationException` and does not consume retry attempts. Keep `http` for syncing until the adapter ships.
+
 ## Reliability Highlights
 
 - Natural idempotency keys: watched addresses use `chainId + address + asset`; observed transactions use `chainId + txHash + eventIndex + address + asset`.
@@ -383,7 +417,7 @@ Runtime configuration:
 - Readiness includes PostgreSQL connectivity.
 - `/actuator/info` reports the build name and version generated by the Gradle build.
 - Health component details (database, chain provider) are shown to authenticated callers in protected profiles and to everyone in `local`; anonymous probes see only the aggregate status.
-- Provider health indicator is profile-specific: fake in `local`/`test`, HTTP in non-local/test profiles.
+- Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere; the Alchemy indicator shows the auth mode, the probed networks, and the state, never an endpoint or the key.
 - Structured logs include account, watched-address, transaction, sync-run, provider, and outbox identifiers.
 - Micrometer meters cover observed event ingestion, transaction transitions, immutable conflicts, sync runs and continuations, provider fetches, latency and pages, cursor leases and checkpoints, outbox batches, events, backlog, dead-letter count, and scheduler tick failures.
 - `local` and `test` profiles permit all endpoints. Other profiles enable HTTP Basic for API, Swagger, and Actuator endpoints except health probes; their `401` and `403` responses use the same `ProblemDetail` format as API errors, and `401` keeps the `WWW-Authenticate: Basic` challenge.
@@ -428,7 +462,7 @@ This service does not provide custody, signing, private key storage, wallet func
 Future extensions, not implemented as of `v0.2.0`:
 
 - Transaction read/list endpoints.
-- Real blockchain/indexer backend integration beyond the generic HTTP page contract.
+- Real blockchain/indexer backend integration beyond the generic HTTP page contract; the Alchemy provider type ships its configuration, credential handling, and rollout preflight first, and the ERC-20 transfer adapter follows.
 - Provider-specific block-range scans.
 - External broker adapter for the outbox.
 - Balance projection read models.

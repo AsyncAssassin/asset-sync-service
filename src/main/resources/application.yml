@@ -22,6 +22,10 @@ logging:
   pattern:
     # Surfaces the per-request correlation id (set by RequestIdFilter) on every log line.
     level: "%5p [req=%X{requestId:-}]"
+  level:
+    # Provider request URLs may carry credentials (Alchemy path auth mode); keep Spring's HTTP
+    # client loggers at INFO so a DEBUG root level never prints them.
+    org.springframework.web.client: INFO
 
 management:
   endpoint:
@@ -56,6 +60,39 @@ springdoc:
     enabled: true
 
 asset-sync:
+  provider:
+    # http: the normalized HTTP bridge (simulator in demo, indexer in prod), needs base-url.
+    # alchemy: Alchemy JSON-RPC for the chains mapped under alchemy.networks, needs the API key.
+    # local/test always use the fake provider; the profile files set base-url where it applies.
+    type: ${ASSET_SYNC_PROVIDER_TYPE:http}
+    connect-timeout: ${ASSET_SYNC_PROVIDER_CONNECT_TIMEOUT:2s}
+    read-timeout: ${ASSET_SYNC_PROVIDER_READ_TIMEOUT:5s}
+    alchemy:
+      # Secret: env only, never a default; it is redacted from logs, errors, and health details.
+      api-key: ${ASSET_SYNC_PROVIDER_ALCHEMY_API_KEY:}
+      # header (default): Authorization: Bearer <key>. path: compatibility mode with the key in the URL.
+      auth-mode: ${ASSET_SYNC_PROVIDER_ALCHEMY_AUTH_MODE:header}
+      # Blank means the built-in template https://{network}.g.alchemy.com/v2/ (header mode) or
+      # https://{network}.g.alchemy.com/v2/{apiKey} (path mode); braces cannot live in a placeholder default.
+      endpoint-template: ${ASSET_SYNC_PROVIDER_ALCHEMY_ENDPOINT_TEMPLATE:}
+      path-endpoint-template: ${ASSET_SYNC_PROVIDER_ALCHEMY_PATH_ENDPOINT_TEMPLATE:}
+      # registration-safe: a new watched address starts at the current safe block (no backfill).
+      # configured-block: it starts at networks.<chain>.start-block, which then becomes mandatory.
+      start-mode: ${ASSET_SYNC_PROVIDER_ALCHEMY_START_MODE:registration-safe}
+      # Service chain id -> Alchemy network slug. Only chains listed here can be enabled with
+      # enabled asset configs; eth-sepolia is the first rollout chain. Map keys contain dashes, so
+      # additional chains are added here (or via SPRING_APPLICATION_JSON), not through env vars.
+      networks:
+        eth-sepolia:
+          network: eth-sepolia
+          start-block: ${ASSET_SYNC_PROVIDER_ALCHEMY_ETH_SEPOLIA_START_BLOCK:}
+      finality-mode: ${ASSET_SYNC_PROVIDER_ALCHEMY_FINALITY_MODE:safe}
+      finality-depth-fallback: ${ASSET_SYNC_PROVIDER_ALCHEMY_FINALITY_DEPTH_FALLBACK:64}
+      max-window-blocks: ${ASSET_SYNC_PROVIDER_ALCHEMY_MAX_WINDOW_BLOCKS:5000}
+      # Hard minimum 4: latest block, finality block, inbound transfers, outbound transfers.
+      max-rpc-calls-per-fetch: ${ASSET_SYNC_PROVIDER_ALCHEMY_MAX_RPC_CALLS_PER_FETCH:6}
+      rate-limit-capacity: ${ASSET_SYNC_PROVIDER_ALCHEMY_RATE_LIMIT_CAPACITY:6}
+      rate-limit-refill-per-second: ${ASSET_SYNC_PROVIDER_ALCHEMY_RATE_LIMIT_REFILL_PER_SECOND:3.0}
   sync:
     provider-timeout: ${ASSET_SYNC_SYNC_PROVIDER_TIMEOUT:10s}
     provider-max-threads: ${ASSET_SYNC_SYNC_PROVIDER_MAX_THREADS:4}

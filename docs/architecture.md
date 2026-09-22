@@ -9,7 +9,7 @@ Stack: Kotlin, Spring Boot 3.x, Spring MVC, jOOQ, PostgreSQL, Liquibase, Testcon
 - `eventIndex` is required and represents the provider-specific event discriminator inside a transaction. It covers log indexes, output indexes, or similar chain-specific positions.
 - `asset` is represented as a string asset id or symbol in the MVP.
 - A watched address is unique by `chainId + address + asset`.
-- The chain provider is profile-scoped: fake/in-memory in `local` and `test`, HTTP adapter in non-local/test profiles.
+- The chain provider is selected by profile and configuration: fake/in-memory in `local` and `test`; elsewhere `asset-sync.provider.type` picks the HTTP bridge adapter (`http`, the default) or the Alchemy adapter (`alchemy`), and exactly one `ChainProviderPort` bean exists.
 - PostgreSQL is the source of truth for accounts, watched addresses, observed transactions, sync runs, and outbox events.
 - The outbox publisher writes to a local publishing adapter or structured logs in the MVP.
 - Balance projection is not part of the first MVP.
@@ -92,7 +92,8 @@ Domain layer:
 
 Infrastructure layer:
 - Implements repositories with jOOQ.
-- Implements profile-specific chain providers: fake in `local`/`test`, HTTP in non-local/test profiles.
+- Implements the chain providers: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere, selected by `asset-sync.provider.type`; every HTTP-only bean shares one composed condition and every Alchemy-only bean another, so the two never mix.
+- Runs the Alchemy startup preflight when `type=alchemy`: static validation of `asset-sync.provider.alchemy.*`, registry rules (a network mapping for every enabled chain with enabled asset configs, `ERC20` only, no active watched address without an enabled asset config), and one `eth_blockNumber` auth probe per required network, all during bean creation and therefore before the sync worker starts.
 - Implements the outbox publisher adapter.
 - Configures Liquibase, OpenAPI, metrics, logging, and health checks.
 
@@ -182,7 +183,7 @@ The page contract is append-only. Events inside a page must arrive in non-decrea
 
 On shutdown the worker acts as a Spring `SmartLifecycle` in the web server's graceful-shutdown phase: it stops claiming, waits up to `asset-sync.sync.worker.shutdown-timeout` for in-flight runs, then interrupts the rest. Interrupted runs return to `QUEUED` without consuming their retry budget, and their cursor leases are released first.
 
-Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. Retryable provider failures, including 429 throttling, increment `failure_attempts`.
+Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. Retryable provider failures, including 429 throttling, increment `failure_attempts`. Provider configuration failures (`ProviderConfigurationException`: rejected credentials, a chain without a provider network mapping, a fetch the configured provider cannot serve) are terminal like malformed pages, so they never burn the retry budget on attempts that cannot succeed.
 
 ### Manual Account Sync Traversal
 
@@ -1152,7 +1153,7 @@ Health checks:
 - Spring Actuator liveness.
 - Spring Actuator readiness.
 - PostgreSQL connectivity.
-- Provider health indicator is profile-specific: fake in `local`/`test`, HTTP in non-local/test profiles.
+- Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere. The Alchemy indicator reports the provider, the auth mode, the probed networks, and the state, plus the scrubbed error after a failed fetch; never an endpoint, a header, or the API key.
 - Component details are shown to authenticated callers (`management.endpoint.health.show-details: when-authorized`) and to everyone in `local`; anonymous probes see only the aggregate status.
 
 Build information:
@@ -1212,7 +1213,7 @@ asset-sync-service
 
 - Account registration.
 - Watched address registration.
-- Profile-specific chain provider adapters: fake in `local`/`test`, HTTP in non-local/test profiles.
+- Chain provider adapters selected by profile and configuration: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere.
 - Manual sync by address and account.
 - Observed transaction ingestion API.
 - Idempotent transaction processing.

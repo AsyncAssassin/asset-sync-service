@@ -899,6 +899,7 @@ class SyncApplicationService(
             is WatchedAddressByIdNotFoundException,
             is AccountSyncTooLargeException,
             is ProviderDataInvalidException,
+            is ProviderConfigurationException,
             is DataIntegrityViolationException,
             -> true
             is ChainProviderUnavailableException,

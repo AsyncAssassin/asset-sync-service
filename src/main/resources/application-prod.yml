@@ -19,6 +19,7 @@ spring:
 
 asset-sync:
   provider:
-    base-url: ${ASSET_SYNC_PROVIDER_BASE_URL}
-    connect-timeout: ${ASSET_SYNC_PROVIDER_CONNECT_TIMEOUT:2s}
-    read-timeout: ${ASSET_SYNC_PROVIDER_READ_TIMEOUT:5s}
+    # Required when asset-sync.provider.type is http (the default): the HTTP RestClient bean fails
+    # fast on a blank value. Unused under type=alchemy, which needs ASSET_SYNC_PROVIDER_ALCHEMY_API_KEY
+    # instead; the type selector and timeouts come from application.yml.
+    base-url: ${ASSET_SYNC_PROVIDER_BASE_URL:}

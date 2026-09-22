@@ -27,6 +27,7 @@ Target areas:
 - Immutable field comparison.
 - Outbox idempotency key generation.
 - Application command validation helpers where not covered by API tests.
+- Alchemy provider configuration: static validation rules, rollout rules, JSON-RPC error classification, secret scrubbing in header and path auth modes, and health details.
 - Documentation drift guards: every changeset file, meter name, and `ProblemDetail` type in the code must appear in the docs.
 
 Required cases:
@@ -80,6 +81,7 @@ Required cases:
 | Account traversal | busy early address is skipped while later addresses are processed |
 | Sync shutdown | draining finishes an in-flight run, interruption requeues without failure budget, a stopped worker refuses claims |
 | Asset registry | changeset 015 seeds and constraints, unknown and disabled asset rejection, disabled chain precedence, Sepolia casing normalization, rollout preflight query |
+| Provider selection | `prod` boots with the HTTP bridge by default and rejects a blank `base-url`; `type=alchemy` boots without `base-url`, wires only Alchemy beans, probes `eth-sepolia` with a bearer token, exposes health without the key, and fails fast on a missing key, HTTP 401, an enabled chain without a network mapping, and legacy watched addresses; `local` keeps the fake provider |
 
 Testcontainers expectations:
 

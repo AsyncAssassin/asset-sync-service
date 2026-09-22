@@ -6,6 +6,7 @@ import com.example.assetsync.application.sync.ChainProviderObservedEvent
 import com.example.assetsync.application.sync.ChainProviderPort
 import com.example.assetsync.application.sync.ChainProviderUnavailableException
 import com.example.assetsync.application.sync.ProviderDataInvalidException
+import com.example.assetsync.config.ConditionalOnHttpChainProvider
 import com.example.assetsync.config.SyncProperties
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
@@ -13,11 +14,9 @@ import com.fasterxml.jackson.core.JsonProcessingException
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ObjectNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.math.BigDecimal
 import java.time.Instant
-import java.time.format.DateTimeFormatter
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.context.annotation.Profile
@@ -27,12 +26,14 @@ import org.springframework.stereotype.Component
 import org.springframework.web.client.RestClient
 
 /**
- * Real chain provider: fetches observed events over HTTP from a configured endpoint (a real
- * indexer in prod; the bundled simulator in demo; a WireMock stub in the e2e tests). Active on
- * every non-local/test profile — this is the bean that makes a prod context bootable.
+ * HTTP bridge chain provider: fetches observed events over HTTP from a configured endpoint (a real
+ * indexer in prod; the bundled simulator in demo; a JDK HttpServer stub in the e2e tests). Active
+ * on every non-local/test profile whenever `asset-sync.provider.type` is `http` or absent — the
+ * bean that makes a default prod context bootable.
  */
 @Component
 @Profile("!local & !test")
+@ConditionalOnHttpChainProvider
 class HttpChainProvider @Autowired constructor(
     private val chainProviderRestClient: RestClient,
     private val objectMapper: ObjectMapper,
@@ -145,36 +146,12 @@ class HttpChainProvider @Autowired constructor(
         return response.resumeCursor ?: response.nextCursor
     }
 
-    private fun readBounded(body: InputStream, maxBytes: Int): ByteArray {
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-        val output = ByteArrayOutputStream(minOf(maxBytes, DEFAULT_BUFFER_SIZE))
-        var total = 0
-        while (true) {
-            val read = body.read(buffer)
-            if (read < 0) {
-                return output.toByteArray()
-            }
-            total += read
-            if (total > maxBytes) {
-                throw ProviderDataInvalidException("Provider response exceeded the configured byte limit.")
-            }
-            output.write(buffer, 0, read)
+    private fun readBounded(body: InputStream, maxBytes: Int): ByteArray =
+        ProviderHttpSupport.readBounded(body, maxBytes) {
+            ProviderDataInvalidException("Provider response exceeded the configured byte limit.")
         }
-    }
 
-    private fun parseRetryAfter(value: String?): Instant? {
-        val trimmed = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
-        trimmed.toLongOrNull()?.let { seconds ->
-            if (seconds <= 0) {
-                return null
-            }
-            return Instant.now().plusSeconds(seconds)
-        }
-        val parsed = runCatching {
-            Instant.from(DateTimeFormatter.RFC_1123_DATE_TIME.parse(trimmed))
-        }.getOrNull()
-        return parsed?.takeIf { it.isAfter(Instant.now()) }
-    }
+    private fun parseRetryAfter(value: String?): Instant? = ProviderHttpSupport.parseRetryAfter(value)
 
     private fun recordFailure(request: ChainProviderEventsPageRequest, exception: RuntimeException) {
         lastFetchHealthy = false
@@ -187,10 +164,6 @@ class HttpChainProvider @Autowired constructor(
             request.limit,
             lastError,
         )
-    }
-
-    private companion object {
-        const val DEFAULT_BUFFER_SIZE = 8 * 1024
     }
 }
 

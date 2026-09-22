@@ -75,7 +75,7 @@ HAVING count(*) > 1;
 
 Drain, fail, or explicitly accept any legacy `STARTED` rows before enabling the worker. The worker processes only `QUEUED/RUNNING`; legacy stale-`STARTED` recovery remains separate.
 - Changeset `014` adds per-address `sync_cursors` and separates retry budget from worker claim count. Existing watched addresses receive one cursor row with null provider cursor and `{}` checkpoint. Existing `sync_runs.attempts` remains a total claim diagnostic; retry budget is backfilled into `failure_attempts`.
-- Changeset `015` adds the `asset_configs` registry keyed by `(chain_id, asset)`, upserts the `eth-sepolia` (enabled, `required_confirmations=1`) and `eth-mainnet` (disabled, `required_confirmations=12`) chain configs, and seeds `USDC` for `local-evm` (deterministic fake contract `0x000000000000000000000000000000000000f001`, decimals 18), `eth-sepolia` (Circle contract, decimals 6, enabled), and `eth-mainnet` (Circle contract, decimals 6, disabled). All seeds use insert-or-update semantics. Registration validation protects only new rows: before pointing a real provider at an existing database, run the rollout preflight below and seed or disable whatever it returns; it must come back empty.
+- Changeset `015` adds the `asset_configs` registry keyed by `(chain_id, asset)`, upserts the `eth-sepolia` (enabled, `required_confirmations=1`) and `eth-mainnet` (disabled, `required_confirmations=12`) chain configs, and seeds `USDC` for `local-evm` (deterministic fake contract `0x000000000000000000000000000000000000f001`, decimals 18), `eth-sepolia` (Circle contract, decimals 6, enabled), and `eth-mainnet` (Circle contract, decimals 6, disabled). All seeds use insert-or-update semantics. Registration validation protects only new rows: before pointing a real provider at an existing database, run the rollout preflight below and seed or disable whatever it returns; it must come back empty. With `asset-sync.provider.type=alchemy` the service runs the same check at startup, together with a mapping check for every enabled chain that has enabled asset configs, and refuses to start while either returns rows; the seeded `local-evm` chain has no Alchemy network, so disable it (`UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm'`) before the first Alchemy boot.
 
 ```sql
 SELECT
@@ -180,7 +180,7 @@ Notes:
 
 - Every watched-address registration requires an enabled row for the normalized `(chain_id, asset)`; there is no profile or provider bypass, and the seeded `local-evm` `USDC` row keeps local, test, demo, and e2e flows working.
 - The fake provider and the demo simulator ignore `contract_address`; real provider adapters resolve the contract and decimals through this table.
-- Watched addresses carry no foreign key to this table, so legacy rows are checked by the rollout preflight query in section 2.
+- Watched addresses carry no foreign key to this table, so legacy rows are checked by the rollout preflight query in section 2, which the Alchemy provider type also runs at startup.
 
 ### `users`
 
