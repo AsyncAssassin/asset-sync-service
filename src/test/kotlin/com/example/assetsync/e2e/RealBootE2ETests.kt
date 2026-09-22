@@ -62,7 +62,15 @@ class RealBootE2ETests(
     @Test
     fun `boots prod-like, enforces roles, and drives the real provider path`() {
         // 1) Health is open; the app booted under a real servlet container (no endpoint collision).
-        assertEquals(HttpStatus.OK, restTemplate.getForEntity("/actuator/health", String::class.java).statusCode)
+        //    Anonymous probes get the aggregate status only; authenticated callers see the components
+        //    (show-details: when-authorized), including the real HTTP provider indicator.
+        val anonymousHealth = restTemplate.getForEntity("/actuator/health", String::class.java)
+        assertEquals(HttpStatus.OK, anonymousHealth.statusCode)
+        assertTrue(anonymousHealth.body?.contains("\"components\"") != true, "anonymous health must not expose components")
+        val readerHealth = reader().getForEntity("/actuator/health", String::class.java)
+        assertEquals(HttpStatus.OK, readerHealth.statusCode)
+        assertTrue(readerHealth.body?.contains("\"db\"") == true, "authenticated health must expose the db component")
+        assertTrue(readerHealth.body?.contains("httpChainProvider") == true, "authenticated health must include the HTTP provider indicator")
 
         // 2) Unauthenticated API access is rejected — and the 401 still carries the request id,
         //    proving RequestIdFilter runs before the security chain (N10).

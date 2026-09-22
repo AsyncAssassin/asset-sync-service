@@ -376,6 +376,7 @@ Runtime configuration:
 
 - Actuator endpoints: `/actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness`, `/actuator/info`, `/actuator/metrics`, and `/actuator/prometheus`.
 - Readiness includes PostgreSQL connectivity.
+- Health component details (database, chain provider) are shown to authenticated callers in protected profiles and to everyone in `local`; anonymous probes see only the aggregate status.
 - Provider health indicator is profile-specific: fake in `local`/`test`, HTTP in non-local/test profiles.
 - Structured logs include account, watched-address, transaction, sync-run, provider, and outbox identifiers.
 - Micrometer meters cover observed event ingestion, transaction transitions, immutable conflicts, sync runs, provider fetches and latency, outbox batches, outbox events, and outbox backlog.

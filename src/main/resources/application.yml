@@ -23,7 +23,9 @@ management:
     health:
       probes:
         enabled: true
-      show-details: never
+      # Component details (db, chain provider) for authenticated callers only; anonymous probes
+      # keep seeing the aggregate status. `local` overrides this to `always`.
+      show-details: when-authorized
       group:
         liveness:
           include: livenessState
@@ -40,10 +42,13 @@ management:
       enabled: true
 
 springdoc:
+  # Deliberately enabled in every profile: non-local profiles put both endpoints behind HTTP Basic.
   api-docs:
     path: /v3/api-docs
+    enabled: true
   swagger-ui:
     path: /swagger-ui.html
+    enabled: true
 
 asset-sync:
   sync:

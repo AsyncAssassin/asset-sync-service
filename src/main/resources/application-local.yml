@@ -10,3 +10,13 @@ spring:
   liquibase:
     enabled: true
     change-log: classpath:/db/changelog/db.changelog-master.yaml
+  autoconfigure:
+    # The local security chain is permitAll and defines no UserDetailsService, so skip Boot's
+    # in-memory user and its "Using generated security password" startup warning.
+    exclude: org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration
+
+management:
+  endpoint:
+    health:
+      # Everything is open locally, so show component details to everyone.
+      show-details: always

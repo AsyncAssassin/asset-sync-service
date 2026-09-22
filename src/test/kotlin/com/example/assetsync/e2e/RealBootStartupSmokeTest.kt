@@ -44,6 +44,9 @@ class RealBootStartupSmokeTest(
     fun `application boots under a real servlet container and serves actuator endpoints`() {
         val health = restTemplate.getForEntity("/actuator/health", String::class.java)
         assertEquals(HttpStatus.OK, health.statusCode)
+        // `local` shows component details to everyone (show-details: always), including the fake provider.
+        assertTrue(health.body?.contains("\"components\"") == true, "local health must expose components")
+        assertTrue(health.body?.contains("fakeChainProvider") == true, "local health must include the fake provider indicator")
 
         val prometheus = restTemplate.getForEntity("/actuator/prometheus", String::class.java)
         assertEquals(HttpStatus.OK, prometheus.statusCode)

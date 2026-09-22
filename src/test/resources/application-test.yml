@@ -4,6 +4,9 @@ spring:
   liquibase:
     enabled: true
     change-log: classpath:/db/changelog/db.changelog-master.yaml
+  autoconfigure:
+    # Same reason as application-local.yml: permitAll chain, no user store needed.
+    exclude: org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration
 
 asset-sync:
   outbox:
