@@ -3,7 +3,6 @@
 Status: MVP implemented through async sync and provider pagination
 Scope: MVP backend service  
 Stack: Kotlin, Spring Boot 3.x, Spring MVC, jOOQ, PostgreSQL, Liquibase, Testcontainers, Docker Compose, OpenAPI, transactional outbox  
-Last updated: 2026-07-06
 
 ## 1. Assumptions
 
@@ -178,6 +177,8 @@ sequenceDiagram
 ```
 
 The provider call is outside the observed event ingestion transaction and outside the POST request. `asset-sync.sync.provider-timeout` is the deadline for one provider page fetch, and `asset-sync.sync.pagination.max-provider-page-bytes` bounds HTTP provider response bodies before JSON parsing. Checkpoints advance only after all events in a provider page have been ingested. Completion and requeue are fenced by `locked_by`, `lock_token`, and `attempts`; cursor checkpoint advancement is separately fenced by `locked_by`, `lock_token`, cursor `version`, and an unexpired `locked_until`. A cursor heartbeat extends the per-address lease during long page fetch or ingest work, and a worker that cannot extend the lease stops before advancing the checkpoint.
+
+The page contract is append-only. Events inside a page must arrive in non-decreasing `(blockHeight, eventIndex, txHash)` order, and the first event of a page must not sit behind the stored `last_processed_block_height` / `last_processed_event_index` checkpoint; a page that violates either rule is rejected as terminal provider-data-invalid and the checkpoint does not move. Lifecycle updates for events that are already behind the checkpoint therefore never travel through the sync path: they arrive through `POST /api/v1/observed-events`, and provider adapters are expected to emit only finalized events.
 
 Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. Retryable provider failures, including 429 throttling, increment `failure_attempts`.
 
@@ -625,13 +626,11 @@ Rationale:
 ```text
 src/main/resources/db/changelog
   db.changelog-master.yaml
-  changes
-    001-create-accounts-and-chain-configs.yaml
-    002-create-watched-addresses.yaml
-    003-create-observed-transactions.yaml
-    004-create-outbox-and-sync-runs.yaml
-    005-seed-local-chain-configs.yaml
+  changes/
+    <NNN>-<change>.yaml   one changeset per file, included by the master changelog in order
 ```
+
+The full changeset list, including upgrade preconditions and operator runbooks per changeset, is maintained in `docs/database.md` and is not duplicated here.
 
 Text columns plus CHECK constraints are preferred over PostgreSQL enum types in the MVP. They keep migrations simpler when statuses evolve, while still giving the database enough validation to reject invalid values.
 
@@ -772,9 +771,13 @@ Duplicate no-op response:
 
 ### Error Cases
 
-- `400 Bad Request`: invalid request shape, invalid amount, invalid enum value, negative confirmation count.
-- `404 Not Found`: account, watched address, unsupported chain, or sync run not found.
+- `400 Bad Request`: invalid request shape, invalid amount, invalid enum value, negative confirmation count, or watched-address pagination outside the supported bounds.
+- `404 Not Found`: account, watched address, unsupported chain, sync run, or route not found.
+- `405 Method Not Allowed`: unsupported HTTP method for a known route, with an `Allow` header.
 - `409 Conflict`: duplicate watched address or immutable observed transaction field mismatch.
+- `415 Unsupported Media Type`: request body content type other than JSON.
+- `429 Too Many Requests`: the soft cap on queued plus running sync runs is reached.
+- `500 Internal Server Error`: unexpected failure; the response carries a generic detail and the exception goes to the log.
 - `503 Service Unavailable`: request-time infrastructure failure, such as PostgreSQL unavailable.
 
 Provider timeout or unavailability during async sync worker execution does not change the already-returned `202 Accepted` POST response. The worker records retry or terminal `FAILED` state on the `sync_run`, and clients inspect it through `GET /api/v1/sync-runs/{id}`.
@@ -1012,6 +1015,9 @@ Provider sends older confirmation count:
 Provider sends conflicting immutable fields:
 - Reject with `409 Conflict` and log structured diagnostics.
 
+Provider page out of checkpoint order or behind the checkpoint:
+- Reject the whole page as terminal provider data invalid; ingest nothing from it and leave `sync_cursors` unchanged.
+
 Stale `SEEN` after `CONFIRMED`:
 - Treat as no-op stale event.
 
@@ -1090,22 +1096,30 @@ Logs:
   - `transition`
   - `outboxEventId`
 
-Metrics:
-- `asset.sync.observed.events.ingested{result,status}`
-- `asset.sync.observed.transaction.transitions{eventType,status}`
-- `asset.sync.observed.transaction.immutable.conflicts`
-- `asset.sync.sync.runs{targetType,status}`
-- `asset.sync.provider.fetches{targetType,status}`
-- `asset.sync.provider.fetch.duration{targetType,status}`
-- `asset.sync.outbox.batches{result}`
-- `asset.sync.outbox.events{eventType,status}`
-- `asset.sync.outbox.backlog.total`
+Metrics, as registered by `AssetSyncMetrics`:
+- `asset.sync.observed.events.ingested{result,status}`: counter per ingestion outcome (`CREATED`, `UPDATED`, `NO_CHANGE`, `CONFLICT`) and resulting status.
+- `asset.sync.observed.transaction.transitions{eventType,status}`: counter of lifecycle transitions that emitted an outbox event.
+- `asset.sync.observed.transaction.immutable.conflicts`: counter of rejected immutable-field conflicts.
+- `asset.sync.sync.runs{targetType,status}`: counter of sync run state changes (`QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`).
+- `asset.sync.sync.continuations{reason,targetType}`: counter of healthy requeues (`CONTINUATION`, `LEASE_BUSY`) that do not consume retry budget.
+- `asset.sync.provider.fetches{targetType,status}`: counter of provider page fetches (`ATTEMPTED`, `SUCCEEDED`, `FAILED`).
+- `asset.sync.provider.fetch.duration{targetType,status}`: timer around one provider page fetch.
+- `asset.sync.provider.pages{targetType,result}`: counter of validated pages (`SUCCEEDED`, `FAILED`, `MALFORMED`).
+- `asset.sync.provider.page.events{targetType}`: distribution summary of events per provider page.
+- `asset.sync.cursor.leases{result}`: counter of cursor lease operations (`ACQUIRED`, `BUSY`, `EXTENDED`, `LOST`, `RELEASED`).
+- `asset.sync.cursor.checkpoints{result}`: counter of checkpoint advances (`ADVANCED`, `STALE`).
+- `asset.sync.outbox.batches{result}`: counter of poller batches (`EMPTY`, `SUCCEEDED`, `FAILED`, `PARTIAL_FAILURE`).
+- `asset.sync.outbox.events{eventType,status}`: counter of per-event outcomes (`PUBLISHED`, `FAILED`, `DEAD`, `COMPLETION_FAILED`).
+- `asset.sync.outbox.scheduler.ticks{result}`: counter of outbox poller ticks that ended in an exception (`FAILED`).
+- `asset.sync.outbox.backlog.total`: gauge of outbox rows in `NEW` or `FAILED`.
+- `asset.sync.outbox.dead.total`: gauge of outbox rows in `DEAD`.
 
 Health checks:
 - Spring Actuator liveness.
 - Spring Actuator readiness.
 - PostgreSQL connectivity.
 - Provider health indicator is profile-specific: fake in `local`/`test`, HTTP in non-local/test profiles.
+- Component details are shown to authenticated callers (`management.endpoint.health.show-details: when-authorized`) and to everyone in `local`; anonymous probes see only the aggregate status.
 
 ## 19. Docker Compose Services
 

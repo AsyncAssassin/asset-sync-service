@@ -1,6 +1,6 @@
 # Failure Modes Specification
 
-Status: Draft  
+Status: Implemented behavior of the current MVP  
 Scope: MVP reliability behavior  
 Source of truth: `docs/architecture.md`
 
@@ -145,6 +145,7 @@ Scenario:
 
 - The HTTP provider omits required `events` or `hasMore`.
 - The provider returns too many events, an oversized cursor/body/checkpoint, `hasMore=true` without cursor progress, wrong address/asset, invalid high-water fields, or insufficient final resume state. A final empty page may omit `nextCursor` only when it supplies durable block high-water such as `safeBlockHeight` or `latestBlockHeight`.
+- The provider returns events out of non-decreasing `(blockHeight, eventIndex, txHash)` order, or a page whose first event is behind the stored `last_processed_block_height` / `last_processed_event_index` checkpoint.
 
 Expected behavior:
 
@@ -152,6 +153,7 @@ Expected behavior:
 - Do not ingest any event from a page that fails validation.
 - Do not advance `sync_cursors`.
 - Mark the current sync run `FAILED` with bounded `last_error`.
+- Lifecycle updates for events already behind the checkpoint are not delivered through the sync path. They arrive through `POST /api/v1/observed-events`, and provider adapters are expected to emit only finalized events.
 
 Operational signal:
 

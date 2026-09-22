@@ -27,6 +27,7 @@ Target areas:
 - Immutable field comparison.
 - Outbox idempotency key generation.
 - Application command validation helpers where not covered by API tests.
+- Documentation drift guards: every changeset file, meter name, and `ProblemDetail` type in the code must appear in the docs.
 
 Required cases:
 

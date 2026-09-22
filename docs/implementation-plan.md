@@ -1,6 +1,6 @@
 # Implementation Plan
 
-Status: Phase 10 complete  
+Status: Phase 16 complete  
 Scope: Reviewable MVP phases  
 Source of truth: `docs/architecture.md`
 
@@ -273,7 +273,132 @@ Review focus:
 - No deferred extension is accidentally introduced into MVP.
 - Final `git status --short` is understood before handoff.
 
-## 11. Cross-Phase Guardrails
+## 11. Phase 11: Block Height Invariant And Scheduler Isolation
+
+Deliverables:
+
+- Changeset `012` adding `observed_transactions.block_height >= 0` as `NOT VALID`, validated immediately.
+- Preflight query and cleanup runbook for legacy negative block heights in `docs/database.md`.
+- Scheduled jobs disabled in `test`, `e2e`, and boot-smoke contexts without changing production behavior.
+
+Verification:
+
+```bash
+./gradlew clean check
+```
+
+Review focus:
+
+- The migration cannot silently rewrite business rows; operators clean legacy data first.
+- Integration tests prove the database rejects a negative block height.
+
+## 12. Phase 12: Durable Asynchronous Sync
+
+Deliverables:
+
+- Sync POST endpoints enqueue a durable `sync_runs` row and return `202 Accepted` with a `Location` header.
+- Changeset `013` turning `sync_runs` into the queue: `QUEUED` and `RUNNING` statuses, claim lease, `lock_token`, attempts, and a partial unique in-flight index per target.
+- `SyncRunWorkerJob` claiming due runs with `FOR UPDATE SKIP LOCKED`, heartbeating leases, and completing with fenced updates.
+- Recovery of expired `RUNNING` leases and legacy stale `STARTED` runs with jittered backoff.
+- Cumulative `eventsSeen` and `eventsChanged` across retries.
+
+Verification:
+
+```bash
+./gradlew clean check
+git diff --check
+```
+
+Review focus:
+
+- Duplicate POSTs for the same target reuse the in-flight run.
+- Stale workers cannot overwrite a run that was re-claimed or completed.
+- Execution is at-least-once; ingestion idempotency makes replays safe.
+
+## 13. Phase 13: Provider Pagination And Durable Cursors
+
+Deliverables:
+
+- Page-based `ChainProviderPort` with cursor, limit, `hasMore`, and block high-water fields.
+- Changeset `014` adding per-watched-address `sync_cursors` with lease and checkpoint fields, and separating `failure_attempts` from `continuation_count` on `sync_runs`.
+- Fenced cursor acquire, extend, advance, and release, with a cursor heartbeat during page work.
+- Bounded page, event, duration, and continuation budgets per claim; account traversal fairness across addresses.
+- HTTP provider adapter with bounded response bodies and `429` `Retry-After` handling.
+
+Verification:
+
+```bash
+./gradlew clean check
+```
+
+Review focus:
+
+- A checkpoint advances only after the whole page was ingested.
+- Healthy continuations never consume retry budget; provider failures do.
+- Pages out of checkpoint order are rejected without advancing the cursor.
+
+## 14. Phase 14: Demo Readiness Polish
+
+Deliverables:
+
+- README section for the `demo` profile: seeded lifecycle dataset, HTTP Basic roles, in-process provider simulator, and a Docker Compose variant through `SPRING_PROFILES_ACTIVE`.
+- `ProblemDetail` responses for unknown routes, unsupported methods, unsupported media types, missing parameters, and unexpected failures, using the same service-owned `type` URIs.
+- Removal of sync-era dead code that became unreachable once sync turned asynchronous.
+- Jackson pinned to a patched 2.21.x line through the `jackson-bom.version` property.
+
+Verification:
+
+```bash
+./gradlew clean check
+docker compose config
+```
+
+Plus a live run of the README quickstart and the `demo` profile, locally and inside the Compose image.
+
+Review focus:
+
+- One `@RestControllerAdvice` keeps every error on the same `type` namespace.
+- Security exceptions still reach Spring Security's `ExceptionTranslationFilter`.
+
+## 15. Phase 15: Startup Warnings And Health Details
+
+Deliverables:
+
+- `UserDetailsServiceAutoConfiguration` excluded in `local` and `test`, whose security chains are `permitAll`.
+- Explicit `springdoc.api-docs.enabled` and `springdoc.swagger-ui.enabled` flags; both endpoints stay behind HTTP Basic outside `local`.
+- Health `show-details: when-authorized`, and `always` in `local`.
+
+Verification:
+
+```bash
+./gradlew check
+```
+
+Plus a boot of the jar under `local` and `demo` with zero `WARN` lines at startup.
+
+Review focus:
+
+- Protected profiles keep their JDBC user store; anonymous health probes keep the aggregate status only.
+
+## 16. Phase 16: Documentation Sync And Drift Guards
+
+Deliverables:
+
+- Architecture, API, database, failure-mode, and testing documents aligned with the shipped behavior: full metric catalogue, error mapping, page-contract ordering rules, and phase history.
+- `DocsConsistencyTests` asserting that every changeset file, meter name, and `ProblemDetail` type in the code is documented.
+
+Verification:
+
+```bash
+./gradlew check
+```
+
+Review focus:
+
+- Facts in the documents are derived from the code, not restated from memory.
+- Each fact has one owning document; other documents reference it instead of duplicating it.
+
+## 17. Cross-Phase Guardrails
 
 MVP guardrails:
 
@@ -282,7 +407,7 @@ MVP guardrails:
 - Liquibase migrations.
 - jOOQ persistence.
 - Transactional outbox.
-- Fake/mock chain provider.
+- Fake chain provider in `local`/`test`; HTTP adapter in every other profile.
 - No database transaction while calling provider.
 - `FOR UPDATE SKIP LOCKED` for outbox poller.
 - Domain transition logic independent from Spring.
@@ -297,7 +422,7 @@ Not in MVP:
 - Real blockchain node integration.
 - Private key or signing material handling.
 
-## 12. Future Extensions
+## 18. Future Extensions
 
 Future phases can add:
 

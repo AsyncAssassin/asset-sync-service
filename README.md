@@ -379,7 +379,7 @@ Runtime configuration:
 - Health component details (database, chain provider) are shown to authenticated callers in protected profiles and to everyone in `local`; anonymous probes see only the aggregate status.
 - Provider health indicator is profile-specific: fake in `local`/`test`, HTTP in non-local/test profiles.
 - Structured logs include account, watched-address, transaction, sync-run, provider, and outbox identifiers.
-- Micrometer meters cover observed event ingestion, transaction transitions, immutable conflicts, sync runs, provider fetches and latency, outbox batches, outbox events, and outbox backlog.
+- Micrometer meters cover observed event ingestion, transaction transitions, immutable conflicts, sync runs and continuations, provider fetches, latency and pages, cursor leases and checkpoints, outbox batches, events, backlog, dead-letter count, and scheduler tick failures.
 - `local` and `test` profiles permit all endpoints. Other profiles enable HTTP Basic for API, Swagger, and Actuator endpoints except health probes.
 
 ## Testing

@@ -1,6 +1,6 @@
 # Database Specification
 
-Status: Draft  
+Status: Implemented behavior of the current MVP  
 Scope: MVP PostgreSQL schema and persistence behavior  
 Source of truth: `docs/architecture.md`
 

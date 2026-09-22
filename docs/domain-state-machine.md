@@ -1,6 +1,6 @@
 # Domain State Machine Specification
 
-Status: Draft  
+Status: Implemented behavior of the current MVP  
 Scope: MVP observed transaction lifecycle  
 Source of truth: `docs/architecture.md`
 

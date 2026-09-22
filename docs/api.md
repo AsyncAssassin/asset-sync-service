@@ -56,7 +56,7 @@ POST /api/v1/accounts/{accountId}/sync
 GET  /api/v1/sync-runs/{syncRunId}
 ```
 
-Deferred read endpoints, not exposed by the current Phase 10 implementation:
+Deferred read endpoints, not exposed by the current implementation:
 
 ```text
 GET  /api/v1/transactions
@@ -308,7 +308,7 @@ Idempotency behavior:
 
 ## 8. Deferred Transaction List Endpoint
 
-The current Phase 10 implementation does not expose transaction listing/read endpoints. The response shape below is retained as a deferred design target.
+The current implementation does not expose transaction listing/read endpoints. The response shape below is retained as a deferred design target.
 
 The future endpoint should return observed transactions for inspection. Pagination is recommended when this endpoint is implemented.
 
@@ -355,7 +355,7 @@ Response:
 
 ## 9. Deferred Get Transaction Endpoint
 
-The current Phase 10 implementation does not expose this endpoint.
+The current implementation does not expose this endpoint.
 
 Request:
 
@@ -504,6 +504,7 @@ Common mappings:
 | Bean validation failure | 400 | `https://asset-sync-service/errors/validation-failed` |
 | Invalid enum value | 400 | `https://asset-sync-service/errors/validation-failed` |
 | Missing required request parameter | 400 | `https://asset-sync-service/errors/invalid-request` |
+| Watched address pagination outside the supported bounds | 400 | `https://asset-sync-service/errors/invalid-pagination` |
 | Account, watched address, unsupported chain, or sync run not found | 404 | `https://asset-sync-service/errors/not-found` |
 | Unknown route | 404 | `https://asset-sync-service/errors/not-found` |
 | Unsupported request method, with an `Allow` header | 405 | `https://asset-sync-service/errors/method-not-allowed` |
@@ -516,6 +517,7 @@ Common mappings:
 | Provider timeout or unavailable during async execution | Stored on sync run | n/a |
 | PostgreSQL unavailable | 503 | `https://asset-sync-service/errors/database-unavailable` |
 | Unexpected server failure | 500 | `https://asset-sync-service/errors/internal-error` |
+| Any other Spring MVC error response, for example `406 Not Acceptable` | native status | `https://asset-sync-service/errors/<status-name>`, for example `not-acceptable` |
 
 Example:
 

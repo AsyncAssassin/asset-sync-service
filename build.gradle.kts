@@ -77,6 +77,12 @@ kotlin {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    // The documentation drift guards (DocsConsistencyTests) and the generated-source guard read
+    // these files at test time. Declaring them as inputs makes Gradle re-run the tests when only
+    // the docs change instead of treating the task as up-to-date.
+    inputs.files(fileTree("docs") { include("*.md") }, ".gitignore")
+        .withPropertyName("repositoryFilesReadByTests")
+        .withPathSensitivity(PathSensitivity.RELATIVE)
 }
 
 // Disable the plain jar so `build/libs` holds exactly one artifact (the boot jar). This keeps the
