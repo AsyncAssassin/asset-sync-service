@@ -369,6 +369,10 @@ ChainConfig:
 - Per-chain configuration.
 - Contains the confirmation threshold used by the state machine.
 
+AssetConfig:
+- Per-chain asset registry row keyed by `(chainId, asset)`: token standard, canonical contract address, decimals, and enabled flag.
+- Watched-address registration requires an enabled row; provider adapters resolve the public asset code through it.
+
 OutboxEvent:
 - Durable integration event created inside the same database transaction as the observed transaction change.
 
@@ -454,6 +458,28 @@ Constraints and indexes:
 Rationale:
 - Confirmation thresholds are configuration, not code constants.
 - The table is seeded by Liquibase for local chains supported by the MVP.
+
+### `asset_configs`
+
+Key columns:
+- `chain_id text not null references chain_configs(chain_id)`
+- `asset text not null`
+- `token_standard text not null`
+- `contract_address text not null`
+- `decimals integer not null`
+- `display_name text null`
+- `enabled boolean not null`
+- `created_at timestamptz not null`
+- `updated_at timestamptz not null`
+
+Constraints and indexes:
+- `primary key (chain_id, asset)`
+- `unique (chain_id, contract_address)`
+- upper-case asset, lower-case hex contract address, `ERC20` token standard, decimals `0..18`
+
+Rationale:
+- The public API keeps `asset` as a code such as `USDC`; the registry is the single place that maps it to a token identity per chain.
+- Registration is rejected for assets that are unknown or disabled, so a provider adapter never has to guess a contract address.
 
 ### `watched_addresses`
 

@@ -1,6 +1,7 @@
 # Dependabot version updates. Spring Boot patch bumps arrive as pull requests under the CI
 # workflow; the Jackson BOM override in build.gradle.kts is dropped once a proposed Boot version
-# manages jackson-bom >= 2.21.5.
+# manages jackson-bom >= 2.21.5. Major bumps of Spring Boot and springdoc are ignored on purpose:
+# they are a separate migration, not a routine update, and would hide the 3.5.x patch releases.
 version: 2
 updates:
   - package-ecosystem: "gradle"
@@ -15,11 +16,22 @@ updates:
           - "org.springframework.boot*"
           - "io.spring.dependency-management"
       kotlin:
+        # The Kotlin Gradle plugins are declared as kotlin("jvm") and kotlin("plugin.spring"), which
+        # Dependabot names "jvm" and "plugin.spring"; they must move together.
         patterns:
+          - "jvm"
+          - "plugin.spring"
           - "org.jetbrains.kotlin*"
       jackson:
         patterns:
           - "com.fasterxml.jackson*"
+    ignore:
+      - dependency-name: "org.springframework.boot"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "io.spring.dependency-management"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "org.springdoc:*"
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

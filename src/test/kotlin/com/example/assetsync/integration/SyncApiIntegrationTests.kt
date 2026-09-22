@@ -564,7 +564,7 @@ class SyncApiIntegrationTests(
     fun `account sync worker succeeds over multiple active watched addresses`() {
         val accountId = createAccount()
         registerAddress(accountId = accountId, address = "0xsync-account-one", asset = "USDC")
-        registerAddress(accountId = accountId, address = "0xsync-account-two", asset = "ETH")
+        registerAddress(accountId = accountId, address = "0xsync-account-two", asset = "USDC")
 
         fakeChainProvider.setEvents(
             chainId = "local-evm",
@@ -575,8 +575,8 @@ class SyncApiIntegrationTests(
         fakeChainProvider.setEvents(
             chainId = "local-evm",
             address = "0xsync-account-two",
-            asset = "ETH",
-            events = listOf(providerEvent(txHash = "0xsync-account-two", address = "0xsync-account-two", asset = "ETH")),
+            asset = "USDC",
+            events = listOf(providerEvent(txHash = "0xsync-account-two", address = "0xsync-account-two")),
         )
 
         val syncRunId = submitAccountSync(accountId)
@@ -590,7 +590,7 @@ class SyncApiIntegrationTests(
         assertEquals(
             setOf(
                 FakeChainProviderKey("local-evm", "0xsync-account-one", "USDC"),
-                FakeChainProviderKey("local-evm", "0xsync-account-two", "ETH"),
+                FakeChainProviderKey("local-evm", "0xsync-account-two", "USDC"),
             ),
             fakeChainProvider.requestedKeys().toSet(),
         )
@@ -914,7 +914,7 @@ class SyncApiIntegrationTests(
     fun `account sync skips disabled watched addresses`() {
         val accountId = createAccount()
         registerAddress(accountId = accountId, address = "0xsync-active", asset = "USDC")
-        val disabledAddress = registerAddress(accountId = accountId, address = "0xsync-disabled", asset = "ETH")
+        val disabledAddress = registerAddress(accountId = accountId, address = "0xsync-disabled", asset = "USDC")
         jdbcTemplate.update(
             "UPDATE watched_addresses SET status = 'DISABLED' WHERE id = ?",
             UUID.fromString(disabledAddress["id"].asText()),
@@ -929,8 +929,8 @@ class SyncApiIntegrationTests(
         fakeChainProvider.setEvents(
             chainId = "local-evm",
             address = "0xsync-disabled",
-            asset = "ETH",
-            events = listOf(providerEvent(txHash = "0xsync-disabled", address = "0xsync-disabled", asset = "ETH")),
+            asset = "USDC",
+            events = listOf(providerEvent(txHash = "0xsync-disabled", address = "0xsync-disabled")),
         )
 
         val syncRunId = submitAccountSync(accountId)
@@ -950,8 +950,8 @@ class SyncApiIntegrationTests(
     fun `account sync over address cap is terminal failed during worker execution`() {
         val accountId = createAccount()
         registerAddress(accountId = accountId, address = "0xsync-cap-one", asset = "USDC")
-        registerAddress(accountId = accountId, address = "0xsync-cap-two", asset = "ETH")
-        registerAddress(accountId = accountId, address = "0xsync-cap-three", asset = "DAI")
+        registerAddress(accountId = accountId, address = "0xsync-cap-two", asset = "USDC")
+        registerAddress(accountId = accountId, address = "0xsync-cap-three", asset = "USDC")
 
         val syncRunId = submitAccountSync(accountId)
         runNextClaimedSyncs()
@@ -1091,7 +1091,7 @@ class SyncApiIntegrationTests(
         jdbcTemplate.update("DELETE FROM observed_transactions")
         jdbcTemplate.update("DELETE FROM watched_addresses")
         jdbcTemplate.update("DELETE FROM accounts")
-        jdbcTemplate.update("DELETE FROM chain_configs WHERE chain_id <> 'local-evm'")
+        jdbcTemplate.update("DELETE FROM chain_configs WHERE chain_id NOT IN ('local-evm', 'eth-sepolia', 'eth-mainnet')")
         jdbcTemplate.update(
             """
             UPDATE chain_configs

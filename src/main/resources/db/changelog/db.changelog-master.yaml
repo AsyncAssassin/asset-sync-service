@@ -27,3 +27,5 @@ databaseChangeLog:
       file: db/changelog/changes/013-async-sync-runs.yaml
   - include:
       file: db/changelog/changes/014-provider-pagination-cursors.yaml
+  - include:
+      file: db/changelog/changes/015-add-asset-configs.yaml

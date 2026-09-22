@@ -40,6 +40,7 @@ src/main/resources/db/changelog
     012-add-observed-transaction-block-height-check.yaml
     013-async-sync-runs.yaml
     014-provider-pagination-cursors.yaml
+    015-add-asset-configs.yaml
 ```
 
 Changelog rules:
@@ -74,6 +75,27 @@ HAVING count(*) > 1;
 
 Drain, fail, or explicitly accept any legacy `STARTED` rows before enabling the worker. The worker processes only `QUEUED/RUNNING`; legacy stale-`STARTED` recovery remains separate.
 - Changeset `014` adds per-address `sync_cursors` and separates retry budget from worker claim count. Existing watched addresses receive one cursor row with null provider cursor and `{}` checkpoint. Existing `sync_runs.attempts` remains a total claim diagnostic; retry budget is backfilled into `failure_attempts`.
+- Changeset `015` adds the `asset_configs` registry keyed by `(chain_id, asset)`, upserts the `eth-sepolia` (enabled, `required_confirmations=1`) and `eth-mainnet` (disabled, `required_confirmations=12`) chain configs, and seeds `USDC` for `local-evm` (deterministic fake contract `0x000000000000000000000000000000000000f001`, decimals 18), `eth-sepolia` (Circle contract, decimals 6, enabled), and `eth-mainnet` (Circle contract, decimals 6, disabled). All seeds use insert-or-update semantics. Registration validation protects only new rows: before pointing a real provider at an existing database, run the rollout preflight below and seed or disable whatever it returns; it must come back empty.
+
+```sql
+SELECT
+    wa.id,
+    wa.account_id,
+    wa.chain_id,
+    wa.address,
+    wa.asset
+FROM watched_addresses wa
+JOIN chain_configs cc
+    ON cc.chain_id = wa.chain_id
+LEFT JOIN asset_configs ac
+    ON ac.chain_id = wa.chain_id
+    AND ac.asset = upper(wa.asset)
+    AND ac.enabled = true
+WHERE wa.status = 'ACTIVE'
+  AND cc.enabled = true
+  AND ac.chain_id IS NULL
+ORDER BY wa.chain_id, wa.asset, wa.address;
+```
 
 ## 3. Tables
 
@@ -126,6 +148,39 @@ Notes:
 
 - Confirmation thresholds are data, not code constants.
 - The MVP should seed at least one local chain id for fake-provider flows.
+
+### `asset_configs`
+
+Purpose: registry that resolves a chain's public asset code to its token identity and gates watched-address registration.
+
+Key columns:
+
+| Column | Type | Nullable | Notes |
+| --- | --- | --- | --- |
+| `chain_id` | `text` | no | References `chain_configs(chain_id)` |
+| `asset` | `text` | no | Public asset code used by the API, upper-case, for example `USDC` |
+| `token_standard` | `text` | no | `ERC20` for now |
+| `contract_address` | `text` | no | Lower-case EVM address, `0x` plus 40 hex characters |
+| `decimals` | `integer` | no | Decimal places for raw value conversion, `0..18` |
+| `display_name` | `text` | yes | Optional human name |
+| `enabled` | `boolean` | no | Registration and sync allowed only when true |
+| `created_at` | `timestamptz` | no | Creation timestamp |
+| `updated_at` | `timestamptz` | no | Last update timestamp |
+
+Constraints and indexes:
+
+- `primary key (chain_id, asset)`
+- `foreign key (chain_id) references chain_configs(chain_id)`
+- `unique (chain_id, contract_address)`
+- `check (asset = upper(asset))`, `check (token_standard in ('ERC20'))`
+- `check (contract_address = lower(contract_address))`, `check (contract_address ~ '^0x[0-9a-f]{40}$')`
+- `check (decimals between 0 and 18)`, length checks on `chain_id`, `asset`, and `display_name`
+
+Notes:
+
+- Every watched-address registration requires an enabled row for the normalized `(chain_id, asset)`; there is no profile or provider bypass, and the seeded `local-evm` `USDC` row keeps local, test, demo, and e2e flows working.
+- The fake provider and the demo simulator ignore `contract_address`; real provider adapters resolve the contract and decimals through this table.
+- Watched addresses carry no foreign key to this table, so legacy rows are checked by the rollout preflight query in section 2.
 
 ### `users`
 

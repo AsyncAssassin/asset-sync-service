@@ -4,6 +4,7 @@ import com.example.assetsync.application.account.AccountNotFoundException
 import com.example.assetsync.application.account.DuplicateAccountExternalRefException
 import com.example.assetsync.application.account.DuplicateWatchedAddressException
 import com.example.assetsync.application.account.InvalidWatchedAddressPageException
+import com.example.assetsync.application.account.UnsupportedAssetException
 import com.example.assetsync.application.account.UnsupportedChainException
 import com.example.assetsync.application.sync.SyncQueueFullException
 import com.example.assetsync.application.sync.SyncRunNotFoundException
@@ -161,6 +162,24 @@ class ApiExceptionHandler {
             title = "Unsupported chain",
             detail = "Chain configuration was not found or is disabled.",
             request = request,
+        )
+
+    @ExceptionHandler(UnsupportedAssetException::class)
+    fun handleUnsupportedAsset(
+        exception: UnsupportedAssetException,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> =
+        // Missing and disabled assets are intentionally indistinguishable, mirroring chains.
+        problem(
+            status = HttpStatus.NOT_FOUND,
+            type = "not-found",
+            title = "Unsupported asset",
+            detail = "Asset configuration was not found or is disabled for the chain.",
+            request = request,
+            properties = mapOf(
+                "chainId" to exception.chainId,
+                "asset" to exception.asset,
+            ),
         )
 
     @ExceptionHandler(WatchedAddressNotFoundException::class)

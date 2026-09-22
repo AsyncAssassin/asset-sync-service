@@ -426,6 +426,125 @@ class DatabaseMigrationIntegrationTests(
         }
     }
 
+    @Test
+    fun `migration 015 seeds the asset registry and the real chain configs`() {
+        val sepolia = jdbcTemplate.queryForMap(
+            "SELECT display_name, required_confirmations, enabled FROM chain_configs WHERE chain_id = ?",
+            "eth-sepolia",
+        )
+        assertEquals("Ethereum Sepolia", sepolia["display_name"])
+        assertEquals(1, (sepolia["required_confirmations"] as Number).toInt())
+        assertEquals(true, sepolia["enabled"])
+
+        val mainnet = jdbcTemplate.queryForMap(
+            "SELECT display_name, required_confirmations, enabled FROM chain_configs WHERE chain_id = ?",
+            "eth-mainnet",
+        )
+        assertEquals("Ethereum Mainnet", mainnet["display_name"])
+        assertEquals(12, (mainnet["required_confirmations"] as Number).toInt())
+        assertEquals(false, mainnet["enabled"])
+
+        val assets = jdbcTemplate.queryForList(
+            "SELECT chain_id, asset, token_standard, contract_address, decimals, enabled FROM asset_configs WHERE asset = 'USDC'",
+        ).associateBy { it["chain_id"] as String }
+        assertEquals(setOf("local-evm", "eth-sepolia", "eth-mainnet"), assets.keys)
+        assets.getValue("local-evm").let {
+            assertEquals("ERC20", it["token_standard"])
+            assertEquals("0x000000000000000000000000000000000000f001", it["contract_address"])
+            assertEquals(18, (it["decimals"] as Number).toInt())
+            assertEquals(true, it["enabled"])
+        }
+        assets.getValue("eth-sepolia").let {
+            assertEquals("0x1c7d4b196cb0c7b01d743fbc6116a902379c7238", it["contract_address"])
+            assertEquals(6, (it["decimals"] as Number).toInt())
+            assertEquals(true, it["enabled"])
+        }
+        assets.getValue("eth-mainnet").let {
+            assertEquals("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", it["contract_address"])
+            assertEquals(6, (it["decimals"] as Number).toInt())
+            assertEquals(false, it["enabled"])
+        }
+    }
+
+    @Test
+    fun `asset config constraints are enforced`() {
+        val validContract = "0x" + "a".repeat(40)
+
+        assertThrows<DataIntegrityViolationException> {
+            insertAssetConfig(chainId = "no-such-chain", asset = "USDT", contractAddress = validContract)
+        }
+        assertThrows<DataIntegrityViolationException> {
+            insertAssetConfig(asset = "usdt", contractAddress = validContract)
+        }
+        assertThrows<DataIntegrityViolationException> {
+            insertAssetConfig(asset = "USDT", contractAddress = "0x" + "A".repeat(40))
+        }
+        assertThrows<DataIntegrityViolationException> {
+            insertAssetConfig(asset = "USDT", contractAddress = "0x1234")
+        }
+        assertThrows<DataIntegrityViolationException> {
+            insertAssetConfig(asset = "USDT", contractAddress = validContract, decimals = 19)
+        }
+        assertThrows<DataIntegrityViolationException> {
+            insertAssetConfig(asset = "USDT", contractAddress = validContract, tokenStandard = "ERC721")
+        }
+        assertThrows<DataIntegrityViolationException> {
+            // The seeded local USDC already owns this contract address on local-evm.
+            insertAssetConfig(asset = "USDT", contractAddress = "0x000000000000000000000000000000000000f001")
+        }
+        try {
+            insertAssetConfig(asset = "USDT", contractAddress = validContract)
+            assertThrows<DataIntegrityViolationException> {
+                insertAssetConfig(asset = "USDT", contractAddress = "0x" + "b".repeat(40))
+            }
+        } finally {
+            jdbcTemplate.update("DELETE FROM asset_configs WHERE chain_id = 'local-evm' AND asset = 'USDT'")
+        }
+    }
+
+    @Test
+    fun `alchemy rollout preflight lists active watched addresses without an enabled asset config`() {
+        val accountId = insertAccount()
+        val legacyAddress = "0xlegacy-${UUID.randomUUID()}"
+        insertWatchedAddress(accountId, legacyAddress, "DAI")
+        insertWatchedAddress(accountId, "0xsupported-${UUID.randomUUID()}", "USDC")
+        try {
+            val rowsForAccount = jdbcTemplate.queryForList(ALCHEMY_ROLLOUT_PREFLIGHT_QUERY)
+                .filter { it["account_id"] == accountId }
+            assertEquals(listOf(legacyAddress), rowsForAccount.map { it["address"] })
+            assertEquals("DAI", rowsForAccount.single()["asset"])
+        } finally {
+            jdbcTemplate.update("DELETE FROM watched_addresses WHERE account_id = ?", accountId)
+            jdbcTemplate.update("DELETE FROM accounts WHERE id = ?", accountId)
+        }
+    }
+
+    private fun insertAssetConfig(
+        chainId: String = "local-evm",
+        asset: String,
+        contractAddress: String,
+        decimals: Int = 6,
+        tokenStandard: String = "ERC20",
+        enabled: Boolean = true,
+    ) {
+        jdbcTemplate.update(
+            """
+            INSERT INTO asset_configs (
+                chain_id, asset, token_standard, contract_address, decimals, display_name, enabled, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?)
+            """.trimIndent(),
+            chainId,
+            asset,
+            tokenStandard,
+            contractAddress,
+            decimals,
+            enabled,
+            now(),
+            now(),
+        )
+    }
+
     private fun insertAccount(): UUID {
         val accountId = UUID.randomUUID()
         jdbcTemplate.update(
@@ -963,4 +1082,27 @@ class DatabaseMigrationIntegrationTests(
             .joinToString(" | ")
 
     private fun now(): Timestamp = Timestamp.from(Instant.now())
+
+    private companion object {
+        /** Same query as the rollout runbook in docs/database.md. */
+        const val ALCHEMY_ROLLOUT_PREFLIGHT_QUERY = """
+SELECT
+    wa.id,
+    wa.account_id,
+    wa.chain_id,
+    wa.address,
+    wa.asset
+FROM watched_addresses wa
+JOIN chain_configs cc
+    ON cc.chain_id = wa.chain_id
+LEFT JOIN asset_configs ac
+    ON ac.chain_id = wa.chain_id
+    AND ac.asset = upper(wa.asset)
+    AND ac.enabled = true
+WHERE wa.status = 'ACTIVE'
+  AND cc.enabled = true
+  AND ac.chain_id IS NULL
+ORDER BY wa.chain_id, wa.asset, wa.address;
+"""
+    }
 }

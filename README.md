@@ -29,6 +29,7 @@
 - Account creation and lookup.
 - Watched address registration and account-level address listing.
 - Observed event ingestion for `local-evm`.
+- Asset registry: watched-address registration accepts only assets enabled for the chain in `asset_configs`, seeded with `USDC` on `local-evm` and `eth-sepolia` and a disabled `eth-mainnet` row.
 - Idempotent transaction lifecycle transitions: `SEEN`, `CONFIRMED`, and `REVERTED`.
 - Outbox event creation for meaningful transaction state changes.
 - Manual sync by watched address or account through a page-based `ChainProviderPort` (`FakeChainProvider` in `local`/`test`, `HttpChainProvider` in non-local/test profiles).

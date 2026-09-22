@@ -79,6 +79,7 @@ Required cases:
 | Sync continuation | page failure retry from checkpoint, continuation count separate from failure attempts |
 | Account traversal | busy early address is skipped while later addresses are processed |
 | Sync shutdown | draining finishes an in-flight run, interruption requeues without failure budget, a stopped worker refuses claims |
+| Asset registry | changeset 015 seeds and constraints, unknown and disabled asset rejection, disabled chain precedence, Sepolia casing normalization, rollout preflight query |
 
 Testcontainers expectations:
 

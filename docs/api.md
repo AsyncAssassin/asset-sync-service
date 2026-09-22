@@ -172,12 +172,13 @@ Validation:
 
 - `accountId` must reference an existing account.
 - `chainId` must reference an enabled chain configuration.
+- `asset` must be registered and enabled for that chain in the asset registry; unknown or disabled assets return `404` with the title `Unsupported asset`. The seeded registry covers `USDC` on `local-evm` and `eth-sepolia`; `eth-mainnet` is seeded disabled.
 - `address` is required and must be non-blank.
 - `asset` is required and must be non-blank.
 - `label` is optional; if provided, it must be non-blank after trimming.
 - Duplicate canonical `chainId + address + asset` registrations are rejected with `409 Conflict`.
 
-Address normalization is chain-specific. For `local-evm`, address identity is lower-case and asset identity is upper-case before uniqueness checks. Other chains currently trim and preserve exact strings until their policies are defined.
+Address normalization is chain-specific. For the EVM chains `local-evm`, `eth-sepolia`, and `eth-mainnet`, address and transaction-hash identity is lower-case and asset identity is upper-case before uniqueness checks. Other chains currently trim and preserve exact strings until their policies are defined.
 
 ## 6. List Watched Addresses
 
@@ -507,7 +508,7 @@ Common mappings:
 | Watched address pagination outside the supported bounds | 400 | `https://asset-sync-service/errors/invalid-pagination` |
 | Missing or invalid HTTP Basic credentials in protected profiles | 401 | `https://asset-sync-service/errors/unauthorized` |
 | Authenticated caller without the required role in protected profiles | 403 | `https://asset-sync-service/errors/forbidden` |
-| Account, watched address, unsupported chain, or sync run not found | 404 | `https://asset-sync-service/errors/not-found` |
+| Account, watched address, unsupported chain or asset, or sync run not found | 404 | `https://asset-sync-service/errors/not-found` |
 | Unknown route | 404 | `https://asset-sync-service/errors/not-found` |
 | Unsupported request method, with an `Allow` header | 405 | `https://asset-sync-service/errors/method-not-allowed` |
 | Unsupported request content type | 415 | `https://asset-sync-service/errors/unsupported-media-type` |

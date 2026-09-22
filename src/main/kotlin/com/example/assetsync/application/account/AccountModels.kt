@@ -48,6 +48,17 @@ data class ChainConfig(
     val enabled: Boolean,
 )
 
+/** One row of the asset registry: the public asset code of a chain resolved to its token identity. */
+data class AssetConfig(
+    val chainId: String,
+    val asset: String,
+    val tokenStandard: String,
+    val contractAddress: String,
+    val decimals: Int,
+    val displayName: String?,
+    val enabled: Boolean,
+)
+
 data class NewWatchedAddress(
     val id: UUID,
     val accountId: UUID,
@@ -91,6 +102,10 @@ interface ChainConfigRepository {
     fun findEnabledByChainId(chainId: String): ChainConfig?
 }
 
+interface AssetConfigRepository {
+    fun findEnabledByChainIdAndAsset(chainId: String, asset: String): AssetConfig?
+}
+
 interface WatchedAddressRepository {
     fun insert(watchedAddress: NewWatchedAddress): WatchedAddress
 
@@ -122,6 +137,11 @@ class DuplicateWatchedAddressException(
 class UnsupportedChainException(
     val chainId: String,
 ) : RuntimeException("Chain configuration was not found or is disabled.")
+
+class UnsupportedAssetException(
+    val chainId: String,
+    val asset: String,
+) : RuntimeException("Asset configuration was not found or is disabled for the chain.")
 
 class InvalidWatchedAddressPageException(
     val page: Int,

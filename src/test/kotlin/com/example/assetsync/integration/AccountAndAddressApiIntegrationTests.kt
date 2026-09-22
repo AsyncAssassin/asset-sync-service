@@ -199,7 +199,7 @@ class AccountAndAddressApiIntegrationTests(
     fun `list watched addresses by account`() {
         val accountId = createAccount("address-list")
         registerAddress(accountId = accountId, address = "0xlist-one", asset = "USDC")
-        registerAddress(accountId = accountId, address = "0xlist-two", asset = "ETH")
+        registerAddress(accountId = accountId, address = "0xlist-two", asset = "USDC")
 
         val result = mockMvc.perform(get("/api/v1/accounts/$accountId/addresses"))
             .andExpect(status().isOk)
@@ -211,14 +211,14 @@ class AccountAndAddressApiIntegrationTests(
 
         val items = objectMapper.readTree(result.response.contentAsString)["items"]
         assertEquals(setOf("0xlist-one", "0xlist-two"), items.map { it["address"].asText() }.toSet())
-        assertEquals(setOf("USDC", "ETH"), items.map { it["asset"].asText() }.toSet())
+        assertEquals(listOf("USDC", "USDC"), items.map { it["asset"].asText() })
     }
 
     @Test
     fun `list watched addresses supports bounded pagination`() {
         val accountId = createAccount("address-list-page")
         registerAddress(accountId = accountId, address = "0xlist-page-one", asset = "USDC")
-        registerAddress(accountId = accountId, address = "0xlist-page-two", asset = "ETH")
+        registerAddress(accountId = accountId, address = "0xlist-page-two", asset = "USDC")
 
         mockMvc.perform(get("/api/v1/accounts/$accountId/addresses?page=0&size=1"))
             .andExpect(status().isOk)
@@ -347,6 +347,76 @@ class AccountAndAddressApiIntegrationTests(
         assertEquals(0, tableCount("watched_addresses"))
     }
 
+    @Test
+    fun `unknown asset on an enabled chain is rejected as unsupported asset`() {
+        val accountId = createAccount("asset-unknown")
+
+        expectUnsupportedAsset(accountId = accountId, chainId = "local-evm", asset = "DAI")
+    }
+
+    @Test
+    fun `disabled asset on an enabled chain is rejected as unsupported asset`() {
+        val accountId = createAccount("asset-disabled")
+        insertDisabledAssetConfig(chainId = "local-evm", asset = "DAI")
+
+        expectUnsupportedAsset(accountId = accountId, chainId = "local-evm", asset = "DAI")
+    }
+
+    @Test
+    fun `disabled chain is rejected before the asset is checked`() {
+        val accountId = createAccount("asset-chain-disabled")
+
+        // eth-mainnet is seeded disabled together with its disabled USDC registry row.
+        expectUnsupportedChain(accountId = accountId, chainId = "eth-mainnet")
+    }
+
+    @Test
+    fun `seeded sepolia usdc registers and normalizes evm casing`() {
+        val accountId = createAccount("asset-sepolia")
+
+        val response = registerAddress(
+            accountId = accountId,
+            chainId = "eth-sepolia",
+            address = "0xABCDEF0123456789ABCDEF0123456789ABCDEF01",
+            asset = "usdc",
+        )
+
+        assertEquals("eth-sepolia", response["chainId"].asText())
+        assertEquals("0xabcdef0123456789abcdef0123456789abcdef01", response["address"].asText())
+        assertEquals("USDC", response["asset"].asText())
+    }
+
+    private fun expectUnsupportedAsset(accountId: String, chainId: String, asset: String) {
+        mockMvc.perform(
+            post("/api/v1/accounts/$accountId/addresses")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(addressRequestBody(chainId = chainId, asset = asset)),
+        )
+            .andExpect(status().isNotFound)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/not-found"))
+            .andExpect(jsonPath("$.title").value("Unsupported asset"))
+            .andExpect(jsonPath("$.detail").value("Asset configuration was not found or is disabled for the chain."))
+            .andExpect(jsonPath("$.chainId").value(chainId))
+            .andExpect(jsonPath("$.asset").value(asset))
+    }
+
+    private fun insertDisabledAssetConfig(chainId: String, asset: String) {
+        val now = Timestamp.from(Instant.now())
+        jdbcTemplate.update(
+            """
+            INSERT INTO asset_configs (
+                chain_id, asset, token_standard, contract_address, decimals, display_name, enabled, created_at, updated_at
+            )
+            VALUES (?, ?, 'ERC20', ?, 18, NULL, false, ?, ?)
+            """.trimIndent(),
+            chainId,
+            asset,
+            "0x" + "d".repeat(40),
+            now,
+            now,
+        )
+    }
+
     private fun createAccount(externalRef: String = "account-${UUID.randomUUID()}"): String {
         val result = mockMvc.perform(
             post("/api/v1/accounts")
@@ -446,7 +516,8 @@ class AccountAndAddressApiIntegrationTests(
         jdbcTemplate.update("DELETE FROM observed_transactions")
         jdbcTemplate.update("DELETE FROM watched_addresses")
         jdbcTemplate.update("DELETE FROM accounts")
-        jdbcTemplate.update("DELETE FROM chain_configs WHERE chain_id <> 'local-evm'")
+        jdbcTemplate.update("DELETE FROM asset_configs WHERE asset <> 'USDC'")
+        jdbcTemplate.update("DELETE FROM chain_configs WHERE chain_id NOT IN ('local-evm', 'eth-sepolia', 'eth-mainnet')")
         jdbcTemplate.update("UPDATE chain_configs SET enabled = true WHERE chain_id = 'local-evm'")
     }
 }

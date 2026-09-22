@@ -11,6 +11,7 @@ import org.springframework.transaction.annotation.Transactional
 class WatchedAddressApplicationService(
     private val accountRepository: AccountRepository,
     private val chainConfigRepository: ChainConfigRepository,
+    private val assetConfigRepository: AssetConfigRepository,
     private val watchedAddressRepository: WatchedAddressRepository,
     private val clock: Clock,
 ) {
@@ -32,6 +33,10 @@ class WatchedAddressApplicationService(
             asset = command.asset,
         )
         chainConfigRepository.findEnabledByChainId(identity.chainId) ?: throw UnsupportedChainException(identity.chainId)
+        // The registry is the global supported-asset contract: every profile and provider type goes
+        // through it, and local/test/demo flows rely on the seeded `local-evm` USDC row.
+        assetConfigRepository.findEnabledByChainIdAndAsset(chainId = identity.chainId, asset = identity.asset)
+            ?: throw UnsupportedAssetException(chainId = identity.chainId, asset = identity.asset)
 
         val now = Instant.now(clock)
         return watchedAddressRepository.insert(

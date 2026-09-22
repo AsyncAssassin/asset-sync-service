@@ -114,7 +114,7 @@ class SyncCapacityIntegrationTests(
         jdbcTemplate.update("DELETE FROM observed_transactions")
         jdbcTemplate.update("DELETE FROM watched_addresses")
         jdbcTemplate.update("DELETE FROM accounts")
-        jdbcTemplate.update("DELETE FROM chain_configs WHERE chain_id <> 'local-evm'")
+        jdbcTemplate.update("DELETE FROM chain_configs WHERE chain_id NOT IN ('local-evm', 'eth-sepolia', 'eth-mainnet')")
         jdbcTemplate.update(
             "UPDATE chain_configs SET enabled = true, required_confirmations = 3, updated_at = ? WHERE chain_id = 'local-evm'",
             Timestamp.from(Instant.now()),
