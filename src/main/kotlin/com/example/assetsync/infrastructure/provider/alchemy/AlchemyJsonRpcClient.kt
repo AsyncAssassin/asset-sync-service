@@ -120,7 +120,9 @@ class AlchemyJsonRpcClient(
                     },
             ) { "Alchemy exchange returned no result." }
             logger.debug("alchemy_rpc_succeeded network={} method={}", network, method)
-            sample?.let { metrics?.recordAlchemyRpc(network, method, RESULT_SUCCEEDED, it) }
+            if (sample != null) {
+                metrics?.recordAlchemyRpc(network, method, RESULT_SUCCEEDED, sample)
+            }
             result
         } catch (exception: ProviderConfigurationException) {
             throw failed(network, method, exception, sample, RESULT_CONFIGURATION)
