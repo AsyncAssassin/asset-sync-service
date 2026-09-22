@@ -484,7 +484,7 @@ This service does not provide custody, signing, private key storage, wallet func
 
 ## Roadmap / Deferred Scope
 
-Future extensions, not implemented as of `v0.2.0`:
+Future extensions, not implemented as of `v0.3.0`:
 
 - Transaction read/list endpoints.
 - Provider coverage beyond Alchemy ERC-20 transfers and the generic HTTP page contract: native and internal transfers, ERC-721/1155, and a second provider on the same asset registry.
