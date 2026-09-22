@@ -9,13 +9,14 @@ group = "com.example"
 version = "0.0.1-SNAPSHOT"
 description = "Asset sync backend service"
 
-// No jackson.version override: Spring Boot 3.5.15 manages Jackson (2.21.4) as a tested set.
-// GHSA-5jmj-h7xm-6q6v (CVE-2026-54515) patched releases (2.21.5 / 2.22.1) are not yet on Maven
-// Central (verified 2026-07-03; latest published is 2.22.0, itself in the affected range), so a
-// fixed bump is impossible today. When a fixed patch appears, override Spring Boot with the
-// jackson-bom.version BOM property, not the ineffective jackson.version property. No exploit path
-// exists in this codebase (no @JsonIgnoreProperties, no @JsonFormat case-insensitive properties,
-// no default/polymorphic typing).
+// Jackson: Spring Boot 3.5.15 manages jackson-bom 2.21.4, which sits inside the vulnerable range of
+// GHSA-5jmj-h7xm-6q6v (CVE-2026-54515, ">= 2.19.0, < 2.21.5"). Pin the BOM to the latest 2.21.x
+// patch instead (all modules used here are published at 2.21.7; verified on Maven Central
+// 2026-09-22). `jackson-bom.version` is the property Boot's dependency management honors; the
+// `jackson.version` property is ignored. Drop the override once Spring Boot manages >= 2.21.5.
+// No exploit path exists in this codebase either way (no @JsonIgnoreProperties, no @JsonFormat
+// case-insensitive properties, no default/polymorphic typing).
+extra["jackson-bom.version"] = "2.21.7"
 
 java {
     toolchain {

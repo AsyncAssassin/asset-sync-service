@@ -494,7 +494,7 @@ Possible statuses are `QUEUED`, `RUNNING`, `SUCCEEDED`, and `FAILED`. Legacy `ST
 
 ## 13. ProblemDetail Error Mapping
 
-All errors use `ProblemDetail`. The `type` field is a stable service-owned URI. Implementations may add properties for correlation and domain identifiers, but must not expose internal stack traces.
+All errors produced by the API layer use `ProblemDetail`, including framework-level routing failures such as unknown paths, unsupported methods, and unsupported content types. The `type` field is a stable service-owned URI. Implementations may add properties for correlation and domain identifiers, but must not expose internal stack traces. Under the protected profiles, `401` and `403` are produced by the Spring Security filter chain before a request reaches the API layer; those responses carry `WWW-Authenticate` and `X-Request-Id` headers but no `ProblemDetail` body.
 
 Common mappings:
 
@@ -503,7 +503,11 @@ Common mappings:
 | Malformed JSON or invalid field type | 400 | `https://asset-sync-service/errors/invalid-request` |
 | Bean validation failure | 400 | `https://asset-sync-service/errors/validation-failed` |
 | Invalid enum value | 400 | `https://asset-sync-service/errors/validation-failed` |
+| Missing required request parameter | 400 | `https://asset-sync-service/errors/invalid-request` |
 | Account, watched address, unsupported chain, or sync run not found | 404 | `https://asset-sync-service/errors/not-found` |
+| Unknown route | 404 | `https://asset-sync-service/errors/not-found` |
+| Unsupported request method, with an `Allow` header | 405 | `https://asset-sync-service/errors/method-not-allowed` |
+| Unsupported request content type | 415 | `https://asset-sync-service/errors/unsupported-media-type` |
 | Duplicate account `externalRef` | 409 | `https://asset-sync-service/errors/duplicate-account` |
 | Duplicate watched address | 409 | `https://asset-sync-service/errors/duplicate-watched-address` |
 | Immutable observed transaction conflict | 409 | `https://asset-sync-service/errors/immutable-field-conflict` |
@@ -511,6 +515,7 @@ Common mappings:
 | Sync queue is full | 429 | `https://asset-sync-service/errors/sync-queue-full` |
 | Provider timeout or unavailable during async execution | Stored on sync run | n/a |
 | PostgreSQL unavailable | 503 | `https://asset-sync-service/errors/database-unavailable` |
+| Unexpected server failure | 500 | `https://asset-sync-service/errors/internal-error` |
 
 Example:
 

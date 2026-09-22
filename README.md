@@ -22,7 +22,7 @@
 | Reliability | Natural keys, PostgreSQL constraints, row locks, transactional outbox, retry/backoff |
 | Observability | Actuator health/readiness/metrics/Prometheus, structured domain logs |
 | Testing | Unit tests plus Testcontainers PostgreSQL integration tests |
-| External systems | Docker Compose PostgreSQL; fake provider in `local`/`test`; HTTP provider adapter in non-local/test profiles |
+| External systems | Docker Compose PostgreSQL; fake provider in `local`/`test`; HTTP provider adapter in non-local/test profiles; bundled provider simulator plus seeded dataset in `demo` |
 
 ## Implemented Features
 
@@ -36,6 +36,7 @@
 - Sync run inspection.
 - Scheduled outbox publishing to structured logs.
 - Liveness, readiness, metrics, Prometheus, Swagger UI, and OpenAPI JSON.
+- `demo` profile with seeded lifecycle data, HTTP Basic roles, and an in-process provider simulator behind the real HTTP adapter.
 
 ## Architecture
 
@@ -214,6 +215,70 @@ Stop local containers:
 
 ```bash
 docker compose down -v
+```
+
+## Demo Profile
+
+The `demo` profile is the fastest way to show every lifecycle stage and the real HTTP provider path without any external service. Compared with `local`:
+
+- Security is the same protected HTTP Basic chain as production. Two well-known users exist only under this profile: `demo-reader` / `demo-reader-pw` (role `READ`, read-only) and `demo-operator` / `demo-operator-pw` (role `OPERATOR`, mutations and sync).
+- `HttpChainProvider` is active and points at a bundled in-process simulator under `/simulator`, so an operator sync exercises the real HTTP provider path, per-address cursor checkpoints, and outbox publishing end to end. The simulator returns one `CONFIRMED` event per watched address on the first fetch and an empty page afterwards.
+- `DemoDataSeeder` seeds an idempotent dataset on startup: one account and watched address, observed transactions in `SEEN`, `CONFIRMED`, and `REVERTED`, outbox rows in `NEW`, `PUBLISHED`, `FAILED`, and `DEAD`, and a stale `STARTED` sync run for the recovery job to abandon. Restarts do not duplicate rows.
+- Schedulers stay on, so the outbox poller, the sync worker, and the recovery job run live.
+
+Start PostgreSQL as in the quickstart, then run the app with the `demo` profile. `SERVER_PORT` must be passed as an environment variable because the simulator base URL is derived from it. The optional recovery delay override makes the stale-run recovery visible within seconds instead of the default five minutes:
+
+```bash
+SPRING_PROFILES_ACTIVE=demo ASSET_SYNC_DB_PORT=55432 SERVER_PORT=18080 \
+ASSET_SYNC_RECOVERY_INITIAL_DELAY=20s ./gradlew bootRun
+```
+
+Seeded identifiers:
+
+| Resource | Id |
+| --- | --- |
+| Account `demo-account` | `d0000000-0000-0000-0000-0000000000a1` |
+| Watched address `local-evm` / `0xdemoaddr` / `USDC` | `d0000000-0000-0000-0000-0000000000b1` |
+| Stale `STARTED` sync run | `d0000000-0000-0000-0000-0000000000f1` |
+
+Walk through authentication and roles:
+
+```bash
+# Anonymous API access is rejected with 401.
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:18080/api/v1/accounts/d0000000-0000-0000-0000-0000000000a1
+
+# The reader can read.
+curl -s -u demo-reader:demo-reader-pw http://localhost:18080/api/v1/accounts/d0000000-0000-0000-0000-0000000000a1
+
+# The reader cannot mutate: 403.
+curl -s -o /dev/null -w '%{http_code}\n' -u demo-reader:demo-reader-pw \
+  -X POST http://localhost:18080/api/v1/addresses/d0000000-0000-0000-0000-0000000000b1/sync
+```
+
+Drive the real provider path as the operator and poll the durable run:
+
+```bash
+SYNC_JSON=$(curl -s -u demo-operator:demo-operator-pw \
+  -X POST http://localhost:18080/api/v1/addresses/d0000000-0000-0000-0000-0000000000b1/sync)
+printf '%s\n' "$SYNC_JSON"
+
+SYNC_ID=$(printf '%s' "$SYNC_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+curl -s -u demo-reader:demo-reader-pw "http://localhost:18080/api/v1/sync-runs/${SYNC_ID}"
+```
+
+Within a few seconds the run reports `SUCCEEDED` with `eventsSeen: 1` and `eventsChanged: 1`. A second sync of the same address completes with zero events because the durable cursor is honored.
+
+What to watch afterwards:
+
+- Application log lines `outbox_event_publish_succeeded` for the seeded `NEW` row, the retried seeded `FAILED` row, and the new `TRANSACTION_CONFIRMED` event from the simulator. The seeded `DEAD` row stays terminal.
+- The seeded stale run turns `FAILED` with an `abandoned` error once the recovery job runs: `curl -s -u demo-reader:demo-reader-pw http://localhost:18080/api/v1/sync-runs/d0000000-0000-0000-0000-0000000000f1`.
+- `curl -s -u demo-reader:demo-reader-pw http://localhost:18080/actuator/metrics/asset.sync.outbox.dead.total` reports the terminal row. `/actuator/prometheus` and Swagger UI require the same credentials; health probes stay open.
+
+The same profile runs under Docker Compose by overriding the profile variable:
+
+```bash
+./gradlew clean bootJar
+SPRING_PROFILES_ACTIVE=demo ASSET_SYNC_DB_PORT=55433 ASSET_SYNC_HTTP_PORT=18081 docker compose up --build -d
 ```
 
 ## Full Docker Compose Run

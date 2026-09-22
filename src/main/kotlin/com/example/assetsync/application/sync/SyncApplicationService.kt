@@ -829,7 +829,6 @@ class SyncApplicationService(
             is WatchedAddressByIdNotFoundException,
             is AccountSyncTooLargeException,
             is ProviderDataInvalidException,
-            is ProviderDataMismatchException,
             is DataIntegrityViolationException,
             -> true
             is ChainProviderUnavailableException,
@@ -941,11 +940,6 @@ class AccountSyncTooLargeException(
 class SyncCapacityExceededException(
     val maxConcurrentSyncs: Int,
 ) : RuntimeException("Sync capacity exceeded: at most $maxConcurrentSyncs concurrent provider fetches.")
-
-class ProviderDataMismatchException(
-    override val message: String,
-    override val cause: Throwable,
-) : RuntimeException(message, cause)
 
 class CursorCheckpointAdvanceStaleException(
     val watchedAddressId: UUID,

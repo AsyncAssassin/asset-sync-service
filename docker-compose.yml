@@ -19,7 +19,7 @@ services:
     build:
       context: .
     environment:
-      SPRING_PROFILES_ACTIVE: local
+      SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-local}
       SERVER_PORT: 8080
       ASSET_SYNC_DB_HOST: postgres
       ASSET_SYNC_DB_PORT: 5432

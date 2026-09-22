@@ -24,8 +24,10 @@ import org.springframework.http.MediaType
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.content
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.header
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
@@ -126,6 +128,52 @@ class AccountAndAddressApiIntegrationTests(
             .andExpect(status().isBadRequest)
             .andExpect(header().string("X-Request-Id", "request-id-test"))
             .andExpect(jsonPath("$.requestId").value("request-id-test"))
+    }
+
+    @Test
+    fun `unknown route returns not found problem detail`() {
+        mockMvc.perform(get("/api/v1/nothing-here").header("X-Request-Id", "unknown-route-test"))
+            .andExpect(status().isNotFound)
+            .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/not-found"))
+            .andExpect(jsonPath("$.status").value(404))
+            .andExpect(jsonPath("$.instance").value("/api/v1/nothing-here"))
+            .andExpect(jsonPath("$.requestId").value("unknown-route-test"))
+    }
+
+    @Test
+    fun `unsupported method returns method not allowed problem detail with allow header`() {
+        mockMvc.perform(delete("/api/v1/accounts"))
+            .andExpect(status().isMethodNotAllowed)
+            .andExpect(header().string("Allow", "POST"))
+            .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/method-not-allowed"))
+            .andExpect(jsonPath("$.status").value(405))
+            .andExpect(jsonPath("$.supportedMethods[0]").value("POST"))
+    }
+
+    @Test
+    fun `unsupported content type returns unsupported media type problem detail`() {
+        mockMvc.perform(
+            post("/api/v1/accounts")
+                .contentType(MediaType.TEXT_PLAIN)
+                .content("externalRef=customer-123"),
+        )
+            .andExpect(status().isUnsupportedMediaType)
+            .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/unsupported-media-type"))
+            .andExpect(jsonPath("$.status").value(415))
+    }
+
+    @Test
+    fun `unacceptable accept header keeps the framework status instead of internal error`() {
+        val accountId = createAccount("not-acceptable-test")
+
+        mockMvc.perform(get("/api/v1/accounts/$accountId").accept(MediaType.TEXT_XML))
+            .andExpect(status().isNotAcceptable)
+            .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/not-acceptable"))
+            .andExpect(jsonPath("$.status").value(406))
     }
 
     @Test

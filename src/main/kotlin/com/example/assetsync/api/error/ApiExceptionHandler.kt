@@ -5,11 +5,7 @@ import com.example.assetsync.application.account.DuplicateAccountExternalRefExce
 import com.example.assetsync.application.account.DuplicateWatchedAddressException
 import com.example.assetsync.application.account.InvalidWatchedAddressPageException
 import com.example.assetsync.application.account.UnsupportedChainException
-import com.example.assetsync.application.sync.AccountSyncTooLargeException
-import com.example.assetsync.application.sync.ProviderDataMismatchException
-import com.example.assetsync.application.sync.SyncCapacityExceededException
 import com.example.assetsync.application.sync.SyncQueueFullException
-import com.example.assetsync.application.sync.SyncProviderUnavailableException
 import com.example.assetsync.application.sync.SyncRunNotFoundException
 import com.example.assetsync.application.sync.WatchedAddressByIdNotFoundException
 import com.example.assetsync.application.transaction.InvalidObservedEventRequestException
@@ -20,16 +16,25 @@ import jakarta.validation.ConstraintViolationException
 import java.net.URI
 import org.springframework.dao.DataAccessException
 import org.springframework.dao.DataIntegrityViolationException
+import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.http.ProblemDetail
 import org.springframework.http.ResponseEntity
 import org.springframework.http.converter.HttpMessageNotReadableException
 import org.slf4j.LoggerFactory
+import org.springframework.security.access.AccessDeniedException
+import org.springframework.security.core.AuthenticationException
 import org.springframework.validation.FieldError
+import org.springframework.web.ErrorResponse
+import org.springframework.web.HttpMediaTypeNotSupportedException
+import org.springframework.web.HttpRequestMethodNotSupportedException
 import org.springframework.web.bind.MethodArgumentNotValidException
+import org.springframework.web.bind.MissingServletRequestParameterException
 import org.springframework.web.bind.annotation.ExceptionHandler
 import org.springframework.web.bind.annotation.RestControllerAdvice
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException
+import org.springframework.web.servlet.NoHandlerFoundException
+import org.springframework.web.servlet.resource.NoResourceFoundException
 
 @RestControllerAdvice
 class ApiExceptionHandler {
@@ -55,6 +60,7 @@ class ApiExceptionHandler {
         ConstraintViolationException::class,
         MethodArgumentTypeMismatchException::class,
         HttpMessageNotReadableException::class,
+        MissingServletRequestParameterException::class,
     )
     fun handleInvalidRequest(
         exception: Exception,
@@ -65,6 +71,8 @@ class ApiExceptionHandler {
                 "${exception.name} must be a valid ${exception.requiredType?.simpleName ?: "value"}."
             is HttpMessageNotReadableException ->
                 "Request body is malformed or contains invalid field types."
+            is MissingServletRequestParameterException ->
+                "${exception.parameterName} request parameter is required."
             else ->
                 "Request validation failed."
         }
@@ -77,6 +85,57 @@ class ApiExceptionHandler {
             request = request,
         )
     }
+
+    // Framework-level routing failures below are mapped explicitly rather than through Spring Boot's
+    // `spring.mvc.problemdetails.enabled` handler: that auto-configured advice carries no @Order, so
+    // it would compete with this one for the validation and body-parsing exceptions handled above,
+    // and it would emit `about:blank` types without the request id. Keeping one advice keeps every
+    // error on the same service-owned `type` URIs.
+    @ExceptionHandler(NoResourceFoundException::class, NoHandlerFoundException::class)
+    fun handleUnknownRoute(
+        exception: Exception,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> =
+        problem(
+            status = HttpStatus.NOT_FOUND,
+            type = "not-found",
+            title = "Resource not found",
+            detail = "No resource for ${request.method} ${request.requestURI}.",
+            request = request,
+        )
+
+    @ExceptionHandler(HttpRequestMethodNotSupportedException::class)
+    fun handleMethodNotAllowed(
+        exception: HttpRequestMethodNotSupportedException,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> {
+        val supportedMethods = exception.supportedHttpMethods.orEmpty()
+        return problem(
+            status = HttpStatus.METHOD_NOT_ALLOWED,
+            type = "method-not-allowed",
+            title = "Method not allowed",
+            detail = "Request method ${exception.method} is not supported for ${request.requestURI}.",
+            request = request,
+            properties = mapOf("supportedMethods" to supportedMethods.map { it.name() }),
+            headers = HttpHeaders().apply { allow = supportedMethods },
+        )
+    }
+
+    @ExceptionHandler(HttpMediaTypeNotSupportedException::class)
+    fun handleUnsupportedMediaType(
+        exception: HttpMediaTypeNotSupportedException,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> =
+        problem(
+            status = HttpStatus.UNSUPPORTED_MEDIA_TYPE,
+            type = "unsupported-media-type",
+            title = "Unsupported media type",
+            detail = exception.contentType
+                ?.let { "Request content type $it is not supported; use application/json." }
+                ?: "Request content type is missing; use application/json.",
+            request = request,
+            headers = HttpHeaders().apply { accept = exception.supportedMediaTypes },
+        )
 
     @ExceptionHandler(AccountNotFoundException::class)
     fun handleAccountNotFound(
@@ -234,71 +293,6 @@ class ApiExceptionHandler {
             request = request,
         )
 
-    @ExceptionHandler(SyncProviderUnavailableException::class)
-    fun handleProviderUnavailable(
-        exception: SyncProviderUnavailableException,
-        request: HttpServletRequest,
-    ): ResponseEntity<ProblemDetail> =
-        problem(
-            status = HttpStatus.SERVICE_UNAVAILABLE,
-            type = "provider-unavailable",
-            title = "Provider unavailable",
-            detail = "Provider operation failed.",
-            request = request,
-            properties = mapOf(
-                "syncRunId" to exception.syncRun.id,
-                "targetType" to exception.syncRun.targetType.name,
-                "targetId" to exception.syncRun.targetId,
-            ),
-        )
-
-    @ExceptionHandler(AccountSyncTooLargeException::class)
-    fun handleAccountSyncTooLarge(
-        exception: AccountSyncTooLargeException,
-        request: HttpServletRequest,
-    ): ResponseEntity<ProblemDetail> =
-        problem(
-            status = HttpStatus.BAD_REQUEST,
-            type = "sync-account-too-large",
-            title = "Account sync too large",
-            detail = "Account has more active watched addresses than this synchronous sync endpoint allows.",
-            request = request,
-            properties = mapOf(
-                "accountId" to exception.accountId,
-                "maxAddresses" to exception.maxAddresses,
-            ),
-        )
-
-    @ExceptionHandler(ProviderDataMismatchException::class)
-    fun handleProviderDataMismatch(
-        exception: ProviderDataMismatchException,
-        request: HttpServletRequest,
-    ): ResponseEntity<ProblemDetail> =
-        // The upstream provider returned data that doesn't fit the watched target — a bad-gateway
-        // condition, not a client 404/409.
-        problem(
-            status = HttpStatus.BAD_GATEWAY,
-            type = "provider-data-invalid",
-            title = "Provider returned invalid data",
-            detail = "The provider returned an event that could not be reconciled with tracked state.",
-            request = request,
-        )
-
-    @ExceptionHandler(SyncCapacityExceededException::class)
-    fun handleSyncCapacityExceeded(
-        exception: SyncCapacityExceededException,
-        request: HttpServletRequest,
-    ): ResponseEntity<ProblemDetail> =
-        // Pool saturation is a client-retryable capacity limit — distinct from provider-unavailable.
-        problem(
-            status = HttpStatus.TOO_MANY_REQUESTS,
-            type = "sync-capacity-exceeded",
-            title = "Sync capacity exceeded",
-            detail = "Too many concurrent syncs are in flight; retry shortly.",
-            request = request,
-            properties = mapOf("maxConcurrentSyncs" to exception.maxConcurrentSyncs),
-        )
-
     @ExceptionHandler(SyncQueueFullException::class)
     fun handleSyncQueueFull(
         exception: SyncQueueFullException,
@@ -352,6 +346,47 @@ class ApiExceptionHandler {
         )
     }
 
+    @ExceptionHandler(Exception::class)
+    fun handleUnexpected(
+        exception: Exception,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> {
+        // Security decisions must keep flowing to Spring Security's ExceptionTranslationFilter, which
+        // turns them into 401/403; swallowing them here would misreport them as 500.
+        if (exception is AccessDeniedException || exception is AuthenticationException) {
+            throw exception
+        }
+        // Spring MVC exceptions that carry their own status (406, 413, async timeout, ...) keep it
+        // instead of collapsing into 500. The explicit handlers above still win for the common cases;
+        // ErrorResponse bodies are framework-curated and safe to relay.
+        if (exception is ErrorResponse) {
+            val status = HttpStatus.resolve(exception.statusCode.value()) ?: HttpStatus.INTERNAL_SERVER_ERROR
+            return problem(
+                status = status,
+                type = status.name.lowercase().replace('_', '-'),
+                title = exception.body.title ?: status.reasonPhrase,
+                detail = exception.body.detail ?: "The request could not be handled.",
+                request = request,
+                headers = exception.headers,
+            )
+        }
+        // Last-resort mapping so no failure falls through to the container's default error page. The
+        // client gets a generic detail; the exception itself goes to the log with the request path.
+        logger.error(
+            "unhandled_request_failure path={} exceptionClass={}",
+            request.requestURI,
+            exception.javaClass.simpleName,
+            exception,
+        )
+        return problem(
+            status = HttpStatus.INTERNAL_SERVER_ERROR,
+            type = "internal-error",
+            title = "Internal server error",
+            detail = "The request could not be processed.",
+            request = request,
+        )
+    }
+
     private fun FieldError.toErrorMessage(): String =
         "$field: ${defaultMessage ?: "invalid value"}"
 
@@ -362,6 +397,7 @@ class ApiExceptionHandler {
         detail: String,
         request: HttpServletRequest,
         properties: Map<String, Any?> = emptyMap(),
+        headers: HttpHeaders? = null,
     ): ResponseEntity<ProblemDetail> {
         val problem = ProblemDetail.forStatusAndDetail(status, detail)
         problem.type = URI.create("https://asset-sync-service/errors/$type")
@@ -369,6 +405,8 @@ class ApiExceptionHandler {
         problem.instance = URI.create(request.requestURI)
         request.getAttribute(REQUEST_ID_ATTRIBUTE)?.let { problem.setProperty("requestId", it) }
         properties.forEach(problem::setProperty)
-        return ResponseEntity.status(status).body(problem)
+        val response = ResponseEntity.status(status)
+        headers?.let { response.headers(it) }
+        return response.body(problem)
     }
 }

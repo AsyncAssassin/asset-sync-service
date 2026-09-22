@@ -261,11 +261,6 @@ class WatchedAddressByIdNotFoundException(
     val addressId: UUID,
 ) : RuntimeException("Active watched address was not found.")
 
-class SyncProviderUnavailableException(
-    val syncRun: SyncRun,
-    cause: Throwable? = null,
-) : RuntimeException("Provider is unavailable.", cause)
-
 class SyncQueueFullException(
     val maxInFlightRuns: Int,
 ) : RuntimeException("Sync queue is full: at most $maxInFlightRuns queued or running syncs.")
