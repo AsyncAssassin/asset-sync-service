@@ -40,8 +40,10 @@ class ProdProfileBootIntegrationTests(
 
     @Test
     fun `prod profile boots, migrates via the dedicated liquibase datasource, and authenticates the env admin`() {
-        // Booted under the protected chain: health is open, the API rejects anonymous access.
-        assertEquals(HttpStatus.OK, restTemplate.getForEntity("/actuator/health", String::class.java).statusCode)
+        // Booted under the protected chain: health is open, the API rejects anonymous access. The body
+        // is part of the failure message so a wrong status shows which handler produced it.
+        val health = restTemplate.getForEntity("/actuator/health", String::class.java)
+        assertEquals(HttpStatus.OK, health.statusCode, "unexpected health response: ${health.body}")
         assertEquals(
             HttpStatus.UNAUTHORIZED,
             restTemplate.getForEntity("/api/v1/accounts/${UUID.randomUUID()}", String::class.java).statusCode,

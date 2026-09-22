@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.example"
-version = "0.0.1-SNAPSHOT"
+version = "0.2.0"
 description = "Asset sync backend service"
 
 // Jackson: Spring Boot 3.5.15 manages jackson-bom 2.21.4, which sits inside the vulnerable range of
@@ -72,6 +72,14 @@ kotlin {
 
     compilerOptions {
         freeCompilerArgs.addAll("-Xjsr305=strict")
+    }
+}
+
+springBoot {
+    // Exposes the build name and version at /actuator/info. The build timestamp is excluded so the
+    // generated properties, and therefore the jar, stay reproducible between builds.
+    buildInfo {
+        excludes.set(setOf("time"))
     }
 }
 

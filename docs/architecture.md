@@ -1121,6 +1121,9 @@ Health checks:
 - Provider health indicator is profile-specific: fake in `local`/`test`, HTTP in non-local/test profiles.
 - Component details are shown to authenticated callers (`management.endpoint.health.show-details: when-authorized`) and to everyone in `local`; anonymous probes see only the aggregate status.
 
+Build information:
+- `/actuator/info` exposes the build name and version written by the Gradle build (`springBoot.buildInfo`), so a running instance can be matched to a release.
+
 ## 19. Docker Compose Services
 
 MVP services:

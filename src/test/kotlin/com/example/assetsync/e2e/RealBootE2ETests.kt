@@ -65,7 +65,7 @@ class RealBootE2ETests(
         //    Anonymous probes get the aggregate status only; authenticated callers see the components
         //    (show-details: when-authorized), including the real HTTP provider indicator.
         val anonymousHealth = restTemplate.getForEntity("/actuator/health", String::class.java)
-        assertEquals(HttpStatus.OK, anonymousHealth.statusCode)
+        assertEquals(HttpStatus.OK, anonymousHealth.statusCode, "unexpected health response: ${anonymousHealth.body}")
         assertTrue(anonymousHealth.body?.contains("\"components\"") != true, "anonymous health must not expose components")
         val readerHealth = reader().getForEntity("/actuator/health", String::class.java)
         assertEquals(HttpStatus.OK, readerHealth.statusCode)

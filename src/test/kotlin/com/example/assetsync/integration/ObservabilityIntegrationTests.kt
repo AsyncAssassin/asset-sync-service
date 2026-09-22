@@ -95,6 +95,11 @@ class ObservabilityIntegrationTests(
         mockMvc.perform(get("/actuator/prometheus"))
             .andExpect(status().isOk)
 
+        mockMvc.perform(get("/actuator/info"))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.build.name").value("asset-sync-service"))
+            .andExpect(jsonPath("$.build.version").isNotEmpty)
+
         assertTrue(applicationContext.getBeansOfType(FakeChainProviderHealthIndicator::class.java).isNotEmpty())
         assertTrue(applicationContext.getBeansOfType(OutboxPublisherJob::class.java).isEmpty())
     }
