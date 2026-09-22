@@ -6,6 +6,11 @@ import com.example.assetsync.infrastructure.provider.HttpChainProvider
 import com.example.assetsync.infrastructure.provider.HttpChainProviderHealthIndicator
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProvider
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProviderHealthIndicator
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
+import java.util.Base64
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -20,6 +25,7 @@ import org.springframework.boot.test.autoconfigure.actuate.observability.AutoCon
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.web.client.TestRestTemplate
 import org.springframework.context.ApplicationContext
+import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.context.DynamicPropertyRegistry
@@ -83,6 +89,41 @@ class ProdProfileBootIntegrationTests(
         assertFalse(context.containsBean("alchemyRestClient"))
         assertTrue(context.getBeansOfType(AlchemyChainProvider::class.java).isEmpty())
         assertTrue(context.getBeansOfType(AlchemyChainProviderHealthIndicator::class.java).isEmpty())
+    }
+
+    @Test
+    fun `a request the firewall rejects keeps its 400 instead of turning into a basic challenge`() {
+        // StrictHttpFirewall rejects these paths before authentication and answers 400 through the
+        // container's /error dispatch. That dispatch must not demand credentials, or every caller,
+        // even one with valid credentials, would see 401 and a browser would ask for a password.
+        val client = HttpClient.newHttpClient()
+        val adminCredentials = Base64.getEncoder().encodeToString("prod-admin:prod-admin-pw".toByteArray())
+        listOf("//api/v1/accounts/${UUID.randomUUID()}", "/api/v1/accounts;x=1").forEach { path ->
+            listOf(null, adminCredentials).forEach { credentials ->
+                val request = HttpRequest.newBuilder(URI.create(restTemplate.rootUri + path))
+                    .apply { credentials?.let { header(HttpHeaders.AUTHORIZATION, "Basic $it") } }
+                    .GET()
+                    .build()
+                val response = client.send(request, HttpResponse.BodyHandlers.ofString())
+
+                val scenario = "$path with${if (credentials == null) "out" else ""} credentials"
+                assertEquals(400, response.statusCode(), "unexpected response for $scenario: ${response.body()}")
+                assertTrue(
+                    response.headers().firstValue(HttpHeaders.WWW_AUTHENTICATE).isEmpty,
+                    "no Basic challenge expected for $scenario",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `the simulator path is not open outside demo`() {
+        // prod serves no simulator, so the path falls through to the authenticated default.
+        val anonymous = restTemplate.getForEntity(
+            "/simulator/v1/chains/local-evm/addresses/0xabc/events?asset=USDC&limit=1",
+            String::class.java,
+        )
+        assertEquals(HttpStatus.UNAUTHORIZED, anonymous.statusCode, "unexpected simulator response: ${anonymous.body}")
     }
 
     @Test

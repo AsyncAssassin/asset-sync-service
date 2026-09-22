@@ -81,6 +81,7 @@ Required cases:
 | Account traversal | busy early address is skipped while later addresses are processed |
 | Sync shutdown | draining finishes an in-flight run, interruption requeues without failure budget, a stopped worker refuses claims |
 | Asset registry | changeset 015 seeds and constraints, unknown and disabled asset rejection, disabled chain precedence, Sepolia casing normalization, rollout preflight query |
+| Protected security chain | a path the firewall rejects keeps its `400` without a Basic challenge, with or without credentials; `/simulator` requires authentication in `prod` and stays open under `demo`, where a non-positive `limit` is a `400` ProblemDetail; the OpenAPI document declares HTTP Basic as the global requirement |
 | Provider selection | `prod` boots with the HTTP bridge by default and rejects a blank `base-url`; `type=alchemy` boots without `base-url`, wires only Alchemy beans, probes `eth-sepolia` with a bearer token, exposes health without the key, and fails fast on a missing key, HTTP 401, an enabled chain without a network mapping, and legacy watched addresses; `local` keeps the fake provider |
 | Alchemy sync | the real worker against the Alchemy adapter and a scripted JSON-RPC stub in path auth mode: `registration-safe` idle start without backfill, ingestion and confirmation of whole pages below the finality frontier with outbox events, cursor and high-water advancement, retry from the durable cursor after HTTP 500 and after a transport failure with a scrubbed `last_error`, `Retry-After` on 429, and continuation across claims without failure attempts |
 
@@ -109,7 +110,7 @@ Required cases:
 | `POST /api/v1/accounts/{accountId}/addresses` | create success, account not found, chain disabled/not found, duplicate address, validation failures |
 | `GET /api/v1/accounts/{accountId}/addresses` | list success, account not found |
 | `POST /api/v1/observed-events` | created, updated, no-change duplicate, immutable conflict, validation failures |
-| `POST /api/v1/addresses/{addressId}/sync` | success, address not found, provider timeout, multi-page checkpointing, retry from page cursor |
+| `POST /api/v1/addresses/{addressId}/sync` | success, address not found, provider timeout, multi-page checkpointing, retry from page cursor, full queue with `Retry-After` |
 | `POST /api/v1/accounts/{accountId}/sync` | success, account not found, provider failure, busy cursor fairness |
 | `GET /api/v1/sync-runs/{syncRunId}` | found, not found |
 

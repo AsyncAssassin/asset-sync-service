@@ -403,7 +403,7 @@ Location: /api/v1/sync-runs/067bdcd7-23c9-44c5-ac73-caeef65ca5ab
 Behavior:
 
 - Duplicate in-flight requests for the same target return the existing `QUEUED` or `RUNNING` run with `202 Accepted` and the same `Location`.
-- If no duplicate exists and the soft queue cap is full, the API returns `429 sync-queue-full`.
+- If no duplicate exists and the soft queue cap is full, the API returns `429 sync-queue-full` with `Retry-After` set to the worker claim interval (`asset-sync.sync.worker.fixed-delay`, 5 seconds by default), rounded up to whole seconds.
 - The worker claims due `QUEUED` rows, marks them `RUNNING`, and processes provider pages outside database transactions.
 - Each watched address has a `sync_cursors` row. The worker acquires that cursor lease, heartbeats it during page work, fetches a bounded provider page, ingests all page events, then advances the checkpoint with lease/version/unexpired-lease fencing.
 - `asset-sync.sync.provider-timeout` is the deadline for one provider page fetch.
@@ -497,6 +497,8 @@ Possible statuses are `QUEUED`, `RUNNING`, `SUCCEEDED`, and `FAILED`. Legacy `ST
 
 All errors produced by the API layer use `ProblemDetail`, including framework-level routing failures such as unknown paths, unsupported methods, and unsupported content types. The `type` field is a stable service-owned URI. Implementations may add properties for correlation and domain identifiers, but must not expose internal stack traces. Under the protected profiles, `401` and `403` are produced by the Spring Security filter chain before a request reaches Spring MVC; a dedicated authentication entry point and access-denied handler write the same `ProblemDetail` shape, including `requestId`, and `401` responses keep the `WWW-Authenticate: Basic` challenge.
 
+A request that Spring Security's `StrictHttpFirewall` rejects before authentication, for example one with `//` or `;` in its path, never reaches the API layer. It gets `400` from the servlet container's error page in every profile, with Spring Boot's default error body instead of a `ProblemDetail` and without a Basic challenge.
+
 Common mappings:
 
 | Condition | HTTP status | Problem type |
@@ -516,7 +518,7 @@ Common mappings:
 | Duplicate watched address | 409 | `https://asset-sync-service/errors/duplicate-watched-address` |
 | Immutable observed transaction conflict | 409 | `https://asset-sync-service/errors/immutable-field-conflict` |
 | Database constraint violation from non-HTTP ingest paths | 400 | `https://asset-sync-service/errors/database-constraint-violation` |
-| Sync queue is full | 429 | `https://asset-sync-service/errors/sync-queue-full` |
+| Sync queue is full, with `Retry-After` | 429 | `https://asset-sync-service/errors/sync-queue-full` |
 | Provider timeout or unavailable during async execution | Stored on sync run | n/a |
 | PostgreSQL unavailable | 503 | `https://asset-sync-service/errors/database-unavailable` |
 | Unexpected server failure | 500 | `https://asset-sync-service/errors/internal-error` |

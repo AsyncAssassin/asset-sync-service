@@ -820,7 +820,7 @@ Duplicate no-op response:
 - `405 Method Not Allowed`: unsupported HTTP method for a known route, with an `Allow` header.
 - `409 Conflict`: duplicate watched address or immutable observed transaction field mismatch.
 - `415 Unsupported Media Type`: request body content type other than JSON.
-- `429 Too Many Requests`: the soft cap on queued plus running sync runs is reached.
+- `429 Too Many Requests`: the soft cap on queued plus running sync runs is reached; `Retry-After` carries the worker claim interval in whole seconds.
 - `500 Internal Server Error`: unexpected failure; the response carries a generic detail and the exception goes to the log.
 - `503 Service Unavailable`: request-time infrastructure failure, such as PostgreSQL unavailable.
 
@@ -1182,6 +1182,8 @@ Build information:
 MVP services:
 - `asset-sync-service`
 - `postgres`
+
+Both services publish their ports on `127.0.0.1` only. `ASSET_SYNC_HTTP_BIND_ADDRESS` widens the application port for a remote demo under a protected profile; PostgreSQL stays on loopback. The application service has a 40-second `stop_grace_period`, longer than the 30-second graceful-shutdown phase.
 
 Metrics are exposed through Actuator. The MVP Docker Compose file does not include Prometheus or Grafana services.
 

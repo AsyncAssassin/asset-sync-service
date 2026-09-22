@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- `429 sync-queue-full` responses carry `Retry-After` with the sync worker claim interval (`asset-sync.sync.worker.fixed-delay`, 5 seconds by default), rounded up to whole seconds.
+- The OpenAPI document declares HTTP Basic as the global security requirement, so Swagger UI offers **Authorize** and can switch between the `READ` and `OPERATOR` users.
+
+### Fixed
+
+- In the protected profiles, a request that Spring Security's firewall rejects before authentication, for example one with `//` or `;` in its path, gets `400` instead of a `401` Basic challenge, also with valid credentials: error dispatches no longer require authentication.
+- The `demo` simulator answers a non-positive `limit` with a `400` ProblemDetail instead of `500`.
+- Docker Compose gives the application a 40-second stop grace period, longer than the 30-second graceful-shutdown phase. With Docker's default 10 seconds a sync run still in flight was killed before it could requeue, waited in `RUNNING` for recovery, and lost a retry attempt.
+
+### Security
+
+- Docker Compose publishes the API and PostgreSQL on `127.0.0.1` only. `ASSET_SYNC_HTTP_BIND_ADDRESS` opens the API port to other machines, for use with a protected profile; PostgreSQL stays on loopback.
+- The protected security chain opens `/simulator/**` only under `demo`. In `prod` and `e2e`, which serve no simulator, the path requires authentication.
+
 ## [0.3.0] - 2026-09-23
 
 ### Added

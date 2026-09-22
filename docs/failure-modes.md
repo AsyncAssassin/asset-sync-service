@@ -311,6 +311,7 @@ Expected behavior:
 - Runs still in flight afterwards are interrupted. An interrupted run is requeued as `QUEUED` with `last_requeue_reason = FAILURE` and a `last_error` naming the shutdown; `failure_attempts` is not incremented, so restarts never consume retry budget.
 - The cursor lease of an interrupted run is released before the run is requeued; if the release fails, the lease expires and recovery clears it.
 - Already committed page events remain valid; the next claim resumes from the durable checkpoint.
+- The container stop timeout must outlast the shutdown phase. Docker Compose gives the application 40 seconds (`stop_grace_period`); with Docker's default of 10 seconds a run still in flight would be killed before it is requeued, stay `RUNNING` until recovery finds its expired lease, and lose one retry attempt.
 
 Operational signal:
 

@@ -93,6 +93,8 @@ When the app is running:
 - Swagger UI: [http://localhost:18080/swagger-ui.html](http://localhost:18080/swagger-ui.html)
 - OpenAPI JSON: [http://localhost:18080/v3/api-docs](http://localhost:18080/v3/api-docs)
 
+The OpenAPI document declares HTTP Basic, so **Authorize** in Swagger UI takes a username and password and sends them with every call. Outside `local` and `test` both pages and every API call require them.
+
 Current public endpoints:
 
 ```text
@@ -226,7 +228,7 @@ docker compose down -v
 The `demo` profile is the fastest way to show every lifecycle stage and the real HTTP provider path without any external service. Compared with `local`:
 
 - Security is the same protected HTTP Basic chain as production. Two well-known users exist only under this profile: `demo-reader` / `demo-reader-pw` (role `READ`, read-only) and `demo-operator` / `demo-operator-pw` (role `OPERATOR`, mutations and sync).
-- `HttpChainProvider` is active and points at a bundled in-process simulator under `/simulator`, so an operator sync exercises the real HTTP provider path, per-address cursor checkpoints, and outbox publishing end to end. The simulator returns one `CONFIRMED` event per watched address on the first fetch and an empty page afterwards.
+- `HttpChainProvider` is active and points at a bundled in-process simulator under `/simulator`, so an operator sync exercises the real HTTP provider path, per-address cursor checkpoints, and outbox publishing end to end. The simulator returns one `CONFIRMED` event per watched address on the first fetch and an empty page afterwards. Only `demo` opens `/simulator` without credentials; the other protected profiles serve no simulator and require authentication on that path like on any other.
 - `DemoDataSeeder` seeds an idempotent dataset on startup: one account and watched address, observed transactions in `SEEN`, `CONFIRMED`, and `REVERTED`, outbox rows in `NEW`, `PUBLISHED`, `FAILED`, and `DEAD`, and a stale `STARTED` sync run for the recovery job to abandon. Restarts do not duplicate rows.
 - Schedulers stay on, so the outbox poller, the sync worker, and the recovery job run live.
 
@@ -305,6 +307,15 @@ Check the app:
 curl -s http://localhost:18081/actuator/health
 ```
 
+Compose publishes the API and PostgreSQL on `127.0.0.1` only, because the default `local` profile has no authentication and the database password is a well-known default. To reach the API from another machine, for example during a remote demo, set `ASSET_SYNC_HTTP_BIND_ADDRESS=0.0.0.0` together with a protected profile, never with `local`. The `demo` users have public passwords, so expose `demo` on a trusted network only. PostgreSQL stays on loopback either way.
+
+```bash
+SPRING_PROFILES_ACTIVE=demo ASSET_SYNC_HTTP_BIND_ADDRESS=0.0.0.0 ASSET_SYNC_DB_PORT=55433 ASSET_SYNC_HTTP_PORT=18081 \
+docker compose up --build -d
+```
+
+The application container has a 40-second stop grace period, longer than the 30-second graceful-shutdown phase, so `docker compose stop` lets in-flight sync runs finish or requeue before Docker kills the process.
+
 Stop containers:
 
 ```bash
@@ -363,7 +374,7 @@ Runtime configuration:
 | `ASSET_SYNC_WORKER_MAX_IN_FLIGHT_RUNS` | `1000` | Soft cap for `QUEUED + RUNNING` sync runs |
 | `ASSET_SYNC_WORKER_SHUTDOWN_TIMEOUT` | `20s` | How long a shutdown waits for in-flight sync runs before interrupting them |
 | `ASSET_SYNC_SHUTDOWN_PHASE_TIMEOUT` | `30s` | Upper bound for one graceful-shutdown phase; the web server and the sync worker drain concurrently within it |
-| `ASSET_SYNC_WORKER_FIXED_DELAY` | `5s` | Delay between worker claim ticks |
+| `ASSET_SYNC_WORKER_FIXED_DELAY` | `5s` | Delay between worker claim ticks; also the `Retry-After` of a `429 sync-queue-full` response |
 | `ASSET_SYNC_WORKER_INITIAL_DELAY` | `10s` | Initial delay before the first worker claim |
 | `ASSET_SYNC_WORKER_RETRY_BACKOFF_BASE_DELAY` | `30s` | Base delay of the jittered retry backoff for failed sync runs |
 | `ASSET_SYNC_WORKER_RETRY_BACKOFF_MAX_DELAY` | `15m` | Maximum retry backoff; also caps a provider `Retry-After` |
@@ -443,7 +454,7 @@ A page fetch under `alchemy` asks for the latest block and the finality frontier
 - Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere; the Alchemy indicator shows the auth mode, the probed networks, and the state, never an endpoint or the key.
 - Structured logs include account, watched-address, transaction, sync-run, provider, and outbox identifiers.
 - Micrometer meters cover observed event ingestion, transaction transitions, immutable conflicts, sync runs and continuations, provider fetches, latency and pages, cursor leases and checkpoints, outbox batches, events, backlog, dead-letter count, scheduler tick failures, and the Alchemy adapter's JSON-RPC calls, latency, one-block fallbacks, and skipped rows.
-- `local` and `test` profiles permit all endpoints. Other profiles enable HTTP Basic for API, Swagger, and Actuator endpoints except health probes; their `401` and `403` responses use the same `ProblemDetail` format as API errors, and `401` keeps the `WWW-Authenticate: Basic` challenge.
+- `local` and `test` profiles permit all endpoints. Other profiles enable HTTP Basic for API, Swagger, and Actuator endpoints except health probes; their `401` and `403` responses use the same `ProblemDetail` format as API errors, and `401` keeps the `WWW-Authenticate: Basic` challenge. A request that the security firewall rejects before authentication, for example one with `//` or `;` in its path, gets `400` in every profile, not a challenge.
 
 ## Testing
 

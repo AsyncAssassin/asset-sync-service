@@ -14,6 +14,7 @@ import com.example.assetsync.application.transaction.ObservedTransactionConflict
 import com.example.assetsync.application.transaction.WatchedAddressNotFoundException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
+import java.time.Duration
 import org.springframework.dao.DataAccessException
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.http.HttpHeaders
@@ -323,6 +324,9 @@ class ApiExceptionHandler {
             detail = "Too many sync runs are queued or running; retry shortly.",
             request = request,
             properties = mapOf("maxInFlightRuns" to exception.maxInFlightRuns),
+            headers = HttpHeaders().apply {
+                set(HttpHeaders.RETRY_AFTER, exception.retryAfter.toRetryAfterSeconds().toString())
+            },
         )
 
     @ExceptionHandler(DataIntegrityViolationException::class)
@@ -407,6 +411,10 @@ class ApiExceptionHandler {
 
     private fun FieldError.toErrorMessage(): String =
         "$field: ${defaultMessage ?: "invalid value"}"
+
+    // Retry-After takes whole seconds; round up so a sub-second delay never advertises zero.
+    private fun Duration.toRetryAfterSeconds(): Long =
+        maxOf(1L, toSeconds() + if (toNanosPart() > 0) 1 else 0)
 
     private fun problem(
         status: HttpStatus,

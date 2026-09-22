@@ -3,6 +3,7 @@ package com.example.assetsync.e2e
 import com.example.assetsync.TestcontainersConfiguration
 import com.example.assetsync.application.sync.SyncApplicationService
 import com.example.assetsync.application.sync.SyncRunLifecycleService
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
@@ -50,6 +51,7 @@ class RealBootE2ETests(
     @Autowired private val passwordEncoder: PasswordEncoder,
     @Autowired private val syncRunLifecycleService: SyncRunLifecycleService,
     @Autowired private val syncApplicationService: SyncApplicationService,
+    @Autowired private val objectMapper: ObjectMapper,
 ) {
 
     @BeforeEach
@@ -130,6 +132,21 @@ class RealBootE2ETests(
         val prometheus = operator().getForEntity("/actuator/prometheus", String::class.java)
         assertEquals(HttpStatus.OK, prometheus.statusCode)
         assertTrue(prometheus.body?.contains("asset_sync") == true)
+    }
+
+    @Test
+    fun `openapi declares http basic so swagger ui offers authorize`() {
+        val apiDocs = reader().getForEntity("/v3/api-docs", String::class.java)
+        assertEquals(HttpStatus.OK, apiDocs.statusCode, "unexpected api-docs response: ${apiDocs.body}")
+
+        val document = objectMapper.readTree(apiDocs.body)
+        val scheme = document.path("components").path("securitySchemes").path("basicAuth")
+        assertEquals("http", scheme.path("type").asText(), "api-docs: ${apiDocs.body}")
+        assertEquals("basic", scheme.path("scheme").asText(), "api-docs: ${apiDocs.body}")
+        assertTrue(
+            document.path("security").any { it.has("basicAuth") },
+            "HTTP Basic must be the global requirement: ${document.path("security")}",
+        )
     }
 
     private fun operator() = restTemplate.withBasicAuth("e2e-operator", "operator-pw")

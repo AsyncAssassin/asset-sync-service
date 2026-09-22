@@ -2,10 +2,12 @@ package com.example.assetsync.config
 
 import com.example.assetsync.api.error.ProblemDetailAccessDeniedHandler
 import com.example.assetsync.api.error.ProblemDetailAuthenticationEntryPoint
+import jakarta.servlet.DispatcherType
 import javax.sql.DataSource
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Profile
+import org.springframework.core.env.Environment
 import org.springframework.http.HttpMethod
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity
@@ -32,7 +34,11 @@ class SecurityConfiguration {
     /**
      * Every non-local/test profile (demo, e2e, prod): HTTP Basic against the DB-backed user store,
      * with role-scoped access. Reads need READ or OPERATOR; mutations need OPERATOR. Health probes
-     * stay open; the simulator path is open because it is a demo-only in-process aid (absent in prod).
+     * stay open. The simulator path is open only under `demo`, the one profile that serves the
+     * in-process simulator; elsewhere it falls through to the authenticated default.
+     * Error dispatches are permitted so a status the container renders through `/error`, such as
+     * the 400 for a request StrictHttpFirewall rejected before authentication, is not replaced by
+     * a 401 challenge; a direct request to `/error` still needs credentials.
      * CSRF is disabled deliberately — this is a stateless API with no browser session/cookie auth.
      * 401 and 403 are written as ProblemDetail by the entry point and access-denied handler from
      * `api.error`, so security failures share the error shape of the API layer.
@@ -43,18 +49,23 @@ class SecurityConfiguration {
         http: HttpSecurity,
         authenticationEntryPoint: ProblemDetailAuthenticationEntryPoint,
         accessDeniedHandler: ProblemDetailAccessDeniedHandler,
+        environment: Environment,
     ): SecurityFilterChain =
         http
             .csrf { it.disable() }
             .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
             .authorizeHttpRequests {
                 it
+                    .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                     .requestMatchers(
                         "/actuator/health",
                         "/actuator/health/liveness",
                         "/actuator/health/readiness",
                     ).permitAll()
-                    .requestMatchers("/simulator/**").permitAll()
+                if (environment.matchesProfiles("demo")) {
+                    it.requestMatchers("/simulator/**").permitAll()
+                }
+                it
                     .requestMatchers(HttpMethod.GET, "/api/**").hasAnyRole("READ", "OPERATOR")
                     // Any mutating method (POST/PUT/PATCH/DELETE) on the API requires OPERATOR.
                     .requestMatchers("/api/**").hasRole("OPERATOR")
