@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Security
+
+- `prod` refuses to start together with `demo`, `local`, or `test`. With `prod,demo` on a fresh database, the demo seeder wrote its users with public passwords after the demo-user guard had already looked, so `demo-operator` could change data until the next restart. The new guard runs before any bean is created and names the active profiles. The demo seeder, the chain simulator, and the open `/simulator` path also require `demo` without `prod`.
+- The demo-user guard covers every protected profile, not only `prod`: `e2e` and custom profiles such as `staging` refuse a database that holds the demo users as well.
+
 ## [0.4.0] - 2026-09-23
 
 ### Added

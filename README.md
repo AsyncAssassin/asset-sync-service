@@ -339,7 +339,7 @@ Database configuration for the `local` profile:
 | `ASSET_SYNC_DB_MAX_POOL_SIZE` | `10` | Hikari max pool size |
 | `ASSET_SYNC_DB_MIN_IDLE` | `1` | Hikari minimum idle connections |
 
-The `prod` profile takes the datasource only from `ASSET_SYNC_DB_URL`, `ASSET_SYNC_DB_USER`, and `ASSET_SYNC_DB_PASSWORD`, with no defaults, and provisions its operator account from `ASSET_SYNC_ADMIN_USERNAME` and `ASSET_SYNC_ADMIN_PASSWORD`. It refuses to start on a database whose user store holds the `demo` users.
+The `prod` profile takes the datasource only from `ASSET_SYNC_DB_URL`, `ASSET_SYNC_DB_USER`, and `ASSET_SYNC_DB_PASSWORD`, with no defaults, and provisions its operator account from `ASSET_SYNC_ADMIN_USERNAME` and `ASSET_SYNC_ADMIN_PASSWORD`. It refuses to start on a database whose user store holds the `demo` users, as every protected profile does, and it cannot be combined with `demo`, `local`, or `test`: the process stops before any bean is created and names the active profiles.
 
 Runtime configuration:
 
