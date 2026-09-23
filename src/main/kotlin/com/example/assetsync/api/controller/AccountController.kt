@@ -38,7 +38,7 @@ class AccountController(
     @ApiResponse(
         responseCode = "201",
         description = "The account was created.",
-        headers = [Header(name = HttpHeaders.LOCATION, description = "The URL of the new account.", schema = Schema(type = "string", format = "uri-reference"))],
+        headers = [Header(name = HttpHeaders.LOCATION, required = true, description = "The URL of the new account.", schema = Schema(type = "string", format = "uri-reference"))],
     )
     fun createAccount(
         @Valid @RequestBody request: CreateAccountRequest,

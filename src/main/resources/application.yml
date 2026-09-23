@@ -68,15 +68,16 @@ management:
 
 springdoc:
   # Deliberately enabled in every profile: non-local profiles put both endpoints behind HTTP Basic.
-  # The API only: the demo simulator stands in for the bridge and is not part of it.
-  paths-to-match: /api/**
-  default-produces-media-type: application/json
   api-docs:
     path: /v3/api-docs
     enabled: true
   swagger-ui:
     path: /swagger-ui.html
     enabled: true
+  # The API only: the demo simulator stands in for the bridge and is not part of it. The API
+  # answers in JSON, which the document states instead of springdoc's default */*.
+  paths-to-match: /api/**
+  default-produces-media-type: application/json
 
 asset-sync:
   provider:

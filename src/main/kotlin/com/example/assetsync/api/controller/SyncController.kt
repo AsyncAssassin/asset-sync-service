@@ -26,7 +26,7 @@ class SyncController(
     @ApiResponse(
         responseCode = "202",
         description = "The sync run is queued or already in flight; poll it at Location.",
-        headers = [Header(name = HttpHeaders.LOCATION, description = "The URL of the sync run.", schema = Schema(type = "string", format = "uri-reference"))],
+        headers = [Header(name = HttpHeaders.LOCATION, required = true, description = "The URL of the sync run.", schema = Schema(type = "string", format = "uri-reference"))],
     )
     fun syncAddress(
         @PathVariable addressId: UUID,
@@ -42,7 +42,7 @@ class SyncController(
     @ApiResponse(
         responseCode = "202",
         description = "The sync run is queued or already in flight; poll it at Location.",
-        headers = [Header(name = HttpHeaders.LOCATION, description = "The URL of the sync run.", schema = Schema(type = "string", format = "uri-reference"))],
+        headers = [Header(name = HttpHeaders.LOCATION, required = true, description = "The URL of the sync run.", schema = Schema(type = "string", format = "uri-reference"))],
     )
     fun syncAccount(
         @PathVariable accountId: UUID,

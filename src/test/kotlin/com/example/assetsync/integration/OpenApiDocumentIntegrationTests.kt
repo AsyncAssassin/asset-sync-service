@@ -67,8 +67,10 @@ class OpenApiDocumentIntegrationTests(
             paths.path("/api/v1/addresses/{addressId}/sync").path("post").path("responses").path("202"),
             paths.path("/api/v1/accounts/{accountId}/sync").path("post").path("responses").path("202"),
         ).forEach { response ->
-            // A relative reference, as the controllers send it.
-            assertEquals("uri-reference", response.path("headers").path(HttpHeaders.LOCATION).path("schema").path("format").asText(), response.toString())
+            // Always sent, as a relative reference.
+            val location = response.path("headers").path(HttpHeaders.LOCATION)
+            assertTrue(location.path("required").asBoolean(), response.toString())
+            assertEquals("uri-reference", location.path("schema").path("format").asText(), response.toString())
         }
     }
 
