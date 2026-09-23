@@ -65,6 +65,9 @@ class ObservedEventApiIntegrationTests(
         assertEquals(1, tableCount("outbox_events"))
         assertEquals("TRANSACTION_SEEN", singleString("SELECT event_type FROM outbox_events"))
         assertEquals(transactionId, singleString("SELECT payload ->> 'transactionId' FROM outbox_events"))
+        // The test profile authenticates nobody, so the API caller is recorded as anonymous.
+        assertEquals("rest:anonymous", singleString("SELECT source FROM observed_transactions"))
+        assertEquals("rest:anonymous", singleString("SELECT payload ->> 'source' FROM outbox_events"))
     }
 
     @Test

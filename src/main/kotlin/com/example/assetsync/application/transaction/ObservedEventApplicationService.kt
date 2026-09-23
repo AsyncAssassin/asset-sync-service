@@ -59,6 +59,7 @@ class ObservedEventApplicationService(
                 watchedAddress = watchedAddress,
                 incoming = incoming,
                 requiredConfirmations = chainConfig.requiredConfirmations,
+                source = command.source,
             )
         } else {
             evaluateExisting(
@@ -66,6 +67,7 @@ class ObservedEventApplicationService(
                 current = current,
                 incoming = incoming,
                 requiredConfirmations = chainConfig.requiredConfirmations,
+                source = command.source,
             )
         }
     }
@@ -74,6 +76,7 @@ class ObservedEventApplicationService(
         watchedAddress: WatchedAddress,
         incoming: IncomingObservedTransaction,
         requiredConfirmations: Int,
+        source: String,
     ): ObservedEventIngestionResult {
         val transition = stateMachine.evaluate(
             current = null,
@@ -100,6 +103,7 @@ class ObservedEventApplicationService(
                 version = 0,
                 createdAt = now,
                 updatedAt = now,
+                source = source,
             ),
         )
 
@@ -121,6 +125,7 @@ class ObservedEventApplicationService(
                 current = existing,
                 incoming = incoming,
                 requiredConfirmations = requiredConfirmations,
+                source = source,
             )
         }
 
@@ -137,6 +142,7 @@ class ObservedEventApplicationService(
         current: ObservedTransaction,
         incoming: IncomingObservedTransaction,
         requiredConfirmations: Int,
+        source: String,
     ): ObservedEventIngestionResult {
         val transition = stateMachine.evaluate(
             current = current.toCurrentSnapshot(),
@@ -195,6 +201,7 @@ class ObservedEventApplicationService(
                 revertedAt = current.revertedAt ?: transition.state.revertedAt(now),
                 version = current.version + 1,
                 updatedAt = now,
+                source = source,
             ),
         )
 
@@ -354,6 +361,7 @@ class ObservedEventApplicationService(
                 status = status.name,
                 confirmations = confirmations,
                 blockHeight = blockHeight,
+                source = source,
             ),
             createdAt = occurredAt,
             updatedAt = occurredAt,

@@ -1,0 +1,22 @@
+databaseChangeLog:
+  - changeSet:
+      id: 016-add-observed-transaction-source
+      author: AsyncAssassin
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            # Who made the last lifecycle change: rest:<user> or provider:<type>. Nullable, because
+            # rows written before this changeset have no recorded source. The length check is
+            # added NOT VALID and validated at once, like changeset 012.
+            sql: |
+              ALTER TABLE observed_transactions
+                  ADD COLUMN source text;
+
+              ALTER TABLE observed_transactions
+                  ADD CONSTRAINT ck_observed_transactions_source_length
+                      CHECK (char_length(source) <= 128) NOT VALID;
+
+              ALTER TABLE observed_transactions
+                  VALIDATE CONSTRAINT ck_observed_transactions_source_length;

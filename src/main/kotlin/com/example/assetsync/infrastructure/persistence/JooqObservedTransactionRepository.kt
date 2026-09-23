@@ -39,6 +39,7 @@ class JooqObservedTransactionRepository(
                 OBSERVED_TRANSACTIONS.VERSION,
                 OBSERVED_TRANSACTIONS.CREATED_AT,
                 OBSERVED_TRANSACTIONS.UPDATED_AT,
+                OBSERVED_TRANSACTIONS.SOURCE,
             )
             .from(OBSERVED_TRANSACTIONS)
             .where(OBSERVED_TRANSACTIONS.CHAIN_ID.eq(key.chainId))
@@ -71,6 +72,7 @@ class JooqObservedTransactionRepository(
             .set(OBSERVED_TRANSACTIONS.VERSION, transaction.version)
             .set(OBSERVED_TRANSACTIONS.CREATED_AT, transaction.createdAt.toOffsetDateTime())
             .set(OBSERVED_TRANSACTIONS.UPDATED_AT, transaction.updatedAt.toOffsetDateTime())
+            .set(OBSERVED_TRANSACTIONS.SOURCE, transaction.source)
             .onConflict(
                 OBSERVED_TRANSACTIONS.CHAIN_ID,
                 OBSERVED_TRANSACTIONS.TX_HASH,
@@ -99,6 +101,7 @@ class JooqObservedTransactionRepository(
                 OBSERVED_TRANSACTIONS.VERSION,
                 OBSERVED_TRANSACTIONS.CREATED_AT,
                 OBSERVED_TRANSACTIONS.UPDATED_AT,
+                OBSERVED_TRANSACTIONS.SOURCE,
             )
             .fetchOne { it.toObservedTransaction() }
 
@@ -114,6 +117,7 @@ class JooqObservedTransactionRepository(
                 .set(OBSERVED_TRANSACTIONS.REVERTED_AT, update.revertedAt?.toOffsetDateTime())
                 .set(OBSERVED_TRANSACTIONS.VERSION, update.version)
                 .set(OBSERVED_TRANSACTIONS.UPDATED_AT, update.updatedAt.toOffsetDateTime())
+                .set(OBSERVED_TRANSACTIONS.SOURCE, update.source)
                 .where(OBSERVED_TRANSACTIONS.ID.eq(update.id))
                 .returningResult(
                     OBSERVED_TRANSACTIONS.ID,
@@ -135,6 +139,7 @@ class JooqObservedTransactionRepository(
                     OBSERVED_TRANSACTIONS.VERSION,
                     OBSERVED_TRANSACTIONS.CREATED_AT,
                     OBSERVED_TRANSACTIONS.UPDATED_AT,
+                    OBSERVED_TRANSACTIONS.SOURCE,
                 )
                 .fetchOne { it.toObservedTransaction() },
         ) { "Observed transaction ${update.id} was not found for lifecycle update." }
@@ -160,5 +165,6 @@ class JooqObservedTransactionRepository(
             version = requireNotNull(get(OBSERVED_TRANSACTIONS.VERSION)),
             createdAt = requireNotNull(get(OBSERVED_TRANSACTIONS.CREATED_AT)).toInstant(),
             updatedAt = requireNotNull(get(OBSERVED_TRANSACTIONS.UPDATED_AT)).toInstant(),
+            source = get(OBSERVED_TRANSACTIONS.SOURCE),
         )
 }

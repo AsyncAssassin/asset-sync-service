@@ -15,12 +15,16 @@ import org.springframework.security.provisioning.UserDetailsManager
 import org.springframework.stereotype.Component
 import org.springframework.transaction.annotation.Transactional
 
+internal const val DEMO_READER_USERNAME = "demo-reader"
+internal const val DEMO_OPERATOR_USERNAME = "demo-operator"
+
 /**
  * Seeds a deterministic, idempotent demo dataset under the `demo` profile so every lifecycle stage
  * and failure mode is observable in a running instance: transactions in SEEN/CONFIRMED/REVERTED,
  * outbox rows in NEW/PUBLISHED/FAILED/DEAD, and a stale STARTED sync run for the recovery sweeper to
  * pick up. Fixed UUIDs + `ON CONFLICT DO NOTHING` make re-runs on restart a no-op. Demo credentials
- * are intentionally well-known and exist only under this profile.
+ * are intentionally well-known and stay in the database the demo ran on; `ProdDemoUserGuard` keeps
+ * the prod profile from starting on such a database.
  */
 @Component
 @Profile("demo")
@@ -35,10 +39,10 @@ class DemoDataSeeder(
 
     @Transactional
     override fun run(args: ApplicationArguments?) {
-        seedUser("demo-reader", "demo-reader-pw", "READ")
-        seedUser("demo-operator", "demo-operator-pw", "OPERATOR")
+        seedUser(DEMO_READER_USERNAME, "demo-reader-pw", "READ")
+        seedUser(DEMO_OPERATOR_USERNAME, "demo-operator-pw", "OPERATOR")
         seedDomain()
-        logger.info("demo_data_seeded account={} users=[demo-reader, demo-operator]", ACCOUNT_ID)
+        logger.info("demo_data_seeded account={} users=[{}, {}]", ACCOUNT_ID, DEMO_READER_USERNAME, DEMO_OPERATOR_USERNAME)
     }
 
     private fun seedUser(username: String, password: String, role: String) {

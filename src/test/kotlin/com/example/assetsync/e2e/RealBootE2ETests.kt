@@ -74,6 +74,7 @@ class RealBootE2ETests(
         assertEquals(HttpStatus.OK, readerHealth.statusCode)
         assertTrue(readerHealth.body?.contains("\"db\"") == true, "authenticated health must expose the db component")
         assertTrue(readerHealth.body?.contains("httpChainProvider") == true, "authenticated health must include the HTTP provider indicator")
+        assertTrue(readerHealth.body?.contains("diskSpace") != true, "health must not reveal the working directory: ${readerHealth.body}")
 
         // 2) Unauthenticated API access is rejected — and the 401 still carries the request id,
         //    proving RequestIdFilter runs before the security chain (N10).
@@ -128,6 +129,23 @@ class RealBootE2ETests(
         assertEquals("SUCCEEDED", syncRunStatus(sync.body!!["id"] as String))
         assertEquals(1, jdbcTemplate.queryForObject("SELECT count(*) FROM observed_transactions", Int::class.java))
         assertEquals(1, jdbcTemplate.queryForObject("SELECT count(*) FROM outbox_events", Int::class.java))
+        assertEquals("provider:http", jdbcTemplate.queryForObject("SELECT source FROM observed_transactions", String::class.java))
+        assertEquals("provider:http", jdbcTemplate.queryForObject("SELECT payload ->> 'source' FROM outbox_events", String::class.java))
+
+        // 5b) An event reported through the API records the authenticated caller as its source.
+        val reported = operator().postForEntity(
+            "/api/v1/observed-events",
+            json(
+                """{"chainId":"local-evm","txHash":"0xe2e-reported","eventIndex":0,"address":"0xe2eaddr","asset":"USDC",
+                "amount":"2.5","blockHeight":1001,"confirmations":1,"direction":"INBOUND","status":"SEEN"}""",
+            ),
+            Map::class.java,
+        )
+        assertEquals(HttpStatus.CREATED, reported.statusCode)
+        assertEquals(
+            "rest:e2e-operator",
+            jdbcTemplate.queryForObject("SELECT source FROM observed_transactions WHERE tx_hash = '0xe2e-reported'", String::class.java),
+        )
 
         // 6) Prometheus is served by Boot's autoconfig endpoint and exposes application meters.
         val prometheus = operator().getForEntity("/actuator/prometheus", String::class.java)

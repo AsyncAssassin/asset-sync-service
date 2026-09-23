@@ -46,6 +46,8 @@ class HttpChainProvider @Autowired constructor(
         syncProperties = SyncProperties(),
     )
 
+    override val providerName: String = "http"
+
     private val logger = LoggerFactory.getLogger(HttpChainProvider::class.java)
 
     @Volatile

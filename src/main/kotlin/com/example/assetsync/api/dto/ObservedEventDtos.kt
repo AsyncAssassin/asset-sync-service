@@ -70,7 +70,7 @@ data class ObservedEventResponse(
     val outboxEvents: List<String>,
 )
 
-fun IngestObservedEventRequest.toCommand(): IngestObservedEventCommand =
+fun IngestObservedEventRequest.toCommand(source: String): IngestObservedEventCommand =
     IngestObservedEventCommand(
         chainId = chainId,
         txHash = txHash,
@@ -85,6 +85,7 @@ fun IngestObservedEventRequest.toCommand(): IngestObservedEventCommand =
         confirmations = confirmations ?: throw InvalidObservedEventRequestException("confirmations is required."),
         direction = parseEnum<Direction>("direction", direction),
         status = parseEnum<TransactionStatus>("status", status),
+        source = source,
     )
 
 fun ObservedEventIngestionResult.toResponse(): ObservedEventResponse =

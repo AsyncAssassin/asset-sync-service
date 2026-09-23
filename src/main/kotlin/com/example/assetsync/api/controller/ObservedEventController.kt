@@ -7,6 +7,7 @@ import com.example.assetsync.api.dto.toResponse
 import com.example.assetsync.application.transaction.ObservedEventApplicationService
 import com.example.assetsync.domain.model.TransitionOutcome
 import jakarta.validation.Valid
+import java.security.Principal
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.PostMapping
@@ -20,11 +21,17 @@ class ObservedEventController(
     private val observedEventApplicationService: ObservedEventApplicationService,
 ) {
 
+    /**
+     * The caller is recorded as the `rest:<user>` source of the change, so an event reported
+     * through the API stays distinguishable from provider data. `local` and `test` authenticate
+     * nobody and record `rest:anonymous`.
+     */
     @PostMapping
     fun ingestObservedEvent(
         @Valid @RequestBody request: IngestObservedEventRequest,
+        principal: Principal?,
     ): ResponseEntity<ObservedEventResponse> {
-        val result = observedEventApplicationService.ingest(request.toCommand())
+        val result = observedEventApplicationService.ingest(request.toCommand(source = "rest:${principal?.name ?: "anonymous"}"))
         val status = if (result.result == TransitionOutcome.CREATED) {
             HttpStatus.CREATED
         } else {

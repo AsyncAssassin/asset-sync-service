@@ -10,6 +10,7 @@ All notable changes to this project are documented in this file. The format is b
 - The OpenAPI document declares HTTP Basic as the global security requirement, so Swagger UI offers **Authorize** and can switch between the `READ` and `OPERATOR` users.
 - `PATCH /api/v1/addresses/{addressId}` for `OPERATOR` sets a watched address `ACTIVE` or `DISABLED`. A disabled address is skipped by account sync, refused by address sync and event ingestion, and resumes from its stored cursor once enabled again.
 - HTTP bridge requests carry the address's durable checkpoint as `fromBlockHeight` and `fromEventIndex`, and the bridge page contract is documented in `docs/architecture.md`.
+- Observed transactions record the source of their last lifecycle change in the new `source` column (changeset 016), and outbox payloads and their published log lines carry the source of each event: `rest:<user>` for `POST /api/v1/observed-events`, `provider:<http|alchemy|fake>` for a sync.
 
 ### Changed
 
@@ -36,6 +37,10 @@ All notable changes to this project are documented in this file. The format is b
 - Docker Compose publishes the API and PostgreSQL on `127.0.0.1` only. `ASSET_SYNC_HTTP_BIND_ADDRESS` opens the API port to other machines, for use with a protected profile; PostgreSQL stays on loopback.
 - The protected security chain opens `/simulator/**` only under `demo`. In `prod` and `e2e`, which serve no simulator, the path requires authentication.
 - Addresses and transaction hashes with control characters are rejected on every chain, so they can no longer forge log lines.
+- The `prod` profile refuses to start on a database whose user store holds the `demo` users, whose passwords are public, and its message names the SQL that removes them; it never changes the data itself.
+- A sync run's `lastError` no longer quotes SQL: a database failure is stored as its class, for example `Database error (DataIntegrityViolationException).`, other unexpected failures as `Unexpected error (<class>).`, and the full exception goes to the log.
+- The disk-space health indicator is off, because its details showed the working directory's absolute path to every `READ` user.
+- The documentation explains why CSRF protection is off and what a browser that caches Basic credentials exposes.
 
 ## [0.3.0] - 2026-09-23
 

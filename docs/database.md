@@ -41,6 +41,7 @@ src/main/resources/db/changelog
     013-async-sync-runs.yaml
     014-provider-pagination-cursors.yaml
     015-add-asset-configs.yaml
+    016-add-observed-transaction-source.yaml
 ```
 
 Changelog rules:
@@ -75,6 +76,7 @@ HAVING count(*) > 1;
 
 Drain, fail, or explicitly accept any legacy `STARTED` rows before enabling the worker. The worker processes only `QUEUED/RUNNING`; legacy stale-`STARTED` recovery remains separate.
 - Changeset `014` adds per-address `sync_cursors` and separates retry budget from worker claim count. Existing watched addresses receive one cursor row with null provider cursor and `{}` checkpoint. Existing `sync_runs.attempts` remains a total claim diagnostic; retry budget is backfilled into `failure_attempts`.
+- Changeset `016` adds the nullable `observed_transactions.source` (the source of the row's last lifecycle change: `rest:<user>` or `provider:<type>`) with a 128-character check added `NOT VALID` and validated at once. Existing rows keep `NULL`, which means the source was not recorded; the column is added without a default, so no row is rewritten.
 - Changeset `015` adds the `asset_configs` registry keyed by `(chain_id, asset)`, upserts the `eth-sepolia` (enabled, `required_confirmations=1`) and `eth-mainnet` (disabled, `required_confirmations=12`) chain configs, and seeds `USDC` for `local-evm` (deterministic fake contract `0x000000000000000000000000000000000000f001`, decimals 18), `eth-sepolia` (Circle contract, decimals 6, enabled), and `eth-mainnet` (Circle contract, decimals 6, disabled). All seeds use insert-or-update semantics. Registration validation protects only new rows: before pointing a real provider at an existing database, run the rollout preflight below and seed or disable whatever it returns; it must come back empty. With `asset-sync.provider.type=alchemy` the service runs the same check at startup, together with a mapping check for every enabled chain that has enabled asset configs, and refuses to start while either returns rows; the seeded `local-evm` chain has no Alchemy network, so disable it (`UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm'`) before the first Alchemy boot.
 
 ```sql
@@ -282,6 +284,7 @@ Key columns:
 | `version` | `bigint` | no | Diagnostic version, default `0` |
 | `created_at` | `timestamptz` | no | Creation timestamp |
 | `updated_at` | `timestamptz` | no | Last update timestamp |
+| `source` | `text` | yes | Source of the last lifecycle change: `rest:<user>` (`rest:anonymous` where nobody authenticates) or `provider:<http\|alchemy\|fake>`; `NULL` for rows written before changeset `016` and for rows the demo seeder inserts directly |
 
 Constraints and indexes:
 

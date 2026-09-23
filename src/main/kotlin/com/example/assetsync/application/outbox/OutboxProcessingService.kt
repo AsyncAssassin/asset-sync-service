@@ -110,7 +110,7 @@ class OutboxProcessingService(
                 if (marked) {
                     metrics.recordOutboxEventPublished(event.eventType)
                     logger.info(
-                        "outbox_event_publish_succeeded outboxEventId={} eventType={} transactionId={} chainId={} address={} asset={} txHash={} eventIndex={} transactionStatus={} outboxStatus={} attempts={}",
+                        "outbox_event_publish_succeeded outboxEventId={} eventType={} transactionId={} chainId={} address={} asset={} txHash={} eventIndex={} transactionStatus={} source={} outboxStatus={} attempts={}",
                         event.id,
                         event.eventType,
                         logFields.transactionId,
@@ -120,6 +120,7 @@ class OutboxProcessingService(
                         logFields.txHash,
                         logFields.eventIndex,
                         logFields.transactionStatus,
+                        logFields.source,
                         OutboxStatus.PUBLISHED,
                         event.attempts,
                     )

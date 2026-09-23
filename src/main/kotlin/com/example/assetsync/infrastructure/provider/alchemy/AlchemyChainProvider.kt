@@ -56,6 +56,8 @@ class AlchemyChainProvider(
     private val metrics: AssetSyncMetrics? = null,
 ) : ChainProviderPort {
 
+    override val providerName: String = "alchemy"
+
     private val logger = LoggerFactory.getLogger(AlchemyChainProvider::class.java)
     private val scrubber = AlchemySecretScrubber(properties.apiKey)
     private val finalityFallbackWarned: MutableSet<String> = ConcurrentHashMap.newKeySet()

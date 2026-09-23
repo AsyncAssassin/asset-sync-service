@@ -27,6 +27,7 @@ import org.springframework.boot.test.web.client.TestRestTemplate
 import org.springframework.context.ApplicationContext
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
+import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
@@ -129,32 +130,64 @@ class ProdProfileBootIntegrationTests(
     @Test
     fun `http provider type still requires the base url`() {
         val thrown = assertFailsWith<Throwable> {
-            SpringApplicationBuilder(AssetSyncServiceApplication::class.java)
-                .profiles("prod")
-                .run(
-                    "--server.port=0",
-                    "--spring.main.banner-mode=off",
-                    "--spring.datasource.url=${postgres.jdbcUrl}",
-                    "--spring.datasource.username=${postgres.username}",
-                    "--spring.datasource.password=${postgres.password}",
-                    "--spring.liquibase.url=${postgres.jdbcUrl}",
-                    "--spring.liquibase.user=${postgres.username}",
-                    "--spring.liquibase.password=${postgres.password}",
-                    "--ASSET_SYNC_ADMIN_USERNAME=prod-admin",
-                    "--ASSET_SYNC_ADMIN_PASSWORD=prod-admin-pw",
-                    "--asset-sync.outbox.scheduler.enabled=false",
-                    "--asset-sync.outbox.retention.enabled=false",
-                    "--asset-sync.sync.recovery.enabled=false",
-                    "--asset-sync.sync.worker.enabled=false",
-                    "--asset-sync.provider.type=http",
-                    "--asset-sync.provider.base-url=",
-                )
-                .close()
+            bootProd("--asset-sync.provider.type=http", "--asset-sync.provider.base-url=")
         }
 
         val cause = generateSequence(thrown) { it.cause }
             .firstOrNull { it.message?.contains("asset-sync.provider.base-url must be set") == true }
         assertNotNull(cause, "expected the base-url requirement in the failure chain of: $thrown")
+    }
+
+    @Test
+    fun `prod refuses to start on a database that holds the demo users`() {
+        // A database the demo profile once ran on: its public demo users sit in the same table.
+        val jdbcTemplate = context.getBean(JdbcTemplate::class.java)
+        listOf("demo-reader" to "ROLE_READ", "demo-operator" to "ROLE_OPERATOR").forEach { (username, authority) ->
+            jdbcTemplate.update("INSERT INTO users (username, password, enabled) VALUES (?, ?, true)", username, "{noop}public")
+            jdbcTemplate.update("INSERT INTO authorities (username, authority) VALUES (?, ?)", username, authority)
+        }
+        try {
+            val thrown = assertFailsWith<Throwable> {
+                bootProd("--asset-sync.provider.base-url=http://localhost:1")
+            }
+
+            val cause = generateSequence(thrown) { it.cause }
+                .firstOrNull { it.message?.contains("found the demo users [demo-operator, demo-reader]") == true }
+            assertNotNull(cause, "expected the demo-user guard in the failure chain of: $thrown")
+            assertTrue(
+                cause.message!!.contains("DELETE FROM users WHERE username IN ('demo-operator', 'demo-reader');"),
+                cause.message,
+            )
+            // The guard never touches the data: the operator decides.
+            assertEquals(2, jdbcTemplate.queryForObject("SELECT count(*) FROM users WHERE username LIKE 'demo-%'", Int::class.java))
+        } finally {
+            jdbcTemplate.update("DELETE FROM authorities WHERE username IN ('demo-reader', 'demo-operator')")
+            jdbcTemplate.update("DELETE FROM users WHERE username IN ('demo-reader', 'demo-operator')")
+        }
+    }
+
+    /** Boots a second prod context against the same database and closes it at once. */
+    private fun bootProd(vararg extraArgs: String) {
+        SpringApplicationBuilder(AssetSyncServiceApplication::class.java)
+            .profiles("prod")
+            .run(
+                "--server.port=0",
+                "--spring.main.banner-mode=off",
+                "--spring.datasource.url=${postgres.jdbcUrl}",
+                "--spring.datasource.username=${postgres.username}",
+                "--spring.datasource.password=${postgres.password}",
+                "--spring.liquibase.url=${postgres.jdbcUrl}",
+                "--spring.liquibase.user=${postgres.username}",
+                "--spring.liquibase.password=${postgres.password}",
+                "--ASSET_SYNC_ADMIN_USERNAME=prod-admin",
+                "--ASSET_SYNC_ADMIN_PASSWORD=prod-admin-pw",
+                "--asset-sync.outbox.scheduler.enabled=false",
+                "--asset-sync.outbox.retention.enabled=false",
+                "--asset-sync.sync.recovery.enabled=false",
+                "--asset-sync.sync.worker.enabled=false",
+                *extraArgs,
+            )
+            .close()
     }
 
     companion object {

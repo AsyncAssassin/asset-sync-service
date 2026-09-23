@@ -49,6 +49,10 @@ management:
       enabled: true
     readinessstate:
       enabled: true
+    # Its details expose the working directory's absolute path to every caller allowed to see
+    # details; disk usage is left to host or container monitoring.
+    diskspace:
+      enabled: false
 
 springdoc:
   # Deliberately enabled in every profile: non-local profiles put both endpoints behind HTTP Basic.

@@ -13,7 +13,7 @@ class LocalStructuredLogOutboxEventPublisher : OutboxEventPublisher {
     override fun publish(event: OutboxEvent) {
         val logFields = event.toLogFields()
         logger.info(
-            "outbox_event_publish_attempted outboxEventId={} eventType={} transactionId={} chainId={} address={} asset={} txHash={} eventIndex={} transactionStatus={} outboxStatus={} aggregateType={} idempotencyKey={} attempts={}",
+            "outbox_event_publish_attempted outboxEventId={} eventType={} transactionId={} chainId={} address={} asset={} txHash={} eventIndex={} transactionStatus={} source={} outboxStatus={} aggregateType={} idempotencyKey={} attempts={}",
             event.id,
             event.eventType,
             logFields.transactionId,
@@ -23,6 +23,7 @@ class LocalStructuredLogOutboxEventPublisher : OutboxEventPublisher {
             logFields.txHash,
             logFields.eventIndex,
             logFields.transactionStatus,
+            logFields.source,
             event.status,
             event.aggregateType,
             event.idempotencyKey,

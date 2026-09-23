@@ -22,6 +22,8 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 @Component
 @Profile("local", "test")
 class FakeChainProvider : ChainProviderPort {
+    override val providerName: String = "fake"
+
     private val logger = LoggerFactory.getLogger(FakeChainProvider::class.java)
     private val scripts = ConcurrentHashMap<FakeChainProviderKey, List<FakeChainProviderStep>>()
     private val scriptPositions = ConcurrentHashMap<FakeChainProviderKey, AtomicInteger>()

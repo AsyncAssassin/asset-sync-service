@@ -283,7 +283,7 @@ class SyncApplicationService(
             if (!addressTerminal || Thread.currentThread().isInterrupted) {
                 throw exception
             }
-            val error = exception.conciseMessage()
+            val error = exception.runError()
             logger.warn(
                 "account_sync_address_failed syncRunId={} accountId={} watchedAddressId={} error={}",
                 claim.run.id,
@@ -291,6 +291,7 @@ class SyncApplicationService(
                 watchedAddress.id,
                 error,
             )
+            logFailureDetail(claim, error, exception)
             AccountAddressOutcome.Failed(error)
         }
 
@@ -588,7 +589,7 @@ class SyncApplicationService(
             // The failures mapped below are deterministic for this event, so they are terminal
             // instead of burning retries: the same event would fail the same way on every attempt.
             val result = try {
-                observedEventApplicationService.ingest(event.toIngestCommand())
+                observedEventApplicationService.ingest(event.toIngestCommand(source = "provider:${chainProviderPort.providerName}"))
             } catch (exception: WatchedAddressNotFoundException) {
                 throw ProviderDataInvalidException("Provider returned an event for an address that is not watched.", exception)
             } catch (exception: ObservedTransactionConflictException) {
@@ -886,7 +887,8 @@ class SyncApplicationService(
             .any { it is InterruptedException }
 
     private fun handleClaimFailure(claim: ClaimedSyncRun, progress: SyncProgress, throwable: Throwable) {
-        val error = throwable.conciseMessage().take(syncProperties.worker.maxErrorLength)
+        val error = throwable.runError().take(syncProperties.worker.maxErrorLength)
+        logFailureDetail(claim, error, throwable)
         val terminal = isTerminalFailure(throwable)
         try {
             if (terminal) {
@@ -964,6 +966,33 @@ class SyncApplicationService(
             } else {
                 MDC.setContextMap(previousContext)
             }
+        }
+    }
+
+    /**
+     * The `last_error` a sync run shows to API readers. The service's own exceptions carry messages
+     * written for that purpose; a database or unexpected failure is reduced to its class, because
+     * its message can quote SQL and bound values. The full detail goes to the log instead.
+     */
+    private fun Throwable.runError(): String =
+        when (this) {
+            is DataAccessException -> "Database error (${javaClass.simpleName})."
+            is ChainProviderUnavailableException,
+            is ProviderDataInvalidException,
+            is ProviderConfigurationException,
+            is AccountNotFoundException,
+            is WatchedAddressByIdNotFoundException,
+            is AccountSyncTooLargeException,
+            is SyncCapacityExceededException,
+            is CursorCheckpointAdvanceStaleException,
+            is SyncRunClaimLostException,
+            -> conciseMessage()
+            else -> "Unexpected error (${javaClass.simpleName})."
+        }
+
+    private fun logFailureDetail(claim: ClaimedSyncRun, error: String, throwable: Throwable) {
+        if (error != throwable.conciseMessage()) {
+            logger.warn("sync_run_failure_detail syncRunId={} error={}", claim.run.id, error, throwable)
         }
     }
 

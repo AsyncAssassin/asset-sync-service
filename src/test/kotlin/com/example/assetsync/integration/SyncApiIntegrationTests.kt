@@ -115,6 +115,11 @@ class SyncApiIntegrationTests(
         assertEquals(1, tableCount("sync_runs"))
         assertEquals(2, tableCount("observed_transactions"))
         assertEquals(2, tableCount("outbox_events"))
+        assertEquals(listOf("provider:fake"), jdbcTemplate.queryForList("SELECT DISTINCT source FROM observed_transactions", String::class.java))
+        assertEquals(
+            listOf("provider:fake"),
+            jdbcTemplate.queryForList("SELECT DISTINCT payload ->> 'source' FROM outbox_events", String::class.java),
+        )
         assertEquals(
             listOf(FakeChainProviderKey("local-evm", "0xsync-address-success", "USDC")),
             fakeChainProvider.requestedKeys(),
@@ -1019,6 +1024,11 @@ class SyncApiIntegrationTests(
         runNextClaimedSyncs()
 
         assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        // The constraint violation's message quotes SQL; readers of the run see only its class.
+        assertEquals(
+            "Database error (DataIntegrityViolationException).",
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId),
+        )
         assertEquals(1, singleInt("SELECT events_seen FROM sync_runs WHERE id = ?", syncRunId))
         assertEquals(0, singleInt("SELECT events_changed FROM sync_runs WHERE id = ?", syncRunId))
         assertEquals(0, tableCount("observed_transactions"))
