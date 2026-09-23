@@ -15,6 +15,10 @@ COPY ${JAR_FILE} app.jar
 
 USER app
 EXPOSE 8080
+# `local` and `demo` listen on loopback when run on a host. Inside a container the server listens
+# on every container interface, and the published port decides who reaches it: docker-compose.yml
+# publishes on the host's loopback unless ASSET_SYNC_HTTP_BIND_ADDRESS says otherwise.
+ENV SERVER_ADDRESS=0.0.0.0
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
   CMD curl -fsS http://localhost:8080/actuator/health/liveness || exit 1

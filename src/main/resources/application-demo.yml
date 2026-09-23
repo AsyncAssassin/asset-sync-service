@@ -1,3 +1,9 @@
+# Loopback only: the demo users have public passwords. SERVER_ADDRESS=0.0.0.0 opens a remote demo,
+# on a trusted network only. The Docker image sets it, because a container is reached through the
+# port it publishes.
+server:
+  address: ${SERVER_ADDRESS:127.0.0.1}
+
 spring:
   datasource:
     url: jdbc:postgresql://${ASSET_SYNC_DB_HOST:localhost}:${ASSET_SYNC_DB_PORT:5432}/${ASSET_SYNC_DB_NAME:asset_sync}

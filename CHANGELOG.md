@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Security
+
+- `local` and `demo` listen on `127.0.0.1` when started on a host, as the quickstart does with `./gradlew bootRun`. They listened on every interface, so anyone on the same network could use `local` without credentials, and `demo` with its public passwords. `SERVER_ADDRESS=0.0.0.0` opens them again, for a remote `demo` on a trusted network. The Docker image sets it, because a container is reached through its published port, which `docker-compose.yml` keeps on the host's loopback.
+
 ## [0.4.0] - 2026-09-23
 
 ### Added
