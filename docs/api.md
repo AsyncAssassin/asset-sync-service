@@ -546,7 +546,7 @@ Possible statuses are `QUEUED`, `RUNNING`, `SUCCEEDED`, and `FAILED`. Legacy `ST
 
 ## 14. ProblemDetail Error Mapping
 
-All errors produced by the API layer use `ProblemDetail`, including framework-level routing failures such as unknown paths, unsupported methods, and unsupported content types. The `type` field is a stable service-owned URI. Implementations may add properties for correlation and domain identifiers, but must not expose internal stack traces. Under the protected profiles, `401` and `403` are produced by the Spring Security filter chain before a request reaches Spring MVC; a dedicated authentication entry point and access-denied handler write the same `ProblemDetail` shape, including `requestId`, and `401` responses keep the `WWW-Authenticate: Basic` challenge. A request with credentials that arrives while PostgreSQL is unavailable gets `503 database-unavailable` from the entry point instead, without a challenge: the user store could not be read, so the credentials were never checked.
+All errors produced by the API layer use `ProblemDetail`, including framework-level routing failures such as unknown paths, unsupported methods, and unsupported content types. The `type` field is a stable service-owned URI. Implementations may add properties for correlation and domain identifiers, but must not expose internal stack traces. Under the protected profiles, `401` and `403` are produced by the Spring Security filter chain before a request reaches Spring MVC; a dedicated authentication entry point and access-denied handler write the same `ProblemDetail` shape, including `requestId`, and `401` responses keep the `WWW-Authenticate: Basic` challenge. A request with credentials that arrives while PostgreSQL is unavailable gets `503 database-unavailable` from the entry point instead, without a challenge, because the credentials could not be checked; `docs/failure-modes.md` section 6 describes the outage.
 
 A request that Spring Security's `StrictHttpFirewall` rejects before authentication, for example one with `//` or `;` in its path, never reaches the API layer. It gets `400` from the servlet container's error page in every profile, with Spring Boot's default error body instead of a `ProblemDetail` and without a Basic challenge.
 
@@ -585,13 +585,13 @@ Example:
   "status": 409,
   "detail": "Observed transaction natural key matched an existing row, but immutable fields did not match.",
   "instance": "/api/v1/observed-events",
+  "requestId": "018ff4c8-4b6f-7f2e-a3aa-0c7d23f6ac4e",
   "chainId": "local-evm",
   "txHash": "0xdeadbeef",
   "eventIndex": 0,
   "address": "0xabc",
   "asset": "USDC",
-  "conflictingFields": ["AMOUNT"],
-  "requestId": "018ff4c8-4b6f-7f2e-a3aa-0c7d23f6ac4e"
+  "conflictingFields": ["AMOUNT"]
 }
 ```
 

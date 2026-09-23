@@ -5,6 +5,7 @@ import com.example.assetsync.application.account.AccountRepository
 import com.example.assetsync.application.account.UnsupportedChainException
 import com.example.assetsync.application.account.WatchedAddress
 import com.example.assetsync.application.account.WatchedAddressRepository
+import com.example.assetsync.application.isDatabaseFailure
 import com.example.assetsync.application.observability.AssetSyncMetrics
 import com.example.assetsync.application.transaction.InvalidObservedEventRequestException
 import com.example.assetsync.application.transaction.ObservedEventApplicationService
@@ -975,19 +976,22 @@ class SyncApplicationService(
      * its message can quote SQL and bound values. The full detail goes to the log instead.
      */
     private fun Throwable.runError(): String =
-        when (this) {
-            is DataAccessException -> "Database error (${javaClass.simpleName})."
-            is ChainProviderUnavailableException,
-            is ProviderDataInvalidException,
-            is ProviderConfigurationException,
-            is AccountNotFoundException,
-            is WatchedAddressByIdNotFoundException,
-            is AccountSyncTooLargeException,
-            is SyncCapacityExceededException,
-            is CursorCheckpointAdvanceStaleException,
-            is SyncRunClaimLostException,
-            -> conciseMessage()
-            else -> "Unexpected error (${javaClass.simpleName})."
+        if (isDatabaseFailure()) {
+            "Database error (${javaClass.simpleName})."
+        } else {
+            when (this) {
+                is ChainProviderUnavailableException,
+                is ProviderDataInvalidException,
+                is ProviderConfigurationException,
+                is AccountNotFoundException,
+                is WatchedAddressByIdNotFoundException,
+                is AccountSyncTooLargeException,
+                is SyncCapacityExceededException,
+                is CursorCheckpointAdvanceStaleException,
+                is SyncRunClaimLostException,
+                -> conciseMessage()
+                else -> "Unexpected error (${javaClass.simpleName})."
+            }
         }
 
     private fun logFailureDetail(claim: ClaimedSyncRun, error: String, throwable: Throwable) {

@@ -9,7 +9,9 @@ spring:
       # pgjdbc timeouts in seconds. statement_timeout fires only on a server that still runs; the
       # socket timeout also ends a read from a server that stopped answering (paused, network
       # partition), which would otherwise hold the request thread and its connection forever. It
-      # stays above statement_timeout, so a slow query still ends with the server's own error.
+      # stays above statement_timeout, so a slow query still ends with the server's own error:
+      # raise both together. A COMMIT is not bound by statement_timeout, so one that waits longer
+      # (a stalled synchronous standby or disk) is cut off too, and may still commit afterwards.
       data-source-properties:
         socketTimeout: 40
         connectTimeout: 5
