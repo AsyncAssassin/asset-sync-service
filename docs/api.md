@@ -583,11 +583,14 @@ Example:
   "type": "https://asset-sync-service/errors/immutable-field-conflict",
   "title": "Immutable observed transaction field conflict",
   "status": 409,
-  "detail": "Observed transaction natural key matched an existing row, but amount or direction did not match.",
+  "detail": "Observed transaction natural key matched an existing row, but immutable fields did not match.",
   "instance": "/api/v1/observed-events",
   "chainId": "local-evm",
   "txHash": "0xdeadbeef",
   "eventIndex": 0,
+  "address": "0xabc",
+  "asset": "USDC",
+  "conflictingFields": ["AMOUNT"],
   "requestId": "018ff4c8-4b6f-7f2e-a3aa-0c7d23f6ac4e"
 }
 ```

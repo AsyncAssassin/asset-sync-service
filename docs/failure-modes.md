@@ -32,8 +32,8 @@ Expected behavior:
 
 Operational signal:
 
-- Increment duplicate observed-event metrics when metrics are implemented.
-- Log at debug or info level with natural key fields.
+- `asset.sync.observed.events.ingested` counts each duplicate with `result=NO_CHANGE`.
+- The `observed_event_ingested` INFO line carries `result=NO_CHANGE` and the natural key fields.
 
 ## 3. Provider Stale Confirmations
 
@@ -51,7 +51,7 @@ Expected behavior:
 
 Operational signal:
 
-- Log stale confirmation diagnostics with stored and incoming counts.
+- A stale event is counted and logged like any other `NO_CHANGE` (section 2), with the stored status; the stored and incoming confirmation counts are not logged.
 
 ## 4. Immutable Conflicts
 
@@ -93,8 +93,8 @@ Expected behavior:
 
 Operational signal:
 
-- Increment reverted transaction metrics when metrics are implemented.
-- Log the transition with transaction id and natural key.
+- `asset.sync.observed.transaction.transitions` counts the transition with `eventType=TRANSACTION_REVERTED`.
+- The `observed_transaction_transition` INFO line carries the transaction id, the natural key, and the outbox event id.
 
 ## 6. PostgreSQL Unavailable
 
@@ -264,7 +264,7 @@ Expected behavior:
 Operational signal:
 
 - Log each sync run independently.
-- Track duplicate processing metrics when implemented.
+- Duplicate events count as `asset.sync.observed.events.ingested` with `result=NO_CHANGE`; duplicate provider work has no metric of its own.
 
 Notes:
 

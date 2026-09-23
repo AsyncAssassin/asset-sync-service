@@ -843,9 +843,9 @@ Duplicate no-op response:
 - `400 Bad Request`: invalid request shape, invalid amount, invalid enum value, negative confirmation count, or watched-address pagination outside the supported bounds.
 - `401 Unauthorized`: missing or invalid HTTP Basic credentials in protected profiles; the response keeps the `WWW-Authenticate: Basic` challenge.
 - `403 Forbidden`: authenticated caller without the required role in protected profiles.
-- `404 Not Found`: account, watched address, unsupported chain, sync run, or route not found.
+- `404 Not Found`: account, watched address, unsupported chain or asset, sync run, or route not found.
 - `405 Method Not Allowed`: unsupported HTTP method for a known route, with an `Allow` header.
-- `409 Conflict`: duplicate watched address or immutable observed transaction field mismatch.
+- `409 Conflict`: duplicate account `externalRef`, duplicate watched address, or immutable observed transaction field mismatch.
 - `415 Unsupported Media Type`: request body content type other than JSON.
 - `429 Too Many Requests`: the soft cap on queued plus running sync runs is reached; `Retry-After` carries the worker claim interval in whole seconds.
 - `500 Internal Server Error`: unexpected failure; the response carries a generic detail and the exception goes to the log.
@@ -860,11 +860,14 @@ ProblemDetail example:
   "type": "https://asset-sync-service/errors/immutable-field-conflict",
   "title": "Immutable observed transaction field conflict",
   "status": 409,
-  "detail": "Observed transaction natural key matched an existing row, but amount or direction did not match.",
+  "detail": "Observed transaction natural key matched an existing row, but immutable fields did not match.",
   "instance": "/api/v1/observed-events",
   "chainId": "local-evm",
   "txHash": "0xdeadbeef",
-  "eventIndex": 0
+  "eventIndex": 0,
+  "address": "0xabc",
+  "asset": "USDC",
+  "conflictingFields": ["AMOUNT"]
 }
 ```
 
