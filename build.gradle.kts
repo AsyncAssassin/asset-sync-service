@@ -6,7 +6,7 @@ plugins {
 }
 
 group = "com.example"
-version = "0.3.0"
+version = "0.4.0"
 description = "Asset sync backend service"
 
 // Jackson: Spring Boot 3.5.16 (like 3.5.15) manages jackson-bom 2.21.4, which sits inside the vulnerable range of
