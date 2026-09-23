@@ -105,6 +105,9 @@ springBoot {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    // The tests set the bind address and the profiles themselves; values exported in the shell,
+    // such as SERVER_ADDRESS after a remote demo, would override them.
+    listOf("SERVER_ADDRESS", "SPRING_PROFILES_ACTIVE").forEach { environment.remove(it) }
     // The documentation drift guards (DocsConsistencyTests) and the generated-source guard read
     // these files at test time. Declaring them as inputs makes Gradle re-run the tests when only
     // the docs change instead of treating the task as up-to-date.

@@ -56,7 +56,7 @@ class DemoSimulatorSyncE2ETests(
 
     @Test
     fun `the simulator base url follows server port`() {
-        assertEquals("http://localhost:$serverPort/simulator", providerProperties.baseUrl)
+        assertEquals("http://127.0.0.1:$serverPort/simulator", providerProperties.baseUrl)
     }
 
     @Test

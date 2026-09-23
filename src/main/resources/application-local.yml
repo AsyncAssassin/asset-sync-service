@@ -1,6 +1,6 @@
 # Loopback only: `local` has no authentication, so a run on a host must not be reachable from
-# other machines. SERVER_ADDRESS=0.0.0.0 would open it; never do that with this profile. The Docker
-# image sets it, because a container is reached through the port it publishes.
+# other machines. SERVER_ADDRESS=0.0.0.0 would open it; do that only inside a container reached
+# through a port published on the host's loopback, as docker-compose.yml does.
 server:
   address: ${SERVER_ADDRESS:127.0.0.1}
 

@@ -23,6 +23,9 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-local}
       SERVER_PORT: 8080
+      # `local` and `demo` listen on loopback by default; inside this container the server has to
+      # listen on the container's interfaces, and the published port below stays the one gate.
+      SERVER_ADDRESS: 0.0.0.0
       ASSET_SYNC_DB_HOST: postgres
       ASSET_SYNC_DB_PORT: 5432
       ASSET_SYNC_DB_NAME: ${ASSET_SYNC_DB_NAME:-asset_sync}

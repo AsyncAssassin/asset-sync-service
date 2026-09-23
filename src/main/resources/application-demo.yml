@@ -1,6 +1,6 @@
 # Loopback only: the demo users have public passwords. SERVER_ADDRESS=0.0.0.0 opens a remote demo,
-# on a trusted network only. The Docker image sets it, because a container is reached through the
-# port it publishes.
+# on a trusted network only (the JVM then listens on IPv6 too); docker-compose.yml sets it inside
+# the container, whose published port stays on the host's loopback.
 server:
   address: ${SERVER_ADDRESS:127.0.0.1}
 
@@ -23,5 +23,7 @@ asset-sync:
     # simulator over real HTTP (self-call on the server port). Resolving `server.port` rather than
     # the SERVER_PORT variable follows the configured port whichever way it is set (the variable,
     # `--server.port`, an IDE run configuration); the self-call needs a fixed port (not 0) and no
-    # servlet context path. Schedulers stay ON so demo shows the outbox publisher and recovery live.
-    base-url: http://localhost:${server.port:8080}/simulator
+    # servlet context path. The call goes to 127.0.0.1, where the server listens by default and with
+    # SERVER_ADDRESS=0.0.0.0, never to `localhost`, which can resolve to ::1 first.
+    # Schedulers stay ON so demo shows the outbox publisher and recovery live.
+    base-url: http://127.0.0.1:${server.port:8080}/simulator
