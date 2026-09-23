@@ -36,6 +36,10 @@ class ProdAdminProvisioner {
             require(!password.isNullOrBlank()) {
                 "ASSET_SYNC_ADMIN_PASSWORD must be set in the prod profile."
             }
+            // The demo-user guard refuses these names on every later start, so the admin cannot take one.
+            require(username !in setOf(DEMO_READER_USERNAME, DEMO_OPERATOR_USERNAME)) {
+                "ASSET_SYNC_ADMIN_USERNAME must not be a demo user name ($DEMO_READER_USERNAME, $DEMO_OPERATOR_USERNAME)."
+            }
             val admin = User.withUsername(username)
                 .password(passwordEncoder.encode(password))
                 .roles("OPERATOR")

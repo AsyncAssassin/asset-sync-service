@@ -13,8 +13,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Security
 
-- `prod` refuses to start together with `demo`, `local`, or `test`. With `prod,demo` on a fresh database, the demo seeder wrote its users with public passwords after the demo-user guard had already looked, so `demo-operator` could change data until the next restart. The new guard runs before any bean is created and names the active profiles. The demo seeder, the chain simulator, and the open `/simulator` path also require `demo` without `prod`.
-- The demo-user guard covers every protected profile, not only `prod`: `e2e` and custom profiles such as `staging` refuse a database that holds the demo users as well.
+- `demo`, `local`, and `test` refuse to run together with any other profile. With `prod,demo` on a fresh database, the demo seeder wrote its users with public passwords after the demo-user guard had already looked, so `demo-operator` could change data until the next restart; `staging,demo` and `staging,local` had the same gap without any guard. An environment post-processor now stops such a start before the application context exists, before any placeholder of the other profiles is resolved, and names the profiles.
+- The demo-user guard runs in every profile except `demo`, `local`, and `test`: `prod`, `e2e`, a custom profile such as `staging`, and a start without any profile refuse a database that holds the demo users. It is never lazy, it skips a database without the `users` table instead of failing on its own query, and its message names the default profile when none is active and recommends an empty database, because a database the demo ran on also holds the demo dataset. The prod operator account cannot take a `demo` user name.
 
 ## [0.4.0] - 2026-09-23
 

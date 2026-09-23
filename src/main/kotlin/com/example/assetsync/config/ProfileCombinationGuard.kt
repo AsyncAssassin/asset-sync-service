@@ -1,29 +1,46 @@
 package com.example.assetsync.config
 
-import org.springframework.beans.factory.config.BeanFactoryPostProcessor
-import org.springframework.beans.factory.config.ConfigurableListableBeanFactory
-import org.springframework.context.annotation.Profile
+import org.springframework.boot.SpringApplication
+import org.springframework.boot.env.EnvironmentPostProcessor
+import org.springframework.core.env.ConfigurableEnvironment
 import org.springframework.core.env.Environment
-import org.springframework.stereotype.Component
 
 /**
- * Refuses to start `prod` together with `demo`, `local`, or `test`. `demo` seeds users with public
- * passwords and a fake dataset and opens the chain simulator; `local` and `test` turn
- * authentication off. None of that may reach a prod deployment through a mistyped profile list.
- * As a bean factory post-processor the guard runs before any other bean is created, so the context
- * fails before the demo seeder, a scheduler, or the web server could run, with a message that names
- * the active profiles instead of whichever missing bean the combination would trip over first.
+ * Refuses to start when `demo`, `local`, or `test` is combined with any other profile. `demo`
+ * seeds users with public passwords and a fake dataset and opens the chain simulator; `local` and
+ * `test` turn authentication off. Each of them runs alone, so none of that reaches `prod`, or a
+ * custom deployment profile such as `staging`, through a profile list like `prod,demo` or
+ * `staging,local`.
+ *
+ * As an environment post-processor (registered in `META-INF/spring.factories`) the guard runs once
+ * the active profiles are known and before the application context exists: before any bean, any
+ * configuration condition, or any placeholder of the other profiles is resolved, so the message
+ * names the profiles instead of whichever missing bean or secret the combination trips over first.
  */
-@Component
-@Profile("prod & (demo | local | test)")
-class ProfileCombinationGuard : BeanFactoryPostProcessor {
+class ProfileCombinationGuard : EnvironmentPostProcessor {
 
-    override fun postProcessBeanFactory(beanFactory: ConfigurableListableBeanFactory) {
-        val activeProfiles = beanFactory.getBean(Environment::class.java).activeProfiles.toList()
-        throw IllegalStateException(
-            "The prod profile cannot be combined with demo, local, or test (active profiles: $activeProfiles): " +
-                "demo seeds users with public passwords and opens the chain simulator, and local and test turn " +
-                "authentication off.",
-        )
+    override fun postProcessEnvironment(environment: ConfigurableEnvironment, application: SpringApplication) {
+        violation(effectiveProfiles(environment))?.let { throw IllegalStateException(it) }
+    }
+
+    companion object {
+        /** Profiles that must be the only active one. */
+        val STANDALONE_PROFILES: Set<String> = setOf("demo", "local", "test")
+
+        /** Why [profiles] cannot run together, or null when they can. */
+        fun violation(profiles: List<String>): String? {
+            val standalone = profiles.filter { it in STANDALONE_PROFILES }
+            if (standalone.isEmpty() || profiles.size == 1) {
+                return null
+            }
+            return "The profiles $profiles cannot be combined: ${standalone.joinToString(" and ")} " +
+                "must be the only active profile. demo seeds users with public passwords and opens the chain " +
+                "simulator, and local and test turn authentication off, so none of them may run together with " +
+                "another profile such as prod."
+        }
+
+        /** The active profiles, or the default ones when none is active, as Spring resolves them. */
+        fun effectiveProfiles(environment: Environment): List<String> =
+            environment.activeProfiles.toList().ifEmpty { environment.defaultProfiles.toList() }
     }
 }

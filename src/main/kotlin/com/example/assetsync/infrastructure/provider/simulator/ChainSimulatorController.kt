@@ -29,7 +29,7 @@ import org.springframework.web.bind.annotation.RestController
  * Covered over real HTTP by `DemoSimulatorSyncE2ETests`.
  */
 @RestController
-@Profile("demo & !prod")
+@Profile("demo")
 @Validated
 class ChainSimulatorController {
 

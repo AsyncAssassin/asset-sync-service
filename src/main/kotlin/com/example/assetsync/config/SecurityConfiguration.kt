@@ -62,7 +62,7 @@ class SecurityConfiguration {
                         "/actuator/health/liveness",
                         "/actuator/health/readiness",
                     ).permitAll()
-                if (environment.matchesProfiles("demo & !prod")) {
+                if (environment.matchesProfiles("demo")) {
                     it.requestMatchers("/simulator/**").permitAll()
                 }
                 it
