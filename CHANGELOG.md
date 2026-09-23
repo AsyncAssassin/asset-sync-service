@@ -11,6 +11,11 @@ All notable changes to this project are documented in this file. The format is b
 - The `demo` seeder writes each outbox row as a complete lifecycle event of its transaction: the full payload, an event type that matches the status in its own payload (the reverted transaction carries both its `TRANSACTION_SEEN` and its `TRANSACTION_REVERTED` event), and an idempotency key in the service's format. Published seed events no longer log `null` fields, and a transaction's events are seeded only together with the transaction, so a restart neither re-inserts events that retention removed nor adds events for a transaction it did not write. Seeded transactions and events record the source `demo:seed`. A database seeded by an earlier version keeps its rows; start from an empty one (`docker compose down -v`) to get the current dataset.
 - The README demo flow generates its external reference, address, and transaction hash, so it can run again against the same database instead of stopping at `409 Conflict`.
 
+### Security
+
+- `prod` refuses to start together with `demo`, `local`, or `test`. With `prod,demo` on a fresh database, the demo seeder wrote its users with public passwords after the demo-user guard had already looked, so `demo-operator` could change data until the next restart. The new guard runs before any bean is created and names the active profiles. The demo seeder, the chain simulator, and the open `/simulator` path also require `demo` without `prod`.
+- The demo-user guard covers every protected profile, not only `prod`: `e2e` and custom profiles such as `staging` refuse a database that holds the demo users as well.
+
 ## [0.4.0] - 2026-09-23
 
 ### Added

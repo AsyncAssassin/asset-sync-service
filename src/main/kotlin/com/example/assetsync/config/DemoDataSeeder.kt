@@ -39,7 +39,7 @@ internal const val DEMO_OPERATOR_USERNAME = "demo-operator"
  * prod profile from starting on such a database.
  */
 @Component
-@Profile("demo")
+@Profile("demo & !prod")
 class DemoDataSeeder(
     private val jdbcTemplate: JdbcTemplate,
     private val userDetailsManager: UserDetailsManager,

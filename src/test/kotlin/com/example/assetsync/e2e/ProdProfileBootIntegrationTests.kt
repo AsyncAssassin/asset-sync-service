@@ -166,10 +166,65 @@ class ProdProfileBootIntegrationTests(
         }
     }
 
+    @Test
+    fun `prod combined with demo refuses to start before seeding the demo users`() {
+        val jdbcTemplate = context.getBean(JdbcTemplate::class.java)
+
+        val thrown = assertFailsWith<Throwable> {
+            boot(listOf("prod", "demo"), "--asset-sync.provider.base-url=http://localhost:1")
+        }
+
+        val cause = causeContaining(thrown, "The prod profile cannot be combined with demo, local, or test")
+        assertNotNull(cause, "expected the profile combination guard in the failure chain of: $thrown")
+        assertTrue(cause.message!!.contains("demo]") || cause.message!!.contains("demo,"), cause.message)
+        // The guard runs before any bean is created, so the demo seeder never wrote its public users.
+        assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM users WHERE username LIKE 'demo-%'", Int::class.java))
+    }
+
+    @Test
+    fun `prod combined with local names the combination instead of a missing bean`() {
+        val thrown = assertFailsWith<Throwable> {
+            boot(listOf("prod", "local"), "--asset-sync.provider.base-url=http://localhost:1")
+        }
+
+        val cause = causeContaining(thrown, "The prod profile cannot be combined with demo, local, or test")
+        assertNotNull(cause, "expected the profile combination guard in the failure chain of: $thrown")
+        assertTrue(cause.message!!.contains("local]") || cause.message!!.contains("local,"), cause.message)
+    }
+
+    @Test
+    fun `a protected profile other than prod also refuses the demo users`() {
+        val jdbcTemplate = context.getBean(JdbcTemplate::class.java)
+        listOf("demo-reader" to "ROLE_READ", "demo-operator" to "ROLE_OPERATOR").forEach { (username, authority) ->
+            jdbcTemplate.update("INSERT INTO users (username, password, enabled) VALUES (?, ?, true)", username, "{noop}public")
+            jdbcTemplate.update("INSERT INTO authorities (username, authority) VALUES (?, ?)", username, authority)
+        }
+        try {
+            // A custom protected profile: no profile file, so no prod admin and no migrations of its own.
+            val thrown = assertFailsWith<Throwable> {
+                boot(listOf("staging"), "--asset-sync.provider.base-url=http://localhost:1")
+            }
+
+            assertNotNull(
+                causeContaining(thrown, "The active profiles [staging] found the demo users [demo-operator, demo-reader]"),
+                "expected the demo-user guard in the failure chain of: $thrown",
+            )
+        } finally {
+            jdbcTemplate.update("DELETE FROM authorities WHERE username IN ('demo-reader', 'demo-operator')")
+            jdbcTemplate.update("DELETE FROM users WHERE username IN ('demo-reader', 'demo-operator')")
+        }
+    }
+
+    private fun causeContaining(thrown: Throwable, text: String): Throwable? =
+        generateSequence(thrown) { it.cause }.firstOrNull { it.message?.contains(text) == true }
+
     /** Boots a second prod context against the same database and closes it at once. */
-    private fun bootProd(vararg extraArgs: String) {
+    private fun bootProd(vararg extraArgs: String) = boot(listOf("prod"), *extraArgs)
+
+    /** Boots a second context with [profiles] against the same database and closes it at once. */
+    private fun boot(profiles: List<String>, vararg extraArgs: String) {
         SpringApplicationBuilder(AssetSyncServiceApplication::class.java)
-            .profiles("prod")
+            .profiles(*profiles.toTypedArray())
             .run(
                 "--server.port=0",
                 "--spring.main.banner-mode=off",
