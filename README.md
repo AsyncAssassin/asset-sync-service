@@ -27,7 +27,7 @@
 ## Implemented Features
 
 - Account creation and lookup.
-- Watched address registration and account-level address listing.
+- Watched address registration with chain-specific address formats, and account-level address listing.
 - Observed event ingestion for `local-evm`.
 - Asset registry: watched-address registration accepts only assets enabled for the chain in `asset_configs`, seeded with `USDC` on `local-evm` and `eth-sepolia` and a disabled `eth-mainnet` row.
 - Idempotent transaction lifecycle transitions: `SEEN`, `CONFIRMED`, and `REVERTED`.
@@ -432,6 +432,7 @@ A page fetch under `alchemy` asks for the latest block and the finality frontier
 
 - Natural idempotency keys: watched addresses use `chainId + address + asset`; observed transactions use `chainId + txHash + eventIndex + address + asset`.
 - PostgreSQL constraints enforce uniqueness, enum-like values, non-negative amounts/counts, and foreign keys.
+- Ingestion rejects what PostgreSQL would round or refuse: amounts must fit `numeric(38, 18)`, exponent notation included, and are stored at scale 18; addresses and transaction hashes must be well formed for their chain (`0x` hex on `eth-sepolia` and `eth-mainnet`, no whitespace, `/`, or `:` on `local-evm`, no control characters anywhere); a provider page is checked in full before its first event is written.
 - Observed transaction ingestion locks existing rows with row-level `FOR UPDATE` before evaluating transitions.
 - jOOQ uses `INSERT ... ON CONFLICT` for idempotent observed-transaction and outbox writes.
 - Transactional outbox rows are inserted in the same database transaction as lifecycle state changes.

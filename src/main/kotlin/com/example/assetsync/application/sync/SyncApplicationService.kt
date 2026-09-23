@@ -2,15 +2,18 @@ package com.example.assetsync.application.sync
 
 import com.example.assetsync.application.account.AccountNotFoundException
 import com.example.assetsync.application.account.AccountRepository
+import com.example.assetsync.application.account.UnsupportedChainException
 import com.example.assetsync.application.account.WatchedAddress
 import com.example.assetsync.application.account.WatchedAddressRepository
 import com.example.assetsync.application.observability.AssetSyncMetrics
+import com.example.assetsync.application.transaction.InvalidObservedEventRequestException
 import com.example.assetsync.application.transaction.ObservedEventApplicationService
 import com.example.assetsync.application.transaction.ObservedTransactionConflictException
 import com.example.assetsync.application.transaction.WatchedAddressNotFoundException
 import com.example.assetsync.config.SyncHeartbeatScheduler
 import com.example.assetsync.config.SyncProperties
 import com.example.assetsync.domain.model.TransitionOutcome
+import com.example.assetsync.domain.policy.AmountPolicy
 import com.example.assetsync.domain.policy.ChainIdentityNormalizer
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.JsonNodeFactory
@@ -562,12 +565,20 @@ class SyncApplicationService(
         events.forEach { event ->
             progress.eventsSeen += 1
             progress.claimEventsSeen += 1
+            // The failures mapped below are deterministic for this event, so they are terminal
+            // instead of burning retries: the same event would fail the same way on every attempt.
             val result = try {
                 observedEventApplicationService.ingest(event.toIngestCommand())
             } catch (exception: WatchedAddressNotFoundException) {
                 throw ProviderDataInvalidException("Provider returned an event for an address that is not watched.", exception)
             } catch (exception: ObservedTransactionConflictException) {
                 throw ProviderDataInvalidException("Provider returned an event that conflicts with stored immutable fields.", exception)
+            } catch (exception: InvalidObservedEventRequestException) {
+                throw ProviderDataInvalidException("Provider returned an invalid event: ${exception.message}", exception)
+            } catch (exception: IllegalArgumentException) {
+                throw ProviderDataInvalidException("Provider returned an event that breaks a domain invariant: ${exception.message}", exception)
+            } catch (exception: UnsupportedChainException) {
+                throw ProviderConfigurationException("Chain ${exception.chainId} is not enabled, so its events cannot be ingested.", exception)
             }
             if (result.result == TransitionOutcome.CREATED || result.result == TransitionOutcome.UPDATED) {
                 changed += 1
@@ -635,6 +646,17 @@ class SyncApplicationService(
             }
             if (event.eventIndex < 0 || event.blockHeight < 0 || event.confirmations < 0) {
                 throw ProviderDataInvalidException("Provider returned an event with negative block metadata.")
+            }
+            // Checked for every event before the first one is written, so a bad event later in
+            // the page cannot leave the events before it committed behind a terminal failure.
+            ChainIdentityNormalizer.txHashViolation(
+                chainId = expected.chainId,
+                txHash = ChainIdentityNormalizer.normalizeTxHash(expected.chainId, event.txHash),
+            )?.let { violation ->
+                throw ProviderDataInvalidException("Provider returned an event with a malformed transaction hash: $violation")
+            }
+            if (AmountPolicy.normalizedOrNull(event.amount) == null) {
+                throw ProviderDataInvalidException("Provider returned an amount that is negative or does not fit numeric(38,18).")
             }
             val previousEvent = previous
             if (previousEvent != null && compareEvents(previousEvent, event) > 0) {

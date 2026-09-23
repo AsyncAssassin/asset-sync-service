@@ -898,16 +898,16 @@ Sync flow:
 Outbox events have a unique `idempotency_key`:
 
 ```text
-observed-tx:{naturalKey}:status:{newStatus}:v:{version}
+observed-tx:{transactionId}:status:{newStatus}:v:{version}
 ```
 
 Example:
 
 ```text
-observed-tx:local-evm:0xdeadbeef:0:0xabc123:USDC:status:CONFIRMED:v:2
+observed-tx:5e1c9c94-6e36-4fb9-bb27-67800e88ac51:status:CONFIRMED:v:2
 ```
 
-This prevents duplicate `TRANSACTION_SEEN`, `TRANSACTION_CONFIRMED`, and `TRANSACTION_REVERTED` events for the same transaction lifecycle stage.
+This prevents duplicate `TRANSACTION_SEEN`, `TRANSACTION_CONFIRMED`, and `TRANSACTION_REVERTED` events for the same transaction lifecycle stage. The transaction id is a UUID, so no free-text part of the natural key, such as a hash or address containing `:`, can make two transactions share a key. Earlier versions joined the natural key into the key; their rows keep those keys, and no key of the current format can equal one.
 
 ## 12. Confirmation And Reorg Design
 

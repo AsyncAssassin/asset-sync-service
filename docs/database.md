@@ -52,7 +52,7 @@ Changelog rules:
 - No PostgreSQL enum types in the MVP; use text plus `CHECK` constraints to keep status evolution simple.
 - Data-normalization changesets must fail fast when existing rows would collide after normalization. Operators must manually clean up or backfill those rows before rerunning the migration; changesets must not silently merge or delete business rows.
 - Changeset `006` adds input-length constraints as `NOT VALID`, so new writes are protected immediately while pre-existing oversized rows are not scanned during that upgrade step. Changeset `011` validates those constraints; operators with legacy oversized rows must clean them before applying `011`.
-- Changeset `009` normalizes local EVM watched addresses and observed transactions. Historical `PUBLISHED` outbox rows are kept as audit history, but pending `NEW` or `FAILED` local-evm outbox rows must already have canonical payload casing and current `observed-tx:...:status:{status}:v:{version}` idempotency keys. If not, the migration halts and operators must drain pending outbox rows or perform an audited manual cleanup before retrying.
+- Changeset `009` normalizes local EVM watched addresses and observed transactions. Historical `PUBLISHED` outbox rows are kept as audit history, but pending `NEW` or `FAILED` local-evm outbox rows must already have canonical payload casing and the natural-key `observed-tx:{chainId}:...:status:{status}:v:{version}` idempotency keys of that release; keys built from the transaction id came later and never exist when `009` runs. If not, the migration halts and operators must drain pending outbox rows or perform an audited manual cleanup before retrying.
 - Changeset `010` creates the standard Spring Security JDBC `users` and `authorities` tables.
 - Changeset `012` adds `observed_transactions.block_height >= 0` as `NOT VALID`, then validates it immediately. Legacy databases with negative block heights must be cleaned before applying `012`; operators can preflight with:
 
@@ -344,7 +344,7 @@ Key columns:
 | `aggregate_type` | `text` | no | MVP value: `OBSERVED_TRANSACTION` |
 | `aggregate_id` | `uuid` | no | Observed transaction id |
 | `event_type` | `text` | no | Transaction lifecycle event type |
-| `idempotency_key` | `text` | no | Unique lifecycle event key |
+| `idempotency_key` | `text` | no | Unique lifecycle event key, `observed-tx:{transactionId}:status:{status}:v:{version}` |
 | `payload` | `jsonb` | no | Event payload |
 | `status` | `text` | no | `NEW`, `PUBLISHED`, `FAILED`, or `DEAD` |
 | `attempts` | `integer` | no | Publish attempts, default `0` |
@@ -369,8 +369,10 @@ Constraints and indexes:
 Idempotency key format:
 
 ```text
-observed-tx:{chainId}:{txHash}:{eventIndex}:{address}:{asset}:status:{newStatus}:v:{version}
+observed-tx:{transactionId}:status:{newStatus}:v:{version}
 ```
+
+Rows written by earlier versions keep their natural-key `observed-tx:{chainId}:{txHash}:{eventIndex}:{address}:{asset}:status:{newStatus}:v:{version}` keys. A key of the current format holds a UUID where those hold five natural-key parts, so the two formats never collide.
 
 Poller query requirement:
 

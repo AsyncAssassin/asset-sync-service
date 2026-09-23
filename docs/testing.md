@@ -26,6 +26,7 @@ Target areas:
 - Confirmation threshold policy.
 - Immutable field comparison.
 - Outbox idempotency key generation.
+- Amount and identity rules: the `numeric(38, 18)` fit without `Int` overflow on extreme exponents, exponent notation, normalization to scale 18, and the per-chain address and transaction-hash formats.
 - Application command validation helpers where not covered by API tests.
 - Alchemy provider configuration and adapter: static validation rules, rollout rules, JSON-RPC error classification, secret scrubbing in header and path auth modes, health details, the cursor codec, transfer mapping from a captured-shape fixture, amount conversion, the range scan with its one-block fallback, `pageKey` hazards, budget exhaustion, finality and start modes, and the rate limiter.
 - Documentation drift guards: every changeset file, meter name, `ProblemDetail` type, and environment placeholder in the code and configuration must appear in the docs.
@@ -40,7 +41,7 @@ Required cases:
 | Reverted lifecycle | `REVERTED -> REVERTED`, stale `SEEN` after `REVERTED`, stale `CONFIRMED` after `REVERTED` |
 | Confirmations | threshold reached, threshold not reached, threshold `0`, lower stale count ignored |
 | Conflicts | amount mismatch, direction mismatch |
-| Outbox | status-specific idempotency key, no event on no-op, no event on conflict |
+| Outbox | idempotency key from the transaction id, status, and version, no event on no-op, no event on conflict |
 
 Expectations:
 
@@ -76,7 +77,7 @@ Required cases:
 | Outbox poller | `FOR UPDATE SKIP LOCKED` prevents duplicate claims across pollers |
 | Publisher retry | failed publish increments attempts and schedules `next_attempt_at` |
 | Sync cursors | lease acquire/release/reclaim, expired lease fencing, stale token rejection, heartbeat extension, high-water preservation |
-| Provider pages | missing required fields, explicit empty page, high-water-only final page, byte cap, cursor progress, multi-page success |
+| Provider pages | missing required fields, explicit empty page, high-water-only final page, byte cap, cursor progress, multi-page success, an invalid amount or transaction hash failing the whole page before any write, a chain disabled after registration failing the run terminally |
 | Sync continuation | page failure retry from checkpoint, continuation count separate from failure attempts |
 | Account traversal | busy early address is skipped while later addresses are processed |
 | Sync shutdown | draining finishes an in-flight run, interruption requeues without failure budget, a stopped worker refuses claims |
@@ -107,9 +108,9 @@ Required cases:
 | --- | --- |
 | `POST /api/v1/accounts` | create success, duplicate `externalRef`, blank `externalRef` |
 | `GET /api/v1/accounts/{accountId}` | found, not found, invalid UUID |
-| `POST /api/v1/accounts/{accountId}/addresses` | create success, account not found, chain disabled/not found, duplicate address, validation failures |
+| `POST /api/v1/accounts/{accountId}/addresses` | create success, account not found, chain disabled/not found, duplicate address, validation failures, per-chain address format |
 | `GET /api/v1/accounts/{accountId}/addresses` | list success, account not found |
-| `POST /api/v1/observed-events` | created, updated, no-change duplicate, immutable conflict, validation failures |
+| `POST /api/v1/observed-events` | created, updated, no-change duplicate, immutable conflict, validation failures, per-chain transaction-hash format, extreme exponent amounts, identities that differ only around `:` keeping separate outbox events |
 | `POST /api/v1/addresses/{addressId}/sync` | success, address not found, provider timeout, multi-page checkpointing, retry from page cursor, full queue with `Retry-After` |
 | `POST /api/v1/accounts/{accountId}/sync` | success, account not found, provider failure, busy cursor fairness |
 | `GET /api/v1/sync-runs/{syncRunId}` | found, not found |

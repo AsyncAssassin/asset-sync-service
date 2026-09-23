@@ -1,6 +1,7 @@
 package com.example.assetsync.domain.model
 
 import java.math.BigDecimal
+import java.util.UUID
 
 enum class TransactionStatus {
     SEEN,
@@ -50,11 +51,17 @@ data class ObservedTransactionNaturalKey(
         require(address.isNotBlank()) { "address must not be blank." }
         require(asset.isNotBlank()) { "asset must not be blank." }
     }
+}
 
-    fun outboxIdempotencyKey(status: TransactionStatus, version: Long): String {
-        require(version >= 0) { "version must be non-negative." }
-        return "observed-tx:$chainId:$txHash:$eventIndex:$address:$asset:status:${status.name}:v:$version"
-    }
+/**
+ * Unique key of one lifecycle outbox event: the observed transaction row id, the status it reached,
+ * and the row version of that change. The id is a UUID, so a transaction hash or address that
+ * contains ':' can no longer make two transactions share a key, and no key of this format equals
+ * one built from the natural key by earlier versions.
+ */
+fun outboxIdempotencyKey(transactionId: UUID, status: TransactionStatus, version: Long): String {
+    require(version >= 0) { "version must be non-negative." }
+    return "observed-tx:$transactionId:status:${status.name}:v:$version"
 }
 
 data class TransactionImmutableFields(

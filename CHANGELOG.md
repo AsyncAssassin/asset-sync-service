@@ -9,16 +9,26 @@ All notable changes to this project are documented in this file. The format is b
 - `429 sync-queue-full` responses carry `Retry-After` with the sync worker claim interval (`asset-sync.sync.worker.fixed-delay`, 5 seconds by default), rounded up to whole seconds.
 - The OpenAPI document declares HTTP Basic as the global security requirement, so Swagger UI offers **Authorize** and can switch between the `READ` and `OPERATOR` users.
 
+### Changed
+
+- **Breaking:** watched-address registration checks the address format of its chain: `0x` and 40 hex digits on `eth-sepolia` and `eth-mainnet`, no whitespace, `/`, or `:` on `local-evm`, and no control characters on any chain. A malformed address returns `400 invalid-request`. Observed events apply the same rules to `txHash`, with 64 hex digits on `eth-sepolia` and `eth-mainnet`.
+- **Breaking:** outbox idempotency keys are built from the observed transaction id as `observed-tx:{transactionId}:status:{status}:v:{version}` instead of the natural key. Existing rows keep their keys, and no new key can equal an old one.
+- A sync run whose event fails ingestion deterministically fails at once instead of spending its retries: an event that breaks a domain invariant or an ingest rule is provider data invalid, and events of a chain disabled after registration are a provider configuration failure.
+
 ### Fixed
 
 - In the protected profiles, a request that Spring Security's firewall rejects before authentication, for example one with `//` or `;` in its path, gets `400` instead of a `401` Basic challenge, also with valid credentials: error dispatches no longer require authentication.
 - The `demo` simulator answers a non-positive `limit` with a `400` ProblemDetail instead of `500`.
+- An amount with an extreme exponent such as `1e2147483647` passed the `numeric(38, 18)` check through an `Int` overflow and was stored as a confirmed zero. Digits are now counted in `Long`, exponent notation within range still works, and amounts are stored at scale 18. REST ingestion and provider pages share this rule.
+- A provider page is checked in full before its first event is written: an amount that is negative or does not fit `numeric(38, 18)`, which PostgreSQL used to round silently, or a malformed transaction hash fails the run terminally and writes nothing.
+- Two transactions whose hash or address contains `:` could share an outbox idempotency key, and the lifecycle event of the second one was dropped.
 - Docker Compose gives the application a 40-second stop grace period, longer than the 30-second graceful-shutdown phase. With Docker's default 10 seconds a sync run still in flight was killed before it could requeue, waited in `RUNNING` for recovery, and lost a retry attempt.
 
 ### Security
 
 - Docker Compose publishes the API and PostgreSQL on `127.0.0.1` only. `ASSET_SYNC_HTTP_BIND_ADDRESS` opens the API port to other machines, for use with a protected profile; PostgreSQL stays on loopback.
 - The protected security chain opens `/simulator/**` only under `demo`. In `prod` and `e2e`, which serve no simulator, the path requires authentication.
+- Addresses and transaction hashes with control characters are rejected on every chain, so they can no longer forge log lines.
 
 ## [0.3.0] - 2026-09-23
 

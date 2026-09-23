@@ -812,6 +812,84 @@ class SyncApiIntegrationTests(
     }
 
     @Test
+    fun `a page with an invalid event fails terminally before any of its events is written`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-invalid-page")
+        val addressId = watchedAddress["id"].asText()
+        val validEvent = providerEvent(txHash = "0xsync-invalid-page-1", address = "0xsync-invalid-page", eventIndex = 0)
+        val invalidEvents = listOf(
+            // PostgreSQL would have rounded the 19th fraction digit away and confirmed the result.
+            providerEvent(txHash = "0xsync-invalid-page-2", address = "0xsync-invalid-page", eventIndex = 1, amount = "0.0000000000000000001")
+                to "does not fit numeric(38,18)",
+            providerEvent(txHash = "0xsync-invalid-page-2", address = "0xsync-invalid-page", eventIndex = 1, amount = "100000000000000000000")
+                to "does not fit numeric(38,18)",
+            // Domain invariants used to surface as IllegalArgumentException and burn five retries.
+            providerEvent(txHash = "0xsync-invalid-page-2", address = "0xsync-invalid-page", eventIndex = 1, amount = "-1")
+                to "negative",
+            providerEvent(txHash = " ", address = "0xsync-invalid-page", eventIndex = 1)
+                to "txHash must not be blank",
+            providerEvent(txHash = "0xsync:invalid-page", address = "0xsync-invalid-page", eventIndex = 1)
+                to "txHash must not contain whitespace, '/', or ':' on local-evm",
+        )
+
+        invalidEvents.forEach { (invalidEvent, expectedError) ->
+            fakeChainProvider.setScript(
+                chainId = "local-evm",
+                address = "0xsync-invalid-page",
+                asset = "USDC",
+                steps = listOf(
+                    FakeChainProviderStep.Page(
+                        FakeChainProviderPage(
+                            expectedCursor = null,
+                            events = listOf(validEvent, invalidEvent),
+                            nextCursor = "final-page",
+                            hasMore = false,
+                            latestBlockHeight = 100,
+                            safeBlockHeight = 100,
+                        ),
+                    ),
+                ),
+            )
+
+            val syncRunId = submitAddressSync(addressId)
+            runNextClaimedSyncs()
+
+            assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId), expectedError)
+            val lastError = singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId)
+            assertTrue(lastError.contains(expectedError), "last_error for $expectedError: $lastError")
+            assertEquals(0, tableCount("observed_transactions"))
+            assertEquals(0, tableCount("outbox_events"))
+            assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        }
+    }
+
+    @Test
+    fun `events of a chain disabled after registration fail the run terminally`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-disabled-chain")
+        val addressId = watchedAddress["id"].asText()
+        fakeChainProvider.setEvents(
+            chainId = "local-evm",
+            address = "0xsync-disabled-chain",
+            asset = "USDC",
+            events = listOf(providerEvent(txHash = "0xsync-disabled-chain-1", address = "0xsync-disabled-chain")),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        jdbcTemplate.update("UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm'")
+        runNextClaimedSyncs()
+
+        // Terminal on the first attempt instead of five retries with backoff that cannot succeed.
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(1, singleInt("SELECT attempts FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(
+            "Chain local-evm is not enabled, so its events cannot be ingested.",
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId),
+        )
+        assertEquals(0, tableCount("observed_transactions"))
+    }
+
+    @Test
     fun `provider timeout is an absolute deadline and requeues partial attempt`() {
         val accountId = createAccount()
         val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-slow-trickle")

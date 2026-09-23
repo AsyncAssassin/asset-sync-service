@@ -143,6 +143,11 @@ class UnsupportedAssetException(
     val asset: String,
 ) : RuntimeException("Asset configuration was not found or is disabled for the chain.")
 
+class InvalidWatchedAddressException(
+    val chainId: String,
+    override val message: String,
+) : RuntimeException(message)
+
 class InvalidWatchedAddressPageException(
     val page: Int,
     val size: Int,

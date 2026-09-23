@@ -4,13 +4,14 @@ import com.example.assetsync.domain.model.CurrentTransactionSnapshot
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.ImmutableTransactionField
 import com.example.assetsync.domain.model.IncomingObservedTransaction
-import com.example.assetsync.domain.model.ObservedTransactionNaturalKey
 import com.example.assetsync.domain.model.OutboxEventType
 import com.example.assetsync.domain.model.TransactionStatus
 import com.example.assetsync.domain.model.TransactionTransitionResult
 import com.example.assetsync.domain.model.TransitionOutcome
+import com.example.assetsync.domain.model.outboxIdempotencyKey
 import com.example.assetsync.domain.state.TransactionStateMachine
 import java.math.BigDecimal
+import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -558,26 +559,20 @@ class TransactionStateMachineTests {
     }
 
     @Test
-    fun `natural key builds status and version specific outbox idempotency keys`() {
-        val naturalKey = ObservedTransactionNaturalKey(
-            chainId = "local-evm",
-            txHash = "0xdeadbeef",
-            eventIndex = 7,
-            address = "0xabc123",
-            asset = "USDC",
-        )
+    fun `outbox idempotency keys are built from the transaction id, status, and version`() {
+        val transactionId = UUID.fromString("5e1c9c94-6e36-4fb9-bb27-67800e88ac51")
 
         assertEquals(
-            "observed-tx:local-evm:0xdeadbeef:7:0xabc123:USDC:status:SEEN:v:0",
-            naturalKey.outboxIdempotencyKey(TransactionStatus.SEEN, version = 0),
+            "observed-tx:5e1c9c94-6e36-4fb9-bb27-67800e88ac51:status:SEEN:v:0",
+            outboxIdempotencyKey(transactionId, TransactionStatus.SEEN, version = 0),
         )
         assertEquals(
-            "observed-tx:local-evm:0xdeadbeef:7:0xabc123:USDC:status:CONFIRMED:v:1",
-            naturalKey.outboxIdempotencyKey(TransactionStatus.CONFIRMED, version = 1),
+            "observed-tx:5e1c9c94-6e36-4fb9-bb27-67800e88ac51:status:CONFIRMED:v:1",
+            outboxIdempotencyKey(transactionId, TransactionStatus.CONFIRMED, version = 1),
         )
         assertEquals(
-            "observed-tx:local-evm:0xdeadbeef:7:0xabc123:USDC:status:REVERTED:v:2",
-            naturalKey.outboxIdempotencyKey(TransactionStatus.REVERTED, version = 2),
+            "observed-tx:5e1c9c94-6e36-4fb9-bb27-67800e88ac51:status:REVERTED:v:2",
+            outboxIdempotencyKey(transactionId, TransactionStatus.REVERTED, version = 2),
         )
     }
 

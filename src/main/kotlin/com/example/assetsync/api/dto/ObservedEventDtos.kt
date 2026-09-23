@@ -5,6 +5,7 @@ import com.example.assetsync.application.transaction.InvalidObservedEventRequest
 import com.example.assetsync.application.transaction.ObservedEventIngestionResult
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
+import com.example.assetsync.domain.policy.AmountPolicy
 import jakarta.validation.constraints.AssertTrue
 import jakarta.validation.constraints.Min
 import jakarta.validation.constraints.NotBlank
@@ -51,7 +52,7 @@ data class IngestObservedEventRequest(
 ) {
     @get:AssertTrue(message = "amount must be a non-negative decimal string that fits numeric(38,18)")
     val isAmountValid: Boolean
-        get() = amount.isBlank() || parseAmountOrNull(amount)?.fitsNumeric38_18() == true
+        get() = amount.isBlank() || parseAmountOrNull(amount) != null
 
     @get:AssertTrue(message = "direction must be INBOUND or OUTBOUND")
     val isDirectionValid: Boolean
@@ -76,7 +77,7 @@ fun IngestObservedEventRequest.toCommand(): IngestObservedEventCommand =
         eventIndex = eventIndex ?: throw InvalidObservedEventRequestException("eventIndex is required."),
         address = address,
         asset = asset,
-        amount = parseAmountOrNull(amount)?.takeIf { it.fitsNumeric38_18() }
+        amount = parseAmountOrNull(amount)
             ?: throw InvalidObservedEventRequestException(
                 "amount must be a non-negative decimal string that fits numeric(38,18).",
             ),
@@ -98,14 +99,8 @@ private inline fun <reified T : Enum<T>> parseEnum(fieldName: String, value: Str
     enumValues<T>().firstOrNull { it.name == value.trim() }
         ?: throw InvalidObservedEventRequestException("$fieldName has an unsupported value.")
 
+/** Parses a decimal string, exponent notation included, into the stored scale-18 amount. */
 private fun parseAmountOrNull(value: String): BigDecimal? =
     runCatching { value.trim().toBigDecimal() }
         .getOrNull()
-        ?.takeIf { it.signum() >= 0 }
-
-private fun BigDecimal.fitsNumeric38_18(): Boolean {
-    val normalized = stripTrailingZeros()
-    val fractionDigits = maxOf(normalized.scale(), 0)
-    val integerDigits = maxOf(normalized.precision() - normalized.scale(), 0)
-    return fractionDigits <= 18 && integerDigits <= 20
-}
+        ?.let(AmountPolicy::normalizedOrNull)

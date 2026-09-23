@@ -174,11 +174,12 @@ Validation:
 - `chainId` must reference an enabled chain configuration.
 - `asset` must be registered and enabled for that chain in the asset registry; unknown or disabled assets return `404` with the title `Unsupported asset`. The seeded registry covers `USDC` on `local-evm` and `eth-sepolia`; `eth-mainnet` is seeded disabled.
 - `address` is required and must be non-blank.
+- `address` must be well formed for the chain once normalized: `0x` followed by 40 hex digits, in any casing, on `eth-sepolia` and `eth-mainnet`; no whitespace, `/`, or `:` on `local-evm`, which keeps accepting synthetic identifiers such as `0xdemoaddr`; no control characters on any chain. A malformed address returns `400` with `invalid-request` and the `chainId`, after the chain and asset checks.
 - `asset` is required and must be non-blank.
 - `label` is optional; if provided, it must be non-blank after trimming.
 - Duplicate canonical `chainId + address + asset` registrations are rejected with `409 Conflict`.
 
-Address normalization is chain-specific. For the EVM chains `local-evm`, `eth-sepolia`, and `eth-mainnet`, address and transaction-hash identity is lower-case and asset identity is upper-case before uniqueness checks. Other chains currently trim and preserve exact strings until their policies are defined.
+Address normalization is chain-specific. For the EVM chains `local-evm`, `eth-sepolia`, and `eth-mainnet`, address and transaction-hash identity is lower-case and asset identity is upper-case before uniqueness checks and format rules. Other chains currently trim and preserve exact strings until their policies are defined.
 
 ## 6. List Watched Addresses
 
@@ -289,8 +290,9 @@ HTTP/1.1 200 OK
 Validation:
 
 - `chainId`, `txHash`, `address`, and `asset` are required and must be non-blank.
+- `txHash` follows the address format rules of its chain, with 64 hex digits instead of 40 on `eth-sepolia` and `eth-mainnet`; a malformed hash returns `400` with `invalid-request`.
 - `eventIndex` is required and must be `>= 0`.
-- `amount` is required, must parse as a non-negative decimal, and must fit `numeric(38, 18)`.
+- `amount` is required, must parse as a non-negative decimal, exponent notation such as `1e2` included, and must fit `numeric(38, 18)`: at most 20 integer and 18 fraction digits. It is stored at scale 18.
 - `blockHeight` is required and must be `>= 0`.
 - `confirmations` is required and must be `>= 0`.
 - `direction` must be `INBOUND` or `OUTBOUND`.
@@ -508,6 +510,7 @@ Common mappings:
 | Invalid enum value | 400 | `https://asset-sync-service/errors/validation-failed` |
 | Missing required request parameter | 400 | `https://asset-sync-service/errors/invalid-request` |
 | Watched address pagination outside the supported bounds | 400 | `https://asset-sync-service/errors/invalid-pagination` |
+| Address or transaction hash malformed for its chain | 400 | `https://asset-sync-service/errors/invalid-request` |
 | Missing or invalid HTTP Basic credentials in protected profiles | 401 | `https://asset-sync-service/errors/unauthorized` |
 | Authenticated caller without the required role in protected profiles | 403 | `https://asset-sync-service/errors/forbidden` |
 | Account, watched address, unsupported chain or asset, or sync run not found | 404 | `https://asset-sync-service/errors/not-found` |

@@ -37,6 +37,9 @@ class WatchedAddressApplicationService(
         // through it, and local/test/demo flows rely on the seeded `local-evm` USDC row.
         assetConfigRepository.findEnabledByChainIdAndAsset(chainId = identity.chainId, asset = identity.asset)
             ?: throw UnsupportedAssetException(chainId = identity.chainId, asset = identity.asset)
+        ChainIdentityNormalizer.addressViolation(identity.chainId, identity.address)?.let { violation ->
+            throw InvalidWatchedAddressException(chainId = identity.chainId, message = violation)
+        }
 
         val now = Instant.now(clock)
         return watchedAddressRepository.insert(

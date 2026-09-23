@@ -148,12 +148,14 @@ Scenario:
 - The HTTP provider omits required `events` or `hasMore`.
 - The provider returns too many events, an oversized cursor/body/checkpoint, `hasMore=true` without cursor progress, wrong address/asset, invalid high-water fields, or insufficient final resume state. A final empty page may omit `nextCursor` only when it supplies durable block high-water such as `safeBlockHeight` or `latestBlockHeight`.
 - The provider returns events out of non-decreasing `(blockHeight, eventIndex, txHash)` order, or a page whose first event is behind the stored `last_processed_block_height` / `last_processed_event_index` checkpoint.
+- An event carries an amount that is negative or does not fit `numeric(38, 18)`, which PostgreSQL would otherwise round or reject, or a transaction hash that is blank or breaks the chain's format rules (`0x` and 64 hex digits on `eth-sepolia` and `eth-mainnet`, no whitespace, `/`, or `:` on `local-evm`, no control characters anywhere). Every event of the page is checked before the first one is written.
 - The Alchemy adapter meets a row it cannot map honestly: a `uniqueId` without the ERC-20 `:log:{n}` suffix or not matching the transaction hash, a non-hex `blockNum` or `rawContract.value`, a `rawContract.decimal` that disagrees with the registry, a missing address or contract, a category other than `erc20`, a row on the wrong side of the watched address, or a malformed provider cursor.
 
 Expected behavior:
 
 - Classify the page as terminal provider data invalid.
 - Do not ingest any event from a page that fails validation.
+- An event that passes page validation but fails ingestion deterministically is terminal as well: an immutable-field conflict, an address that is not watched, a rejected ingest rule, or a broken domain invariant. Events of the page ingested before it stay committed, and the retry budget is not spent on attempts that would fail the same way.
 - Do not advance `sync_cursors`.
 - Mark the current sync run `FAILED` with bounded `last_error`.
 - Lifecycle updates for events already behind the checkpoint are not delivered through the sync path. They arrive through `POST /api/v1/observed-events`, and provider adapters are expected to emit only finalized events.
@@ -321,7 +323,7 @@ Operational signal:
 
 Scenario:
 
-- The configured provider rejects the credentials (HTTP 401/403 or a JSON-RPC `-32600` envelope), an enabled chain has no provider network mapping, active watched addresses lack an enabled asset config, `start-mode=configured-block` has no start block for the chain, or one block holds more events for the watched address than `asset-sync.sync.pagination.page-size`, which the page contract cannot split.
+- The configured provider rejects the credentials (HTTP 401/403 or a JSON-RPC `-32600` envelope), an enabled chain has no provider network mapping, active watched addresses lack an enabled asset config, `start-mode=configured-block` has no start block for the chain, one block holds more events for the watched address than `asset-sync.sync.pagination.page-size`, which the page contract cannot split, or the chain of a synced event was disabled after its addresses were registered.
 
 Expected behavior:
 

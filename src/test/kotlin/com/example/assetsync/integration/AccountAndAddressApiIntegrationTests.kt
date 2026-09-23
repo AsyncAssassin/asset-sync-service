@@ -386,6 +386,42 @@ class AccountAndAddressApiIntegrationTests(
         assertEquals("USDC", response["asset"].asText())
     }
 
+    @Test
+    fun `sepolia registration rejects addresses that are not 0x and 40 hex digits`() {
+        val accountId = createAccount("address-format-sepolia")
+
+        expectInvalidAddress(accountId, "eth-sepolia", "0x123")
+            .andExpect(jsonPath("$.detail").value("address must be 0x followed by 40 hex digits on eth-sepolia."))
+        expectInvalidAddress(accountId, "eth-sepolia", "0x" + "g".repeat(40))
+        expectInvalidAddress(accountId, "eth-sepolia", "0x" + "a".repeat(41))
+        expectInvalidAddress(accountId, "eth-sepolia", "0xabcdef0123456789abcd\nf0123456789abcdef01")
+            .andExpect(jsonPath("$.detail").value("address must not contain control characters."))
+
+        assertEquals(0, tableCount("watched_addresses"))
+    }
+
+    @Test
+    fun `local evm registration keeps synthetic addresses but rejects whitespace slashes colons and control characters`() {
+        val accountId = createAccount("address-format-local")
+
+        listOf("0xab cd", "0xabc/def", "0xab:cd", "0xab\ncd").forEach { address ->
+            expectInvalidAddress(accountId, "local-evm", address)
+        }
+        assertEquals(0, tableCount("watched_addresses"))
+
+        assertEquals("0xsynthetic-demo", registerAddress(accountId = accountId, address = "0xSynthetic-Demo")["address"].asText())
+    }
+
+    private fun expectInvalidAddress(accountId: String, chainId: String, address: String) =
+        mockMvc.perform(
+            post("/api/v1/accounts/$accountId/addresses")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(addressRequestBody(chainId = chainId, address = address)),
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/invalid-request"))
+            .andExpect(jsonPath("$.chainId").value(chainId))
+
     private fun expectUnsupportedAsset(accountId: String, chainId: String, asset: String) {
         mockMvc.perform(
             post("/api/v1/accounts/$accountId/addresses")

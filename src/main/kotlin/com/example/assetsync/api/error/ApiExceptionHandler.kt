@@ -3,6 +3,7 @@ package com.example.assetsync.api.error
 import com.example.assetsync.application.account.AccountNotFoundException
 import com.example.assetsync.application.account.DuplicateAccountExternalRefException
 import com.example.assetsync.application.account.DuplicateWatchedAddressException
+import com.example.assetsync.application.account.InvalidWatchedAddressException
 import com.example.assetsync.application.account.InvalidWatchedAddressPageException
 import com.example.assetsync.application.account.UnsupportedAssetException
 import com.example.assetsync.application.account.UnsupportedChainException
@@ -310,6 +311,20 @@ class ApiExceptionHandler {
             title = "Invalid request",
             detail = exception.message,
             request = request,
+        )
+
+    @ExceptionHandler(InvalidWatchedAddressException::class)
+    fun handleInvalidWatchedAddress(
+        exception: InvalidWatchedAddressException,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> =
+        problem(
+            status = HttpStatus.BAD_REQUEST,
+            type = "invalid-request",
+            title = "Invalid request",
+            detail = exception.message,
+            request = request,
+            properties = mapOf("chainId" to exception.chainId),
         )
 
     @ExceptionHandler(SyncQueueFullException::class)
