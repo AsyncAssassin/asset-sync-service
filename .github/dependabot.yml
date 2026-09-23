@@ -1,7 +1,8 @@
-# Dependabot version updates. Spring Boot patch bumps arrive as pull requests under the CI
-# workflow; the Jackson BOM override in build.gradle.kts is dropped once a proposed Boot version
-# manages jackson-bom >= 2.21.5. Major bumps of Spring Boot and springdoc are ignored on purpose:
-# they are a separate migration, not a routine update, and would hide the 3.5.x patch releases.
+# Dependabot version updates, run as pull requests under the CI workflow. Major bumps of Spring
+# Boot and springdoc are ignored on purpose: they are a separate migration, not a routine update.
+# Open-source support for Spring Boot 3.5 ended with 3.5.16, so the BOM property pins in
+# build.gradle.kts (Jackson, Tomcat, pgjdbc, Log4j, commons-lang3) are not updated here and are
+# maintained by hand. The docker entry moves the pinned base image of the Dockerfile.
 version: 2
 updates:
   - package-ecosystem: "gradle"
@@ -33,6 +34,11 @@ updates:
       - dependency-name: "org.springdoc:*"
         update-types: ["version-update:semver-major"]
   - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+  - package-ecosystem: "docker"
     directory: "/"
     schedule:
       interval: "weekly"

@@ -172,6 +172,18 @@ ALCHEMY_LIVE_SMOKE=true ASSET_SYNC_PROVIDER_ALCHEMY_API_KEY='<key>' ALCHEMY_LIVE
 
 The `ALCHEMY_LIVE_SMOKE*` variables are declared as test inputs, so a changed gate or target re-runs the task; add `--rerun` to repeat an unchanged successful smoke.
 
+CI scans the Docker image with Trivy and fails on HIGH and CRITICAL vulnerabilities that have a fix, in OS packages and in the libraries inside the jar. The same scan runs locally after `./gradlew bootJar`:
+
+```bash
+docker build -t asset-sync-service:ci .
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/workspace:ro" -w /workspace \
+  aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+  image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress \
+  --timeout 15m asset-sync-service:ci
+```
+
+The first run downloads the vulnerability and Java databases, about 1.4 GB each unpacked; the timeout covers that download. A finding that does not apply goes to `.trivyignore` with its id and the reason, so the exception stays reviewable.
+
 If jOOQ generation is configured as a separate task:
 
 ```bash

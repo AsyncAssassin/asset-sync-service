@@ -11,6 +11,8 @@ All notable changes to this project are documented in this file. The format is b
 - `PATCH /api/v1/addresses/{addressId}` for `OPERATOR` sets a watched address `ACTIVE` or `DISABLED`. A disabled address is skipped by account sync, refused by address sync and event ingestion, and resumes from its stored cursor once enabled again.
 - HTTP bridge requests carry the address's durable checkpoint as `fromBlockHeight` and `fromEventIndex`, and the bridge page contract is documented in `docs/architecture.md`.
 - Observed transactions record the source of their last lifecycle change in the new `source` column (changeset 016), and outbox payloads and their published log lines carry the source of each event: `rest:<user>` for `POST /api/v1/observed-events`, `provider:<http|alchemy|fake>` for a sync.
+- CI scans the Docker image with Trivy and fails on HIGH and CRITICAL vulnerabilities that have a fix, in OS packages and in the libraries inside the jar; a finding that does not apply goes to `.trivyignore` with its reason. Trivy runs from its image pinned by digest.
+- Dependabot proposes Docker base image updates.
 - `README.md` and `docs/alchemy-runbook.md` describe two limits of reading every Alchemy block once: `registration-safe` fixes the start block at an address's first sync, not at its registration, so a new address should be synced right away; and a `required_confirmations` above the depth of the finality frontier leaves events `SEEN`.
 
 ### Changed
@@ -44,6 +46,9 @@ All notable changes to this project are documented in this file. The format is b
 - A sync run's `lastError` no longer quotes SQL: a database failure is stored as its class, for example `Database error (DataIntegrityViolationException).`, other unexpected failures as `Unexpected error (<class>).`, and the full exception goes to the log.
 - The disk-space health indicator is off, because its details showed the working directory's absolute path to every `READ` user.
 - The documentation explains why CSRF protection is off and what a browser that caches Basic credentials exposes.
+- Tomcat 10.1.60, pgjdbc 42.7.13, Log4j API 2.25.5, and commons-lang3 3.20.0 are pinned over the Spring Boot BOM, which gets no more open-source releases. None of the advisories they close is reachable in the service, but scanners reported them, three as CRITICAL.
+- The Docker image is built on `eclipse-temurin:21.0.12_8-jre-noble` instead of `21.0.8_9-jre`: the JRE is four quarterly updates newer, and the 11 HIGH advisories in the base image's GnuPG and OpenSSL packages are gone.
+- CI runs with a read-only `GITHUB_TOKEN` and actions pinned to commit SHAs, and the Gradle wrapper verifies the checksum of the distribution it downloads.
 
 ## [0.3.0] - 2026-09-23
 

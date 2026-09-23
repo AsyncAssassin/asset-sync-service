@@ -474,8 +474,8 @@ Coverage highlights:
 - Observability tests for health and metrics.
 - Alchemy adapter contract tests and worker integration tests against a scripted JSON-RPC stub, including secret scrubbing down to `sync_runs.last_error`.
 - An env-gated live smoke against Alchemy Sepolia (`ALCHEMY_LIVE_SMOKE=true`, see `docs/alchemy-runbook.md`) that CI skips.
-- GitHub Actions CI runs Gradle checks, `bootJar`, `docker compose config`, and a generated jOOQ tracking guard.
-- Dependabot proposes weekly Gradle and GitHub Actions updates as pull requests that run the same CI.
+- GitHub Actions CI runs Gradle checks, `bootJar`, a Trivy scan of the Docker image that fails on HIGH and CRITICAL vulnerabilities with a fix, `docker compose config`, and a generated jOOQ tracking guard. The workflow token is read-only, actions are pinned to commit SHAs, and the Gradle wrapper verifies the distribution checksum.
+- Dependabot proposes weekly Gradle, GitHub Actions, and Docker base image updates as pull requests that run the same CI. Spring Boot 3.5 gets no more open-source releases, so `build.gradle.kts` pins patched Jackson, Tomcat, pgjdbc, Log4j API, and commons-lang3 versions over its BOM; those pins are maintained by hand.
 
 Verification commands:
 
