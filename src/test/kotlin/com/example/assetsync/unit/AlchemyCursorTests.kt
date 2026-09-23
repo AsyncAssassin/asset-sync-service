@@ -44,6 +44,14 @@ class AlchemyCursorTests {
     }
 
     @Test
+    fun `a cursor another provider wrote says so and names the fix`() {
+        val fix = "clear the address's sync_cursors row to start it under Alchemy (docs/alchemy-runbook.md, section 6)"
+        // The demo simulator's opaque token and a JSON cursor with another provider's marker.
+        assertInvalid("sim:0123456789abcdef", "is not valid JSON, so another provider wrote it; $fix")
+        assertInvalid("""{"v":1,"p":"http","nextBlock":1}""", "belongs to provider 'http'; $fix")
+    }
+
+    @Test
     fun `rejects mid-block or provider session fields and oversized tokens`() {
         assertInvalid("""{"v":1,"p":"alchemy","nextBlock":1,"lastIdx":3}""", "unsupported fields [lastIdx]")
         assertInvalid("""{"v":1,"p":"alchemy","nextBlock":1,"pageKey":"abc"}""", "unsupported fields [pageKey]")

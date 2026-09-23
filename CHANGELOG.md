@@ -22,6 +22,10 @@ All notable changes to this project are documented in this file. The format is b
 - A `Retry-After` beyond the representable range is ignored instead of turning a `429` into a failed request without its backoff.
 - The OpenAPI document states the status each operation answers with, where it listed `200` for all of them: `201` for a new account or watched address, `201` or `200` for an ingested event, `202` with `Location` for a sync request. Every operation also lists the `ProblemDetail` errors all of them share, `400`, `401`, `403`, and `503`, under `application/problem+json`.
 - The OpenAPI document covers `/api` only, so under `demo` it no longer lists the chain simulator. Its request schemas no longer name the validation getters `isAmountValid`, `isDirectionValid`, and `isStatusValid` as required fields.
+- With `type=alchemy`, registering an address on a chain without an Alchemy network answers `404 Unsupported chain`, whose detail now reads "The chain is not configured, is disabled, or is not served by the active provider." Such an address failed every sync and stopped the next start, and its first sync turned `/actuator/health` into `503`, contrary to the 0.4.0 note that one bad address no longer does.
+- With `type=alchemy`, an address whose chain lost its network mapping, whose asset has no enabled config, or whose block holds more events than a page fails on its own with the reason in `lastDataError`, and provider health stays `UP`, as for invalid data.
+- With `type=alchemy`, an address whose cursor another provider wrote, such as the demo simulator, fails with a message that says so and points to the fix in `docs/alchemy-runbook.md`.
+- The 0.4.0 notes said that after an Alchemy outage at startup sync runs retry until Alchemy answers. They retry with backoff up to `asset-sync.sync.worker.max-attempts`, five by default, and then fail, and the `probe-failed` state clears only with a successful fetch. The README, the runbook, and the preflight's description now say so.
 
 ### Security
 

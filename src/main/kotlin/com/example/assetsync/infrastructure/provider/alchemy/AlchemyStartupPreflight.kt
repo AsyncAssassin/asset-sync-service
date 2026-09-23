@@ -103,8 +103,9 @@ object AlchemyRolloutRules {
  * scrubbed [ProviderConfigurationException], so a bad key or an unserved chain stops the process
  * before the worker can create retrying sync runs. A probe that meets an availability failure
  * (5xx, 429, a timeout, a transport error) does not: the provider starts in the `probe-failed`
- * state, health is DOWN, and sync runs retry with backoff until Alchemy answers, while the REST
- * API and outbox publishing keep working.
+ * state and health is DOWN, while the REST API and outbox publishing keep working. Sync runs retry
+ * with backoff up to `asset-sync.sync.worker.max-attempts` and then fail; nothing probes again, so
+ * the state clears with the first successful fetch.
  */
 class AlchemyStartupPreflight(
     private val properties: AlchemyProviderProperties,

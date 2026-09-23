@@ -26,6 +26,10 @@ data class AlchemyCursor(val nextBlock: Long) {
         const val MAX_LENGTH = 256
         private val ALLOWED_FIELDS = setOf("v", "p", "nextBlock")
 
+        /** A cursor from the HTTP bridge or the demo simulator means nothing here; see the runbook. */
+        private const val FOREIGN_CURSOR_ACTION =
+            "; clear the address's sync_cursors row to start it under Alchemy (docs/alchemy-runbook.md, section 6)"
+
         fun decode(raw: String?, objectMapper: ObjectMapper): AlchemyCursor? {
             if (raw == null) {
                 return null
@@ -36,7 +40,7 @@ data class AlchemyCursor(val nextBlock: Long) {
             val node = try {
                 objectMapper.readTree(raw)
             } catch (exception: JsonProcessingException) {
-                throw invalid("is not valid JSON")
+                throw invalid("is not valid JSON, so another provider wrote it$FOREIGN_CURSOR_ACTION")
             }
             if (node == null || !node.isObject) {
                 throw invalid("is not a JSON object")
@@ -53,7 +57,7 @@ data class AlchemyCursor(val nextBlock: Long) {
             val provider = node.get("p")?.takeIf { it.isTextual }?.asText()
                 ?: throw invalid("has no provider marker")
             if (provider != PROVIDER) {
-                throw invalid("belongs to provider '$provider'")
+                throw invalid("belongs to provider '$provider'$FOREIGN_CURSOR_ACTION")
             }
             val nextBlock = node.get("nextBlock")?.takeIf { it.isIntegralNumber && it.canConvertToLong() }?.asLong()
                 ?: throw invalid("has no integer nextBlock")

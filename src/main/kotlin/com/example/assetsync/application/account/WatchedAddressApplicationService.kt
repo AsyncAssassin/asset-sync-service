@@ -1,5 +1,6 @@
 package com.example.assetsync.application.account
 
+import com.example.assetsync.application.sync.ChainProviderPort
 import com.example.assetsync.domain.policy.ChainIdentityNormalizer
 import java.time.Clock
 import java.time.Instant
@@ -13,6 +14,7 @@ class WatchedAddressApplicationService(
     private val chainConfigRepository: ChainConfigRepository,
     private val assetConfigRepository: AssetConfigRepository,
     private val watchedAddressRepository: WatchedAddressRepository,
+    private val chainProviderPort: ChainProviderPort,
     private val clock: Clock,
 ) {
     companion object {
@@ -33,6 +35,11 @@ class WatchedAddressApplicationService(
             asset = command.asset,
         )
         chainConfigRepository.findEnabledByChainId(identity.chainId) ?: throw UnsupportedChainException(identity.chainId)
+        // An address on a chain the provider cannot serve would fail every sync, and under Alchemy
+        // stop the next start; it is refused like a chain that is not configured.
+        if (!chainProviderPort.supportsChain(identity.chainId)) {
+            throw UnsupportedChainException(identity.chainId)
+        }
         // The registry is the global supported-asset contract: every profile and provider type goes
         // through it, and local/test/demo flows rely on the seeded `local-evm` USDC row.
         assetConfigRepository.findEnabledByChainIdAndAsset(chainId = identity.chainId, asset = identity.asset)

@@ -167,12 +167,13 @@ class ApiExceptionHandler {
         exception: UnsupportedChainException,
         request: HttpServletRequest,
     ): ResponseEntity<ProblemDetail> =
-        // Missing and disabled chains are intentionally indistinguishable for registration callers.
+        // Missing, disabled, and chains the active provider cannot serve are intentionally
+        // indistinguishable for registration callers.
         problem(
             status = HttpStatus.NOT_FOUND,
             type = "not-found",
             title = "Unsupported chain",
-            detail = "Chain configuration was not found or is disabled.",
+            detail = "The chain is not configured, is disabled, or is not served by the active provider.",
             request = request,
         )
 

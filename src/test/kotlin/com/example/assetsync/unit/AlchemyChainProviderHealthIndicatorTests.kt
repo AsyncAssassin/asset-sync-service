@@ -105,15 +105,18 @@ class AlchemyChainProviderHealthIndicatorTests {
     }
 
     @Test
-    fun `a chain without a network mapping fails terminally with a message naming the chain`() {
+    fun `a chain without a network mapping fails that address terminally and keeps health up`() {
         val provider = provider(probedNetworks = mapOf("eth-sepolia" to 1L))
 
         val failure = assertThrows<ProviderConfigurationException> { provider.fetchObservedEventsPage(pageRequest("local-evm")) }
 
         assertTrue(failure.message!!.contains("No Alchemy network is mapped for chain local-evm"), failure.message)
         assertTrue(failure.message!!.contains("asset-sync.provider.alchemy.networks.local-evm.network"), failure.message)
-        assertEquals(failure.message, provider.lastError())
-        assertEquals(Status.DOWN, AlchemyChainProviderHealthIndicator(provider).health().status)
+        // One address's gap, not an outage: the reason is a detail and the aggregate health stays 200.
+        val health = AlchemyChainProviderHealthIndicator(provider).health()
+        assertEquals(Status.UP, health.status)
+        assertEquals(failure.message, health.details["lastDataError"])
+        assertNull(provider.lastError())
     }
 
     @Test
