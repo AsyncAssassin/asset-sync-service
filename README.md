@@ -249,7 +249,7 @@ The `demo` profile is the fastest way to show every lifecycle stage and the real
 - `DemoDataSeeder` seeds an idempotent dataset on startup: one account and watched address, observed transactions in `SEEN`, `CONFIRMED`, and `REVERTED`, outbox rows in `NEW`, `PUBLISHED`, `FAILED`, and `DEAD`, and a stale `STARTED` sync run for the recovery job to abandon. Each outbox row is a complete lifecycle event of its transaction, and seeded rows record the source `demo:seed`. Restarts do not duplicate rows, and they do not rewrite rows seeded by an earlier version either: start from an empty database (`docker compose down -v`) to get the current dataset.
 - Schedulers stay on, so the outbox poller, the sync worker, and the recovery job run live.
 
-Start PostgreSQL as in the quickstart, then run the app with the `demo` profile. The simulator base URL follows the server port, so the port can be set as `SERVER_PORT`, as `--server.port`, or in an IDE run configuration. The optional recovery delay override makes the stale-run recovery visible within seconds instead of after the default one minute:
+Start PostgreSQL as in the quickstart, then run the app with the `demo` profile. The simulator base URL follows the configured server port, so the port can be set as `SERVER_PORT`, as `--server.port`, or in an IDE run configuration; it has to be a fixed port, not `0`, and the demo does not support a servlet context path. The optional recovery delay override makes the stale-run recovery visible within seconds instead of after the default one minute:
 
 ```bash
 SPRING_PROFILES_ACTIVE=demo ASSET_SYNC_DB_PORT=55432 SERVER_PORT=18080 \

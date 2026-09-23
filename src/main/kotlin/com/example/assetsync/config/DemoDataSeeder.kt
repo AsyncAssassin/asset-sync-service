@@ -32,9 +32,11 @@ internal const val DEMO_OPERATOR_USERNAME = "demo-operator"
  * pick up. Every outbox row is a real lifecycle event of its transaction, with the payload, event
  * type, and idempotency key that ingestion would have written, so the published log lines show
  * complete events. Seeded rows record `demo:seed` as their source. Fixed UUIDs + `ON CONFLICT DO
- * NOTHING` make re-runs on restart a no-op. Demo credentials are intentionally well-known and stay in
- * the database the demo ran on; `ProdDemoUserGuard` keeps the prod profile from starting on such a
- * database.
+ * NOTHING` make re-runs on restart a no-op, and a transaction's events are seeded only together with
+ * the transaction itself, so a restart never re-inserts events that were published and then removed
+ * by retention, and never adds events for a transaction it did not write. Demo credentials are
+ * intentionally well-known and stay in the database the demo ran on; `ProdDemoUserGuard` keeps the
+ * prod profile from starting on such a database.
  */
 @Component
 @Profile("demo")
@@ -83,32 +85,35 @@ class DemoDataSeeder(
             WATCHED_ADDRESS_ID, ACCOUNT_ID, CHAIN_ID, ADDRESS, ASSET, ts, ts,
         )
 
-        seedObservedTransaction(TX_SEEN_ID, SEEN_TX_HASH, TransactionStatus.SEEN, confirmations = 1, version = 0, confirmedAt = null, revertedAt = null, ts = ts)
-        seedObservedTransaction(TX_CONFIRMED_ID, CONFIRMED_TX_HASH, TransactionStatus.CONFIRMED, confirmations = 6, version = 0, confirmedAt = ts, revertedAt = null, ts = ts)
-        // Version 1: the reverted transaction was seen first (version 0), then reverted.
-        seedObservedTransaction(TX_REVERTED_ID, REVERTED_TX_HASH, TransactionStatus.REVERTED, confirmations = 2, version = 1, confirmedAt = null, revertedAt = ts, ts = ts)
-
-        seedOutbox(
-            id = OUTBOX_NEW_ID, transactionId = TX_SEEN_ID, txHash = SEEN_TX_HASH, eventType = OutboxEventType.TRANSACTION_SEEN,
-            status = TransactionStatus.SEEN, confirmations = 1, version = 0,
-            outboxStatus = "NEW", attempts = 0, publishedAt = null, lastError = null, now = now,
-        )
-        seedOutbox(
-            id = OUTBOX_PUBLISHED_ID, transactionId = TX_CONFIRMED_ID, txHash = CONFIRMED_TX_HASH, eventType = OutboxEventType.TRANSACTION_CONFIRMED,
-            status = TransactionStatus.CONFIRMED, confirmations = 6, version = 0,
-            outboxStatus = "PUBLISHED", attempts = 0, publishedAt = now, lastError = null, now = now,
-        )
-        // The reverted transaction's two events: its first sighting went DEAD, its reversal is retrying.
-        seedOutbox(
-            id = OUTBOX_DEAD_ID, transactionId = TX_REVERTED_ID, txHash = REVERTED_TX_HASH, eventType = OutboxEventType.TRANSACTION_SEEN,
-            status = TransactionStatus.SEEN, confirmations = 1, version = 0,
-            outboxStatus = "DEAD", attempts = 10, publishedAt = null, lastError = "demo poison message", now = now,
-        )
-        seedOutbox(
-            id = OUTBOX_FAILED_ID, transactionId = TX_REVERTED_ID, txHash = REVERTED_TX_HASH, eventType = OutboxEventType.TRANSACTION_REVERTED,
-            status = TransactionStatus.REVERTED, confirmations = 2, version = 1,
-            outboxStatus = "FAILED", attempts = 3, publishedAt = null, lastError = "demo transient failure", now = now,
-        )
+        // Each transaction's events are written only when the transaction itself is new.
+        if (seedObservedTransaction(TX_SEEN_ID, SEEN_TX_HASH, TransactionStatus.SEEN, confirmations = 1, version = 0, confirmedAt = null, revertedAt = null, ts = ts)) {
+            seedOutbox(
+                id = OUTBOX_NEW_ID, transactionId = TX_SEEN_ID, txHash = SEEN_TX_HASH, eventType = OutboxEventType.TRANSACTION_SEEN,
+                status = TransactionStatus.SEEN, confirmations = 1, version = 0,
+                outboxStatus = "NEW", attempts = 0, publishedAt = null, lastError = null, now = now,
+            )
+        }
+        if (seedObservedTransaction(TX_CONFIRMED_ID, CONFIRMED_TX_HASH, TransactionStatus.CONFIRMED, confirmations = 6, version = 0, confirmedAt = ts, revertedAt = null, ts = ts)) {
+            seedOutbox(
+                id = OUTBOX_PUBLISHED_ID, transactionId = TX_CONFIRMED_ID, txHash = CONFIRMED_TX_HASH, eventType = OutboxEventType.TRANSACTION_CONFIRMED,
+                status = TransactionStatus.CONFIRMED, confirmations = 6, version = 0,
+                outboxStatus = "PUBLISHED", attempts = 0, publishedAt = now, lastError = null, now = now,
+            )
+        }
+        // Version 1: the reverted transaction was seen first (version 0), then reverted. Its first
+        // sighting went DEAD, its reversal is retrying.
+        if (seedObservedTransaction(TX_REVERTED_ID, REVERTED_TX_HASH, TransactionStatus.REVERTED, confirmations = 2, version = 1, confirmedAt = null, revertedAt = ts, ts = ts)) {
+            seedOutbox(
+                id = OUTBOX_DEAD_ID, transactionId = TX_REVERTED_ID, txHash = REVERTED_TX_HASH, eventType = OutboxEventType.TRANSACTION_SEEN,
+                status = TransactionStatus.SEEN, confirmations = 1, version = 0,
+                outboxStatus = "DEAD", attempts = 10, publishedAt = null, lastError = "demo poison message", now = now,
+            )
+            seedOutbox(
+                id = OUTBOX_FAILED_ID, transactionId = TX_REVERTED_ID, txHash = REVERTED_TX_HASH, eventType = OutboxEventType.TRANSACTION_REVERTED,
+                status = TransactionStatus.REVERTED, confirmations = 2, version = 1,
+                outboxStatus = "FAILED", attempts = 3, publishedAt = null, lastError = "demo transient failure", now = now,
+            )
+        }
 
         // A STARTED run old enough for the recovery sweeper to abandon — demonstrates recovery live.
         val staleStart = now.minus(2, ChronoUnit.HOURS).epoch()
@@ -133,7 +138,7 @@ class DemoDataSeeder(
         confirmedAt: Timestamp?,
         revertedAt: Timestamp?,
         ts: Timestamp,
-    ) {
+    ): Boolean =
         jdbcTemplate.update(
             """
             INSERT INTO observed_transactions (
@@ -145,8 +150,7 @@ class DemoDataSeeder(
             """.trimIndent(),
             id, CHAIN_ID, txHash, WATCHED_ADDRESS_ID, ADDRESS, ASSET, AMOUNT, BLOCK_HEIGHT, confirmations, status.name,
             ts, ts, confirmedAt, revertedAt, version, ts, ts, SOURCE,
-        )
-    }
+        ) == 1
 
     private fun seedOutbox(
         id: UUID,
