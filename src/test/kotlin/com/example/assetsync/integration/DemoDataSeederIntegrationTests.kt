@@ -2,6 +2,7 @@ package com.example.assetsync.integration
 
 import com.example.assetsync.TestcontainersConfiguration
 import com.example.assetsync.config.DemoDataSeeder
+import com.fasterxml.jackson.databind.ObjectMapper
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.AfterEach
@@ -33,6 +34,7 @@ class DemoDataSeederIntegrationTests(
     @Autowired private val demoDataSeeder: DemoDataSeeder,
     @Autowired private val jdbcTemplate: JdbcTemplate,
     @Autowired private val userDetailsManager: UserDetailsManager,
+    @Autowired private val objectMapper: ObjectMapper,
 ) {
 
     @BeforeEach
@@ -64,6 +66,52 @@ class DemoDataSeederIntegrationTests(
         // Re-running the seeder must not multiply rows.
         demoDataSeeder.run(null)
         assertSeededCounts()
+    }
+
+    @Test
+    fun `seeded outbox rows are complete lifecycle events of their transactions`() {
+        demoDataSeeder.run(null)
+
+        val rows = jdbcTemplate.queryForList(
+            """
+            SELECT o.status AS outbox_status, o.event_type, o.idempotency_key, o.payload::text AS payload,
+                   t.id AS transaction_id, t.chain_id, t.tx_hash, t.address, t.asset, t.status AS transaction_status
+            FROM outbox_events o
+            JOIN observed_transactions t ON t.id = o.aggregate_id
+            """.trimIndent(),
+        )
+
+        // The reverted transaction carries two events: its first sighting went DEAD, its reversal retries.
+        assertEquals(
+            setOf(
+                listOf("NEW", "TRANSACTION_SEEN", "SEEN"),
+                listOf("PUBLISHED", "TRANSACTION_CONFIRMED", "CONFIRMED"),
+                listOf("DEAD", "TRANSACTION_SEEN", "REVERTED"),
+                listOf("FAILED", "TRANSACTION_REVERTED", "REVERTED"),
+            ),
+            rows.map { listOf(it["outbox_status"], it["event_type"], it["transaction_status"]) }.toSet(),
+        )
+        rows.forEach { row ->
+            val payload = objectMapper.readTree(row["payload"] as String)
+            val transactionId = row["transaction_id"].toString()
+            assertEquals(row["event_type"], payload["eventType"].asText())
+            assertEquals("TRANSACTION_${payload["status"].asText()}", row["event_type"])
+            assertEquals(transactionId, payload["transactionId"].asText())
+            assertEquals(row["chain_id"], payload["chainId"].asText())
+            assertEquals(row["tx_hash"], payload["txHash"].asText())
+            assertEquals(row["address"], payload["address"].asText())
+            assertEquals(row["asset"], payload["asset"].asText())
+            assertEquals("demo:seed", payload["source"].asText())
+            assertTrue(
+                Regex("^observed-tx:$transactionId:status:${payload["status"].asText()}:v:[0-9]+$")
+                    .matches(row["idempotency_key"] as String),
+                "unexpected idempotency key ${row["idempotency_key"]}",
+            )
+        }
+        assertEquals(
+            listOf("demo:seed"),
+            jdbcTemplate.queryForList("SELECT DISTINCT source FROM observed_transactions", String::class.java),
+        )
     }
 
     private fun assertSeededCounts() {

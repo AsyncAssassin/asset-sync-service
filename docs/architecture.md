@@ -566,7 +566,7 @@ Key columns:
 - `version bigint not null default 0`
 - `created_at timestamptz not null`
 - `updated_at timestamptz not null`
-- `source text null` (who made the last lifecycle change: `rest:<user>` or `provider:<type>`)
+- `source text null` (who made the last lifecycle change: `rest:<user>` or `provider:<type>`; `demo:seed` for the `demo` dataset)
 
 Constraints and indexes:
 - `unique (chain_id, tx_hash, event_index, address, asset)`
@@ -976,7 +976,7 @@ Payload fields:
 - `status`
 - `confirmations`
 - `blockHeight`
-- `source`: who caused this lifecycle change, `rest:<user>` for `POST /api/v1/observed-events` or `provider:<http|alchemy|fake>` for a sync, so a status reported through the API stays distinguishable from provider data downstream. The published log line carries it too.
+- `source`: who caused this lifecycle change, `rest:<user>` for `POST /api/v1/observed-events` or `provider:<http|alchemy|fake>` for a sync (`demo:seed` for the events the `demo` profile seeds), so a status reported through the API stays distinguishable from provider data downstream. The published log line carries it too.
 
 Poller behavior:
 - Scheduled job selects due `NEW` or `FAILED` rows with `FOR UPDATE SKIP LOCKED`.

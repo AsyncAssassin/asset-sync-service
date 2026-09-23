@@ -150,12 +150,20 @@ docker compose down -v
 
 The commands below assume PostgreSQL is running on `55432` and the app is running on `18080` as shown in the quickstart. They use `python3` only to extract JSON ids into shell variables; if you prefer no parser, run each `curl`, copy the returned `id`, and replace the variables manually.
 
+External references and watched addresses are unique, so the flow starts from fresh values and can be repeated against the same database. The address is generated in upper case on purpose: the service stores EVM addresses in lower case, and the responses show the normalized form.
+
+```bash
+RUN_ID=$(date +%s)
+ADDRESS="0x$(openssl rand -hex 20 | tr 'a-f' 'A-F')"
+TX_HASH="0x$(openssl rand -hex 32)"
+```
+
 Create an account:
 
 ```bash
 ACCOUNT_JSON=$(curl -s -X POST http://localhost:18080/api/v1/accounts \
   -H 'Content-Type: application/json' \
-  -d '{"externalRef":"customer-local-001"}')
+  -d "{\"externalRef\":\"customer-local-${RUN_ID}\"}")
 
 printf '%s\n' "$ACCOUNT_JSON"
 ACCOUNT_ID=$(printf '%s' "$ACCOUNT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
@@ -166,12 +174,15 @@ Register a watched address on `local-evm`:
 ```bash
 ADDRESS_JSON=$(curl -s -X POST "http://localhost:18080/api/v1/accounts/${ACCOUNT_ID}/addresses" \
   -H 'Content-Type: application/json' \
-  -d '{
-    "chainId": "local-evm",
-    "address": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
-    "asset": "USDC",
-    "label": "primary settlement address"
-  }')
+  --data-binary @- <<EOF
+{
+  "chainId": "local-evm",
+  "address": "${ADDRESS}",
+  "asset": "USDC",
+  "label": "primary settlement address"
+}
+EOF
+)
 
 printf '%s\n' "$ADDRESS_JSON"
 ADDRESS_ID=$(printf '%s' "$ADDRESS_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
@@ -182,18 +193,21 @@ Ingest an observed transaction event:
 ```bash
 EVENT_JSON=$(curl -s -X POST http://localhost:18080/api/v1/observed-events \
   -H 'Content-Type: application/json' \
-  -d '{
-    "chainId": "local-evm",
-    "txHash": "0x9f1c2d3e4f5061728394a5b6c7d8e9f00112233445566778899aabbccddeeff0",
-    "eventIndex": 0,
-    "address": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
-    "asset": "USDC",
-    "amount": "12.340000000000000000",
-    "blockHeight": 9123456,
-    "confirmations": 1,
-    "direction": "INBOUND",
-    "status": "SEEN"
-  }')
+  --data-binary @- <<EOF
+{
+  "chainId": "local-evm",
+  "txHash": "${TX_HASH}",
+  "eventIndex": 0,
+  "address": "${ADDRESS}",
+  "asset": "USDC",
+  "amount": "12.340000000000000000",
+  "blockHeight": 9123456,
+  "confirmations": 1,
+  "direction": "INBOUND",
+  "status": "SEEN"
+}
+EOF
+)
 
 printf '%s\n' "$EVENT_JSON"
 ```
@@ -231,11 +245,11 @@ docker compose down -v
 The `demo` profile is the fastest way to show every lifecycle stage and the real HTTP provider path without any external service. Compared with `local`:
 
 - Security is the same protected HTTP Basic chain as production. The profile seeds two well-known users: `demo-reader` / `demo-reader-pw` (role `READ`, read-only) and `demo-operator` / `demo-operator-pw` (role `OPERATOR`, mutations and sync). They stay in the database the demo ran on, so never point `prod` at that database: `prod` refuses to start while either user exists and names the SQL that removes them.
-- `HttpChainProvider` is active and points at a bundled in-process simulator under `/simulator`, so an operator sync exercises the real HTTP provider path, per-address cursor checkpoints, and outbox publishing end to end. The simulator returns one `CONFIRMED` event per watched address on the first fetch and an empty page afterwards. Only `demo` opens `/simulator` without credentials; the other protected profiles serve no simulator and require authentication on that path like on any other.
-- `DemoDataSeeder` seeds an idempotent dataset on startup: one account and watched address, observed transactions in `SEEN`, `CONFIRMED`, and `REVERTED`, outbox rows in `NEW`, `PUBLISHED`, `FAILED`, and `DEAD`, and a stale `STARTED` sync run for the recovery job to abandon. Restarts do not duplicate rows.
+- `HttpChainProvider` is active and points at a bundled in-process simulator under `/simulator`, so an operator sync exercises the real HTTP provider path, per-address cursor checkpoints, and outbox publishing end to end. The simulator returns one `CONFIRMED` event per watched address on the first fetch and an empty page afterwards, on every seeded chain, `eth-sepolia` included: its transaction hash is `0x` and the SHA-256 of the chain, address, and asset, synthetic but well formed. Only `demo` opens `/simulator` without credentials; the other protected profiles serve no simulator and require authentication on that path like on any other.
+- `DemoDataSeeder` seeds an idempotent dataset on startup: one account and watched address, observed transactions in `SEEN`, `CONFIRMED`, and `REVERTED`, outbox rows in `NEW`, `PUBLISHED`, `FAILED`, and `DEAD`, and a stale `STARTED` sync run for the recovery job to abandon. Each outbox row is a complete lifecycle event of its transaction, and seeded rows record the source `demo:seed`. Restarts do not duplicate rows, and they do not rewrite rows seeded by an earlier version either: start from an empty database (`docker compose down -v`) to get the current dataset.
 - Schedulers stay on, so the outbox poller, the sync worker, and the recovery job run live.
 
-Start PostgreSQL as in the quickstart, then run the app with the `demo` profile. `SERVER_PORT` must be passed as an environment variable because the simulator base URL is derived from it. The optional recovery delay override makes the stale-run recovery visible within seconds instead of after the default one minute:
+Start PostgreSQL as in the quickstart, then run the app with the `demo` profile. The simulator base URL follows the server port, so the port can be set as `SERVER_PORT`, as `--server.port`, or in an IDE run configuration. The optional recovery delay override makes the stale-run recovery visible within seconds instead of after the default one minute:
 
 ```bash
 SPRING_PROFILES_ACTIVE=demo ASSET_SYNC_DB_PORT=55432 SERVER_PORT=18080 \
@@ -279,7 +293,7 @@ Within a few seconds the run reports `SUCCEEDED` with `eventsSeen: 1` and `event
 
 What to watch afterwards:
 
-- Application log lines `outbox_event_publish_succeeded` for the seeded `NEW` row, the retried seeded `FAILED` row, and the new `TRANSACTION_CONFIRMED` event from the simulator. The seeded `DEAD` row stays terminal.
+- Application log lines `outbox_event_publish_succeeded` for the seeded `NEW` row (`TRANSACTION_SEEN`), the retried seeded `FAILED` row (`TRANSACTION_REVERTED`), and the new `TRANSACTION_CONFIRMED` event from the simulator, each with the chain, address, transaction hash, and source of its event. The seeded `DEAD` row stays terminal.
 - The seeded stale run turns `FAILED` with an `abandoned` error once the recovery job runs: `curl -s -u demo-reader:demo-reader-pw http://localhost:18080/api/v1/sync-runs/d0000000-0000-0000-0000-0000000000f1`.
 - `curl -s -u demo-reader:demo-reader-pw http://localhost:18080/actuator/metrics/asset.sync.outbox.dead.total` reports the terminal row. `/actuator/prometheus` and Swagger UI require the same credentials; health probes stay open.
 
@@ -437,7 +451,7 @@ Every block is read once, which sets two limits. Under `registration-safe` the s
 
 - Natural idempotency keys: watched addresses use `chainId + address + asset`; observed transactions use `chainId + txHash + eventIndex + address + asset`.
 - PostgreSQL constraints enforce uniqueness, enum-like values, non-negative amounts/counts, and foreign keys.
-- Every observed transaction and outbox event records its source, `rest:<user>` for the API or `provider:<type>` for a sync, so a status reported through the API stays distinguishable from provider data.
+- Every observed transaction and outbox event records its source, `rest:<user>` for the API or `provider:<type>` for a sync (`demo:seed` for the `demo` dataset), so a status reported through the API stays distinguishable from provider data.
 - Ingestion rejects what PostgreSQL would round or refuse: amounts must fit `numeric(38, 18)`, exponent notation included, and are stored at scale 18; addresses and transaction hashes must be well formed for their chain (`0x` hex on `eth-sepolia` and `eth-mainnet`, no whitespace, `/`, or `:` on `local-evm`, no control characters anywhere); a provider page is checked in full before its first event is written.
 - Observed transaction ingestion locks existing rows with row-level `FOR UPDATE` before evaluating transitions.
 - jOOQ uses `INSERT ... ON CONFLICT` for idempotent observed-transaction and outbox writes.
