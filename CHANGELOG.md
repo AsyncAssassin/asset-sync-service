@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- The OpenAPI document states the status each operation answers with, where it listed `200` for all of them: `201` for a new account or watched address, `201` or `200` for an ingested event, `202` with `Location` for a sync request. Every operation also lists the `ProblemDetail` errors all of them share, `400`, `401`, `403`, and `503`, under `application/problem+json`.
+- The OpenAPI document covers `/api` only, so under `demo` it no longer lists the chain simulator. Its request schemas no longer name the validation getters `isAmountValid`, `isDirectionValid`, and `isStatusValid` as required fields.
+
 ## [0.4.0] - 2026-09-23
 
 ### Added

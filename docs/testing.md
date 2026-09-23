@@ -67,6 +67,7 @@ Required cases:
 | Migrations | Full Liquibase changelog applies on an empty PostgreSQL database |
 | Accounts | `external_ref` uniqueness, valid statuses, nullable `external_ref` |
 | Watched addresses | FK to account, FK to chain config, unique `chain_id + address + asset` |
+| OpenAPI document | each operation's success status (`201`, `202` with `Location`, `201` or `200` for ingest), the shared `ProblemDetail` errors, no simulator path under `demo`, and no validation getters in the request schemas |
 | Observed transactions | natural key uniqueness, invalid enum checks, non-negative checks |
 | First ingest | creates one observed transaction and one matching outbox event |
 | Duplicate ingest | creates no second transaction and no second outbox event |
