@@ -552,7 +552,7 @@ class AccountAndAddressApiIntegrationTests(
             .andExpect(status().isNotFound)
             .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/not-found"))
             .andExpect(jsonPath("$.title").value("Unsupported chain"))
-            .andExpect(jsonPath("$.detail").value("Chain configuration was not found or is disabled."))
+            .andExpect(jsonPath("$.detail").value("The chain is not configured, is disabled, or is not served by the active provider."))
     }
 
     private fun expectAddressValidationFailure(accountId: String, body: String) {

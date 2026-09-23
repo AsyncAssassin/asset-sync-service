@@ -73,6 +73,7 @@ Required cases:
 | Confirmation | `SEEN -> CONFIRMED` updates row and creates one `TRANSACTION_CONFIRMED` event |
 | Reorg | `CONFIRMED -> REVERTED` updates row and creates one `TRANSACTION_REVERTED` event |
 | Duplicate reorg | no duplicate outbox event |
+| Alchemy address gaps | registration on a chain without an Alchemy network is refused with `404`; a chain or asset gap of one address, or a block larger than a page, fails that address with health `UP` and `lastDataError`; a cursor another provider wrote names the fix |
 | Atomicity | rollback prevents observed transaction and outbox writes from splitting |
 | Retry race | concurrent duplicate processing results in one canonical row |
 | Outbox poller | `FOR UPDATE SKIP LOCKED` prevents duplicate claims across pollers |
@@ -110,7 +111,7 @@ Required cases:
 | --- | --- |
 | `POST /api/v1/accounts` | create success, duplicate `externalRef`, blank `externalRef` |
 | `GET /api/v1/accounts/{accountId}` | found, not found, invalid UUID |
-| `POST /api/v1/accounts/{accountId}/addresses` | create success, account not found, chain disabled/not found, duplicate address, validation failures, per-chain address format |
+| `POST /api/v1/accounts/{accountId}/addresses` | create success, account not found, chain disabled/not found, a chain the active provider cannot serve, duplicate address, validation failures, per-chain address format |
 | `GET /api/v1/accounts/{accountId}/addresses` | list success, account not found |
 | `PATCH /api/v1/addresses/{addressId}` | disable and enable again, unchanged status keeps `updated_at`, disabled address refused by sync, unknown address, invalid status, operator-only in protected profiles |
 | `POST /api/v1/observed-events` | created, updated, no-change duplicate, immutable conflict, validation failures, per-chain transaction-hash format, extreme exponent amounts, identities that differ only around `:` keeping separate outbox events |

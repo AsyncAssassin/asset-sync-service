@@ -7,6 +7,7 @@ import com.example.assetsync.ScriptedAlchemyChain.Transfer
 import com.example.assetsync.application.account.AccountApplicationService
 import com.example.assetsync.application.account.CreateAccountCommand
 import com.example.assetsync.application.account.RegisterWatchedAddressCommand
+import com.example.assetsync.application.account.UnsupportedChainException
 import com.example.assetsync.application.account.WatchedAddressApplicationService
 import com.example.assetsync.application.sync.ClaimedSyncRun
 import com.example.assetsync.application.sync.SyncApplicationService
@@ -26,6 +27,7 @@ import kotlin.test.assertTrue
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.jdbc.core.JdbcTemplate
@@ -284,6 +286,19 @@ class AlchemyProviderSyncIntegrationTests(
         val lastProcessedEventIndex: Int?,
         val lastFinalizedBlockHeight: Long?,
     )
+
+    @Test
+    fun `an address on a chain without an alchemy network is refused at registration`() {
+        val account = accountApplicationService.createAccount(CreateAccountCommand(externalRef = "alchemy-it-${UUID.randomUUID()}"))
+
+        // The seeded local-evm chain and its USDC row are enabled, but no Alchemy network serves them.
+        assertThrows<UnsupportedChainException> {
+            watchedAddressApplicationService.registerWatchedAddress(
+                RegisterWatchedAddressCommand(accountId = account.id, chainId = "local-evm", address = "0xlocal", asset = "USDC", label = null),
+            )
+        }
+        assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM watched_addresses", Int::class.java))
+    }
 
     private fun registerWatchedAddress(): UUID {
         val account = accountApplicationService.createAccount(CreateAccountCommand(externalRef = "alchemy-it-${UUID.randomUUID()}"))

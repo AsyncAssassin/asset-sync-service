@@ -178,7 +178,7 @@ No `Location` header is returned because the MVP does not expose a canonical wat
 Validation:
 
 - `accountId` must reference an existing account.
-- `chainId` must reference an enabled chain configuration.
+- `chainId` must reference an enabled chain configuration that the active provider serves; under `type=alchemy` that is a chain mapped to an Alchemy network. Otherwise the answer is `404` with the title `Unsupported chain`.
 - `asset` must be registered and enabled for that chain in the asset registry; unknown or disabled assets return `404` with the title `Unsupported asset`. The seeded registry covers `USDC` on `local-evm` and `eth-sepolia`; `eth-mainnet` is seeded disabled.
 - `address` is required and must be non-blank.
 - `address` must be well formed for the chain once normalized: `0x` followed by 40 hex digits, in any casing, on `eth-sepolia` and `eth-mainnet`; no whitespace, `/`, or `:` on `local-evm`, which keeps accepting synthetic identifiers such as `0xdemoaddr`; no control characters on any chain. A malformed address returns `400` with `invalid-request` and the `chainId`, after the chain and asset checks.
