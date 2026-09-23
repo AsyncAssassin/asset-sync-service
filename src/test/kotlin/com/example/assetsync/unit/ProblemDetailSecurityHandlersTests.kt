@@ -12,6 +12,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
+import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder
 import org.springframework.jdbc.CannotGetJdbcConnectionException
 import org.springframework.mock.web.MockHttpServletRequest
@@ -73,6 +74,23 @@ class ProblemDetailSecurityHandlersTests {
         assertEquals("Database operation failed.", body["detail"].asText())
         assertEquals("req-503", body["requestId"].asText())
         assertFalse(response.contentAsString.contains("secret reason"), "the failure reason must not leak")
+    }
+
+    @Test
+    fun `a username the user store cannot hold is a bad credential, not an outage`() {
+        val response = MockHttpServletResponse()
+        // PostgreSQL refuses a NUL character in the username as a data error (SQLState 22021).
+        val refused = DataIntegrityViolationException("ERROR: invalid byte sequence for encoding \"UTF8\": 0x00")
+
+        ProblemDetailAuthenticationEntryPoint(objectMapper).commence(
+            MockHttpServletRequest("GET", "/actuator/health"),
+            response,
+            InternalAuthenticationServiceException(refused.message, refused),
+        )
+
+        assertEquals(401, response.status)
+        assertEquals("Basic realm=\"asset-sync-service\"", response.getHeader(HttpHeaders.WWW_AUTHENTICATE))
+        assertEquals("https://asset-sync-service/errors/unauthorized", objectMapper.readTree(response.contentAsString)["type"].asText())
     }
 
     @Test

@@ -8,6 +8,7 @@ import com.example.assetsync.application.account.InvalidWatchedAddressPageExcept
 import com.example.assetsync.application.account.UnknownWatchedAddressException
 import com.example.assetsync.application.account.UnsupportedAssetException
 import com.example.assetsync.application.account.UnsupportedChainException
+import com.example.assetsync.application.isDatabaseFailure
 import com.example.assetsync.application.sync.SyncQueueFullException
 import com.example.assetsync.application.sync.SyncRunNotFoundException
 import com.example.assetsync.application.sync.WatchedAddressByIdNotFoundException
@@ -17,7 +18,6 @@ import com.example.assetsync.application.transaction.WatchedAddressNotFoundExcep
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import java.time.Duration
-import org.springframework.core.NestedRuntimeException
 import org.springframework.dao.DataAccessException
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.http.HttpHeaders
@@ -381,26 +381,19 @@ class ApiExceptionHandler {
         )
     }
 
-    // A transaction that cannot begin because no connection is available, or whose rollback fails
-    // on a connection the outage broke, surfaces as a TransactionException, not a
-    // DataAccessException; both mean the database could not serve the request. Other
-    // TransactionExceptions, such as an unexpected rollback, are programming errors and stay 500.
+    // The types isDatabaseFailure() names; an SQL error Spring could not translate arrives as a jOOQ
+    // exception and is routed here from handleUnexpected.
     @ExceptionHandler(
         DataAccessException::class,
         CannotCreateTransactionException::class,
         TransactionSystemException::class,
     )
     fun handleDatabaseFailure(
-        exception: NestedRuntimeException,
+        exception: RuntimeException,
         request: HttpServletRequest,
     ): ResponseEntity<ProblemDetail> {
-        logger.error(
-            "database_operation_failed path={} exceptionClass={} causeClass={}",
-            request.requestURI,
-            exception.javaClass.simpleName,
-            exception.mostSpecificCause.javaClass.simpleName,
-        )
-        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(ProblemDetails.databaseUnavailable(request))
+        RequestFailureLog.database(request, exception)
+        return respond(ProblemDetails.databaseUnavailable(request))
     }
 
     @ExceptionHandler(Exception::class)
@@ -427,19 +420,20 @@ class ApiExceptionHandler {
                 headers = exception.headers,
             )
         }
+        if (exception is RuntimeException && exception.isDatabaseFailure()) {
+            return handleDatabaseFailure(exception, request)
+        }
         // Last-resort mapping so no failure falls through to the container's default error page. The
         // client gets a generic detail; the exception itself goes to the log with the request path.
-        logger.error(
-            "unhandled_request_failure path={} exceptionClass={}",
-            request.requestURI,
-            exception.javaClass.simpleName,
-            exception,
-        )
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ProblemDetails.internalError(request))
+        RequestFailureLog.unhandled(request, exception)
+        return respond(ProblemDetails.internalError(request))
     }
 
     private fun FieldError.toErrorMessage(): String =
         "$field: ${defaultMessage ?: "invalid value"}"
+
+    private fun respond(problem: ProblemDetail): ResponseEntity<ProblemDetail> =
+        ResponseEntity.status(problem.status).body(problem)
 
     // Retry-After takes whole seconds; round up so a sub-second delay never advertises zero.
     private fun Duration.toRetryAfterSeconds(): Long =

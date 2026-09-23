@@ -7,6 +7,7 @@ import java.sql.SQLTransientConnectionException
 import java.time.Duration
 import org.hamcrest.Matchers.containsString
 import org.hamcrest.Matchers.not
+import org.jooq.exception.TooManyRowsException
 import org.junit.jupiter.api.Test
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
@@ -54,6 +55,18 @@ class ApiExceptionHandlerTests {
         @GetMapping("/unexpected-rollback")
         fun unexpectedRollback(): String =
             throw UnexpectedRollbackException("Transaction silently rolled back because it has been marked as rollback-only")
+
+        // What jOOQ throws for an SQL error Spring cannot classify, such as a write to a read-only database.
+        @GetMapping("/read-only-database")
+        fun readOnlyDatabase(): String =
+            throw org.jooq.exception.DataAccessException(
+                "SQL [insert into accounts ...]; secret internal detail",
+                SQLException("ERROR: cannot execute INSERT in a read-only transaction", "25006"),
+            )
+
+        // A jOOQ result error without SQL behind it is a programming error.
+        @GetMapping("/too-many-rows")
+        fun tooManyRows(): String = throw TooManyRowsException("Cursor returned more than one result")
     }
 
     private val mockMvc = MockMvcBuilders
@@ -87,10 +100,20 @@ class ApiExceptionHandlerTests {
     }
 
     @Test
-    fun `a transaction misuse stays an internal error`() {
-        mockMvc.perform(get("/unexpected-rollback"))
-            .andExpect(status().isInternalServerError)
-            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/internal-error"))
+    fun `an sql error spring could not translate is still a database failure`() {
+        mockMvc.perform(get("/read-only-database"))
+            .andExpect(status().isServiceUnavailable)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/database-unavailable"))
+            .andExpect(content().string(not(containsString("secret internal detail"))))
+    }
+
+    @Test
+    fun `a transaction misuse or a result error stays an internal error`() {
+        listOf("/unexpected-rollback", "/too-many-rows").forEach { path ->
+            mockMvc.perform(get(path))
+                .andExpect(status().isInternalServerError)
+                .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/internal-error"))
+        }
     }
 
     @Test

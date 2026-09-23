@@ -2,6 +2,7 @@ package com.example.assetsync.e2e
 
 import com.example.assetsync.AssetSyncServiceApplication
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.zaxxer.hikari.HikariDataSource
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -24,11 +25,12 @@ import org.testcontainers.utility.DockerImageName
 
 /**
  * Stops PostgreSQL under two running contexts and checks what callers get: every API endpoint
- * answers `503 database-unavailable`. Under the permissive `test` chain the request reaches
- * Spring MVC, where the transaction manager fails before the first query. Under the protected
- * `e2e` chain HTTP Basic cannot read its user store, so the answer must not blame the credentials
- * with a `401` and a challenge. The class owns its container: stopping the shared Testcontainers
- * database would break the other test classes.
+ * answers `503 database-unavailable`. Under the permissive `test` chain the request reaches Spring
+ * MVC and fails on its first database access: opening the transaction, a query outside one, or the
+ * rollback on a connection the outage broke. Under the protected `e2e` chain HTTP Basic cannot read
+ * its user store, so the answer must not blame the credentials with a `401` and a challenge. The
+ * class owns its container: stopping the shared Testcontainers database would break the other test
+ * classes.
  */
 class DatabaseOutageIntegrationTests {
 
@@ -48,17 +50,23 @@ class DatabaseOutageIntegrationTests {
             val protected = boot(postgres, "e2e").also(contexts::add)
             val credentials = createOperator(protected)
             contexts.forEach(::assertJdbcTimeouts)
-            assertEquals(200, send(protected, "GET", "/actuator/health").statusCode(), "health before the outage")
+            // Before the outage the operator's credentials work, and a username the user store cannot
+            // hold is an ordinary bad credential, not a database failure.
+            assertEquals(404, send(protected, "GET", "/api/v1/accounts/${UUID.randomUUID()}", credentials = credentials).statusCode())
+            val unstorable = send(protected, "GET", "/actuator/health", credentials = basic("\u0000", "pw"))
+            assertEquals(401, unstorable.statusCode(), unstorable.body())
+            assertEquals(CHALLENGE, unstorable.headers().firstValue(HttpHeaders.WWW_AUTHENTICATE).orElse(null))
 
             postgres.stop()
 
-            val mismatches = endpoints.flatMap { endpoint ->
+            val responses = endpoints.flatMap { endpoint ->
                 listOf(
-                    endpoint.describe("test") to send(permissive, endpoint.method, endpoint.path, endpoint.body),
+                    endpoint.describe("test") to sendAsync(permissive, endpoint.method, endpoint.path, endpoint.body),
                     endpoint.describe("e2e, operator") to
-                        send(protected, endpoint.method, endpoint.path, endpoint.body, credentials),
-                ).mapNotNull { (scenario, response) -> databaseUnavailableMismatch(scenario, response) }
+                        sendAsync(protected, endpoint.method, endpoint.path, endpoint.body, credentials),
+                )
             }
+            val mismatches = responses.mapNotNull { (scenario, response) -> databaseUnavailableMismatch(scenario, response.join()) }
             assertTrue(mismatches.isEmpty(), mismatches.joinToString(separator = "\n", prefix = "\n"))
 
             // The request id reaches the security-chain answer too.
@@ -68,10 +76,7 @@ class DatabaseOutageIntegrationTests {
             // Without credentials nothing needs the database: the challenge is unchanged.
             val anonymous = send(protected, "GET", "/api/v1/accounts/${UUID.randomUUID()}")
             assertEquals(401, anonymous.statusCode(), anonymous.body())
-            assertEquals(
-                "Basic realm=\"asset-sync-service\"",
-                anonymous.headers().firstValue(HttpHeaders.WWW_AUTHENTICATE).orElse(null),
-            )
+            assertEquals(CHALLENGE, anonymous.headers().firstValue(HttpHeaders.WWW_AUTHENTICATE).orElse(null))
             contexts.forEach { context ->
                 assertEquals(503, send(context, "GET", "/actuator/health").statusCode(), "health during the outage")
             }
@@ -119,10 +124,21 @@ class DatabaseOutageIntegrationTests {
         return if (expected) null else "$scenario: ${response.statusCode()} challenge=$challenge ${response.body()}"
     }
 
-    /** The pool hands out connections with the configured JDBC socket and connect timeouts. */
+    /**
+     * The pool carries the configured pgjdbc timeouts, and the socket timeout stays above the
+     * statement timeout the connection init SQL sets, so a slow query still ends with the server's
+     * own error.
+     */
     private fun assertJdbcTimeouts(context: ConfigurableApplicationContext) {
-        context.getBean(DataSource::class.java).connection.use { connection ->
+        val dataSource = context.getBean(DataSource::class.java)
+        assertEquals("5", dataSource.unwrap(HikariDataSource::class.java).dataSourceProperties.getProperty("connectTimeout"))
+        dataSource.connection.use { connection ->
+            val statementTimeoutMillis = connection.createStatement().use { statement ->
+                statement.executeQuery("SELECT setting::int FROM pg_settings WHERE name = 'statement_timeout'")
+                    .use { rows -> rows.next(); rows.getInt(1) }
+            }
             assertEquals(40_000, connection.networkTimeout, "socketTimeout of a pooled connection")
+            assertTrue(connection.networkTimeout > statementTimeoutMillis, "statement_timeout is ${statementTimeoutMillis}ms")
         }
     }
 
@@ -131,8 +147,11 @@ class DatabaseOutageIntegrationTests {
         context.getBean(UserDetailsManager::class.java).createUser(
             User.withUsername("outage-operator").password(encoder.encode("outage-pw")).roles("OPERATOR").build(),
         )
-        return Base64.getEncoder().encodeToString("outage-operator:outage-pw".toByteArray())
+        return basic("outage-operator", "outage-pw")
     }
+
+    private fun basic(username: String, password: String): String =
+        Base64.getEncoder().encodeToString("$username:$password".toByteArray())
 
     private fun send(
         context: ConfigurableApplicationContext,
@@ -140,9 +159,25 @@ class DatabaseOutageIntegrationTests {
         path: String,
         body: String? = null,
         credentials: String? = null,
-    ): HttpResponse<String> {
+    ): HttpResponse<String> = sendAsync(context, method, path, body, credentials).join()
+
+    private fun sendAsync(
+        context: ConfigurableApplicationContext,
+        method: String,
+        path: String,
+        body: String? = null,
+        credentials: String? = null,
+    ) = client.sendAsync(request(context, method, path, body, credentials), HttpResponse.BodyHandlers.ofString())
+
+    private fun request(
+        context: ConfigurableApplicationContext,
+        method: String,
+        path: String,
+        body: String?,
+        credentials: String?,
+    ): HttpRequest {
         val port = (context as WebServerApplicationContext).webServer.port
-        val request = HttpRequest.newBuilder(URI.create("http://localhost:$port$path"))
+        return HttpRequest.newBuilder(URI.create("http://localhost:$port$path"))
             .method(
                 method,
                 body?.let { HttpRequest.BodyPublishers.ofString(it) } ?: HttpRequest.BodyPublishers.noBody(),
@@ -152,12 +187,12 @@ class DatabaseOutageIntegrationTests {
                 credentials?.let { header(HttpHeaders.AUTHORIZATION, "Basic $it") }
             }
             .build()
-        return client.send(request, HttpResponse.BodyHandlers.ofString())
     }
 
     /**
-     * A one-second pool wait keeps every failing request short; the outage shows the same
-     * exceptions as with the default 30 seconds.
+     * Hikari's shortest pool wait keeps every failing request short; the outage shows the same
+     * exceptions as with the default 30 seconds. The `test` and `e2e` profiles switch off the
+     * scheduled jobs.
      */
     private fun boot(postgres: PostgreSQLContainer<*>, profile: String): ConfigurableApplicationContext =
         SpringApplicationBuilder(AssetSyncServiceApplication::class.java)
@@ -168,11 +203,11 @@ class DatabaseOutageIntegrationTests {
                 "--spring.datasource.url=${postgres.jdbcUrl}",
                 "--spring.datasource.username=${postgres.username}",
                 "--spring.datasource.password=${postgres.password}",
-                "--spring.datasource.hikari.connection-timeout=1000",
-                "--spring.datasource.hikari.validation-timeout=500",
-                "--asset-sync.outbox.scheduler.enabled=false",
-                "--asset-sync.outbox.retention.enabled=false",
-                "--asset-sync.sync.recovery.enabled=false",
-                "--asset-sync.sync.worker.enabled=false",
+                "--spring.datasource.hikari.connection-timeout=250",
+                "--spring.datasource.hikari.validation-timeout=250",
             )
+
+    private companion object {
+        const val CHALLENGE = "Basic realm=\"asset-sync-service\""
+    }
 }

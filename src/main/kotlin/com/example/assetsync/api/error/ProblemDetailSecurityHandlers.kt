@@ -1,11 +1,13 @@
 package com.example.assetsync.api.error
 
+import com.example.assetsync.application.isDatabaseFailure
 import com.fasterxml.jackson.databind.ObjectMapper
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.servlet.http.HttpServletResponse
 import java.net.URI
 import org.slf4j.LoggerFactory
-import org.springframework.dao.DataAccessException
+import org.springframework.core.NestedExceptionUtils
+import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
@@ -78,64 +80,84 @@ object ProblemDetails {
 }
 
 /**
+ * The log lines for a request that failed on the server, shared by [ApiExceptionHandler] and the
+ * authentication entry point, so a database outage leaves the same signal on either path.
+ */
+internal object RequestFailureLog {
+    private val logger = LoggerFactory.getLogger(ApiExceptionHandler::class.java)
+
+    fun database(request: HttpServletRequest, exception: Throwable) {
+        logger.error(
+            "database_operation_failed path={} exceptionClass={} causeClass={}",
+            request.requestURI,
+            exception.javaClass.simpleName,
+            NestedExceptionUtils.getMostSpecificCause(exception).javaClass.simpleName,
+        )
+    }
+
+    fun unhandled(request: HttpServletRequest, exception: Throwable) {
+        logger.error(
+            "unhandled_request_failure path={} exceptionClass={}",
+            request.requestURI,
+            exception.javaClass.simpleName,
+            exception,
+        )
+    }
+}
+
+/**
  * Security-chain counterpart of [ApiExceptionHandler]: Spring Security answers 401 before a request
  * reaches Spring MVC, so the entry point writes the same ProblemDetail shape from the filter chain.
  * The Basic challenge header is kept so `curl -u`, browsers, and API clients still know how to
  * authenticate. The detail is generic on purpose; the failure reason never reaches the client.
  *
  * An [InternalAuthenticationServiceException] means the user store lookup itself failed, so the
- * credentials were never checked: a database failure gets the API's `503 database-unavailable`
- * and anything else the generic `500`, both without a challenge, which would blame the caller.
+ * credentials were never checked. A database failure gets the API's `503 database-unavailable` and
+ * anything else the generic `500`, both without a challenge, which would blame the caller. The
+ * exception is a username the store cannot even hold, such as one with a NUL character: PostgreSQL
+ * refuses it as an integrity violation, and it is a bad credential like any other.
  */
 @Component
 class ProblemDetailAuthenticationEntryPoint(
     private val objectMapper: ObjectMapper,
 ) : AuthenticationEntryPoint {
-    private val logger = LoggerFactory.getLogger(ProblemDetailAuthenticationEntryPoint::class.java)
 
     override fun commence(
         request: HttpServletRequest,
         response: HttpServletResponse,
         authException: AuthenticationException,
     ) {
-        val problem = if (authException is InternalAuthenticationServiceException) {
-            userStoreFailure(request, authException)
-        } else {
-            response.setHeader(HttpHeaders.WWW_AUTHENTICATE, "Basic realm=\"$BASIC_AUTH_REALM\"")
-            ProblemDetails.build(
+        if (authException is InternalAuthenticationServiceException &&
+            authException.cause !is DataIntegrityViolationException
+        ) {
+            ProblemDetails.write(objectMapper, response, userStoreFailure(request, authException))
+            return
+        }
+        response.setHeader(HttpHeaders.WWW_AUTHENTICATE, "Basic realm=\"$BASIC_AUTH_REALM\"")
+        ProblemDetails.write(
+            objectMapper = objectMapper,
+            response = response,
+            problem = ProblemDetails.build(
                 status = HttpStatus.UNAUTHORIZED,
                 type = "unauthorized",
                 title = "Authentication required",
                 detail = "Valid HTTP Basic credentials are required.",
                 request = request,
-            )
-        }
-        ProblemDetails.write(objectMapper = objectMapper, response = response, problem = problem)
+            ),
+        )
     }
 
     private fun userStoreFailure(
         request: HttpServletRequest,
         exception: InternalAuthenticationServiceException,
     ): ProblemDetail {
-        val databaseFailure = generateSequence(exception.cause) { it.cause }
-            .filterIsInstance<DataAccessException>()
-            .firstOrNull()
-        if (databaseFailure == null) {
-            logger.error(
-                "unhandled_request_failure path={} exceptionClass={}",
-                request.requestURI,
-                exception.javaClass.simpleName,
-                exception,
-            )
-            return ProblemDetails.internalError(request)
+        val cause = exception.cause
+        if (cause != null && cause.isDatabaseFailure()) {
+            RequestFailureLog.database(request, cause)
+            return ProblemDetails.databaseUnavailable(request)
         }
-        logger.error(
-            "database_operation_failed path={} exceptionClass={} causeClass={}",
-            request.requestURI,
-            databaseFailure.javaClass.simpleName,
-            databaseFailure.mostSpecificCause.javaClass.simpleName,
-        )
-        return ProblemDetails.databaseUnavailable(request)
+        RequestFailureLog.unhandled(request, exception)
+        return ProblemDetails.internalError(request)
     }
 }
 
