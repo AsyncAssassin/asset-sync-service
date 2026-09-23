@@ -8,8 +8,11 @@ import com.example.assetsync.application.sync.ChainProviderUnavailableException
 import com.example.assetsync.application.sync.ProviderDataInvalidException
 import com.example.assetsync.config.ConditionalOnHttpChainProvider
 import com.example.assetsync.config.SyncProperties
+import com.example.assetsync.config.JacksonConfiguration.Companion.MAX_JSON_STRING_LENGTH
+import com.example.assetsync.config.exceedsJsonReadLimit
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.core.JsonProcessingException
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ObjectNode
@@ -132,7 +135,12 @@ class HttpChainProvider @Autowired constructor(
         val response = try {
             objectMapper.readValue(bytes, ProviderEventsPageResponse::class.java)
         } catch (exception: JsonProcessingException) {
-            throw ProviderDataInvalidException("Provider returned malformed JSON.", exception)
+            val reason = if (exception.exceedsJsonReadLimit()) {
+                "Provider returned JSON past a size limit, such as a string over $MAX_JSON_STRING_LENGTH characters."
+            } else {
+                "Provider returned malformed JSON."
+            }
+            throw ProviderDataInvalidException(reason, exception)
         }
 
         val events = response.events
@@ -195,6 +203,9 @@ class HttpChainProvider @Autowired constructor(
     }
 }
 
+// Unknown properties are skipped as they are read instead of buffered until the known ones are
+// complete, so extra bridge fields cost neither memory nor the string cap.
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class ProviderEventsPageResponse(
     val events: List<ProviderEvent>? = null,
     val nextCursor: String? = null,
@@ -205,6 +216,7 @@ data class ProviderEventsPageResponse(
     val metadata: ObjectNode? = null,
 )
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class ProviderEvent(
     val txHash: String,
     val eventIndex: Int,

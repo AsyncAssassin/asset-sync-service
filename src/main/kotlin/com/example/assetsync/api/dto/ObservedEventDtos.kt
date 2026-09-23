@@ -6,6 +6,7 @@ import com.example.assetsync.application.transaction.ObservedEventIngestionResul
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
 import com.example.assetsync.domain.policy.AmountPolicy
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import jakarta.validation.constraints.AssertTrue
 import jakarta.validation.constraints.Min
 import jakarta.validation.constraints.NotBlank
@@ -20,6 +21,10 @@ const val MAX_ADDRESS_LENGTH = 128
 const val MAX_ASSET_LENGTH = 32
 const val MAX_AMOUNT_LENGTH = 80
 
+// Unknown properties are skipped as they are read, not buffered until the known ones are complete,
+// so extra fields cost neither memory nor the JSON string cap; the same holds for the other
+// request DTOs.
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class IngestObservedEventRequest(
     @field:NotBlank(message = "chainId is required")
     @field:Size(max = MAX_CHAIN_ID_LENGTH, message = "chainId must be at most $MAX_CHAIN_ID_LENGTH characters")
@@ -50,19 +55,18 @@ data class IngestObservedEventRequest(
     @field:NotBlank(message = "status is required")
     val status: String = "",
 ) {
-    // An over-long amount is left to @Size: parsing a decimal string takes time quadratic in its
-    // length, and the validator checks every constraint, so it must not reach the parser.
+    // A blank or over-long amount is left to @NotBlank and @Size, so it is reported once.
     @get:AssertTrue(message = "amount must be a non-negative decimal string that fits numeric(38,18)")
     val isAmountValid: Boolean
-        get() = amount.isBlank() || amount.length > MAX_AMOUNT_LENGTH || parseAmountOrNull(amount) != null
+        get() = amount.failsNotBlank() || amount.length > MAX_AMOUNT_LENGTH || parseAmountOrNull(amount) != null
 
     @get:AssertTrue(message = "direction must be INBOUND or OUTBOUND")
     val isDirectionValid: Boolean
-        get() = direction.isBlank() || Direction.entries.any { it.name == direction.trim() }
+        get() = direction.failsNotBlank() || Direction.entries.any { it.name == direction.trim() }
 
     @get:AssertTrue(message = "status must be SEEN, CONFIRMED, or REVERTED")
     val isStatusValid: Boolean
-        get() = status.isBlank() || TransactionStatus.entries.any { it.name == status.trim() }
+        get() = status.failsNotBlank() || TransactionStatus.entries.any { it.name == status.trim() }
 }
 
 data class ObservedEventResponse(
@@ -102,8 +106,23 @@ private inline fun <reified T : Enum<T>> parseEnum(fieldName: String, value: Str
     enumValues<T>().firstOrNull { it.name == value.trim() }
         ?: throw InvalidObservedEventRequestException("$fieldName has an unsupported value.")
 
-/** Parses a decimal string, exponent notation included, into the stored scale-18 amount. */
+/**
+ * Parses a decimal string, exponent notation included, into the stored scale-18 amount. A value
+ * over [MAX_AMOUNT_LENGTH] is never parsed: the parse takes time quadratic in the length.
+ */
 private fun parseAmountOrNull(value: String): BigDecimal? =
-    runCatching { value.trim().toBigDecimal() }
-        .getOrNull()
-        ?.let(AmountPolicy::normalizedOrNull)
+    if (value.length > MAX_AMOUNT_LENGTH) {
+        null
+    } else {
+        runCatching { value.trim().toBigDecimal() }
+            .getOrNull()
+            ?.let(AmountPolicy::normalizedOrNull)
+    }
+
+/**
+ * Whether @NotBlank rejects this value. Hibernate Validator trims with Java's `String.trim()`,
+ * which strips only characters up to U+0020, while Kotlin's `isBlank()` also counts Unicode spaces;
+ * the getters that defer a blank value to @NotBlank must use the same test, or a value of Unicode
+ * spaces would pass validation and fail later with a different error.
+ */
+internal fun String.failsNotBlank(): Boolean = all { it <= ' ' }

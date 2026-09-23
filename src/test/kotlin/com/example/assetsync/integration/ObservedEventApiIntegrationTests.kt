@@ -373,35 +373,42 @@ class ObservedEventApiIntegrationTests(
     }
 
     @Test
-    fun `an oversized amount is refused by its length before it is parsed`() {
-        createWatchedAddress(address = "0xobserved-long-amount")
-
-        mockMvc.perform(
-            post("/api/v1/observed-events")
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(
-                    observedEventBody(address = "0xobserved-long-amount", amount = "1".repeat(MAX_JSON_STRING_LENGTH)),
-                ),
-        )
+    fun `an oversized amount gets only its length error`() {
+        postObservedEvent(address = "0xabc123", amount = "1".repeat(MAX_JSON_STRING_LENGTH))
             .andExpect(status().isBadRequest)
             .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/validation-failed"))
             .andExpect(jsonPath("$.errors.length()").value(1))
             .andExpect(jsonPath("$.errors[0]").value("amount: amount must be at most $MAX_AMOUNT_LENGTH characters"))
+    }
+
+    @Test
+    fun `a string past the json limit is refused while the body is read`() {
+        postObservedEvent(address = "0xabc123", txHash = "x".repeat(MAX_JSON_STRING_LENGTH + 1))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/invalid-request"))
+            .andExpect(
+                jsonPath("$.detail").value(
+                    "Request body exceeds a JSON size limit, such as a string over $MAX_JSON_STRING_LENGTH characters or a number over 1000 digits.",
+                ),
+            )
 
         assertEquals(0, tableCount("observed_transactions"))
     }
 
     @Test
-    fun `a string past the json limit is refused while the body is read`() {
+    fun `an unknown field is ignored at any length and position`() {
+        createWatchedAddress(address = "0xobserved-unknown-field")
+        val body = linkedMapOf<String, Any?>("note" to "x".repeat(MAX_JSON_STRING_LENGTH * 2)) +
+            observedEventPayload(address = "0xobserved-unknown-field")
+
         mockMvc.perform(
             post("/api/v1/observed-events")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content(observedEventBody(txHash = "x".repeat(MAX_JSON_STRING_LENGTH + 1))),
+                .content(objectMapper.writeValueAsString(body)),
         )
-            .andExpect(status().isBadRequest)
-            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/invalid-request"))
+            .andExpect(status().isCreated)
 
-        assertEquals(0, tableCount("observed_transactions"))
+        assertEquals(1, tableCount("observed_transactions"))
     }
 
     @Test
