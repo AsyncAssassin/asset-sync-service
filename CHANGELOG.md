@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Security
+
+- `POST /api/v1/observed-events` checks the length of `amount` before it parses the value. The parse takes time quadratic in the length, and validation ran it on a string of any size: a million-digit `amount` held a request thread for about ten seconds before the `400`. A value longer than 80 characters is now refused by its length alone.
+- The application's JSON reader accepts strings of at most 100 000 characters instead of Jackson's 20 million, in request bodies and HTTP bridge pages alike. A longer string fails a request with `400 invalid-request` and a bridge page as malformed JSON.
+
 ## [0.4.0] - 2026-09-23
 
 ### Added

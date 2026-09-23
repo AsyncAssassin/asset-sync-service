@@ -50,9 +50,11 @@ data class IngestObservedEventRequest(
     @field:NotBlank(message = "status is required")
     val status: String = "",
 ) {
+    // An over-long amount is left to @Size: parsing a decimal string takes time quadratic in its
+    // length, and the validator checks every constraint, so it must not reach the parser.
     @get:AssertTrue(message = "amount must be a non-negative decimal string that fits numeric(38,18)")
     val isAmountValid: Boolean
-        get() = amount.isBlank() || parseAmountOrNull(amount) != null
+        get() = amount.isBlank() || amount.length > MAX_AMOUNT_LENGTH || parseAmountOrNull(amount) != null
 
     @get:AssertTrue(message = "direction must be INBOUND or OUTBOUND")
     val isDirectionValid: Boolean
