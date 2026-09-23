@@ -11,6 +11,9 @@ import java.time.Instant
 import java.util.UUID
 
 interface ChainProviderPort {
+    /** Short provider type, recorded as the `provider:<name>` source of the events it returns. */
+    val providerName: String
+
     fun fetchObservedEventsPage(request: ChainProviderEventsPageRequest): ChainProviderEventsPage
 }
 
@@ -22,7 +25,9 @@ data class ChainProviderEventsPageRequest(
     val asset: String,
     val cursor: String?,
     val limit: Int,
+    /** The durable checkpoint (last processed event); a provider without a cursor resumes from it. */
     val fromBlockHeight: Long? = null,
+    val fromEventIndex: Int? = null,
     val toBlockHeight: Long? = null,
     val safeBlockHeight: Long? = null,
     val checkpoint: JsonNode? = null,
@@ -53,7 +58,7 @@ data class ChainProviderObservedEvent(
     val direction: Direction,
     val status: TransactionStatus,
 ) {
-    fun toIngestCommand(): IngestObservedEventCommand {
+    fun toIngestCommand(source: String): IngestObservedEventCommand {
         val identity = ChainIdentityNormalizer.normalize(
             chainId = chainId,
             address = address,
@@ -70,6 +75,7 @@ data class ChainProviderObservedEvent(
             confirmations = confirmations,
             direction = direction,
             status = status,
+            source = source,
         )
     }
 }

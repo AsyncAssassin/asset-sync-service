@@ -56,6 +56,8 @@ class AlchemyChainProvider(
     private val metrics: AssetSyncMetrics? = null,
 ) : ChainProviderPort {
 
+    override val providerName: String = "alchemy"
+
     private val logger = LoggerFactory.getLogger(AlchemyChainProvider::class.java)
     private val scrubber = AlchemySecretScrubber(properties.apiKey)
     private val finalityFallbackWarned: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -67,18 +69,32 @@ class AlchemyChainProvider(
         get() = properties.authMode
 
     @Volatile
-    private var state: AlchemyProviderState =
-        if (networks.isEmpty()) AlchemyProviderState.NO_REQUIRED_NETWORKS else AlchemyProviderState.PROBE_SUCCEEDED
+    private var state: AlchemyProviderState = when {
+        // Alchemy was unavailable at startup; the first successful fetch clears it.
+        preflight.unavailableNetworks.isNotEmpty() -> AlchemyProviderState.PROBE_FAILED
+        networks.isEmpty() -> AlchemyProviderState.NO_REQUIRED_NETWORKS
+        else -> AlchemyProviderState.PROBE_SUCCEEDED
+    }
 
     @Volatile
-    private var lastError: String? = null
+    private var lastError: String? = preflight.unavailableNetworks.values.takeIf { it.isNotEmpty() }?.joinToString("; ")
+
+    @Volatile
+    private var lastDataError: String? = null
 
     override fun fetchObservedEventsPage(request: ChainProviderEventsPageRequest): ChainProviderEventsPage =
         try {
             val page = Fetch(request).run()
             state = AlchemyProviderState.FETCH_SUCCEEDED
             lastError = null
+            lastDataError = null
             page
+        } catch (exception: ProviderDataInvalidException) {
+            // Invalid data for one address (a rejected parameter, an unmappable row) says nothing
+            // about Alchemy's availability, so the state stays and health keeps it as a detail.
+            lastDataError = scrubber.scrub(exception.message).take(MAX_ERROR_LENGTH)
+            logFailure(request, lastDataError)
+            throw exception
         } catch (exception: RuntimeException) {
             recordFailure(request, exception)
             throw exception
@@ -88,10 +104,16 @@ class AlchemyChainProvider(
 
     fun lastError(): String? = lastError
 
+    fun lastDataError(): String? = lastDataError
+
     private fun recordFailure(request: ChainProviderEventsPageRequest, exception: RuntimeException) {
         val error = scrubber.scrub(exception.message).take(MAX_ERROR_LENGTH)
         state = AlchemyProviderState.FETCH_FAILED
         lastError = error
+        logFailure(request, error)
+    }
+
+    private fun logFailure(request: ChainProviderEventsPageRequest, error: String?) {
         logger.warn(
             "alchemy_provider_page_fetch_failed chainId={} address={} asset={} limit={} error={}",
             request.chainId,
@@ -587,6 +609,7 @@ class AlchemyChainProvider(
 
 enum class AlchemyProviderState {
     PROBE_SUCCEEDED,
+    PROBE_FAILED,
     NO_REQUIRED_NETWORKS,
     FETCH_SUCCEEDED,
     FETCH_FAILED,

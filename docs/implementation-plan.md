@@ -1,6 +1,6 @@
 # Implementation Plan
 
-Status: Phase 16 complete  
+Status: Phases 1-16 complete; later work, including the asset registry and the Alchemy provider in v0.3.0, is tracked in `CHANGELOG.md`  
 Scope: Reviewable MVP phases  
 Source of truth: `docs/architecture.md`
 
@@ -407,7 +407,7 @@ MVP guardrails:
 - Liquibase migrations.
 - jOOQ persistence.
 - Transactional outbox.
-- Fake chain provider in `local`/`test`; HTTP adapter in every other profile.
+- Fake chain provider in `local`/`test`; elsewhere the HTTP bridge or the Alchemy adapter, as `asset-sync.provider.type` selects.
 - No database transaction while calling provider.
 - `FOR UPDATE SKIP LOCKED` for outbox poller.
 - Domain transition logic independent from Spring.
@@ -419,15 +419,14 @@ Not in MVP:
 - WebFlux.
 - Coroutines.
 - Balance projection.
-- Real blockchain node integration.
+- A self-hosted blockchain node; chain data comes from the HTTP bridge or the hosted Alchemy API.
 - Private key or signing material handling.
 
 ## 18. Future Extensions
 
 Future phases can add:
 
-- Real provider adapters.
-- Provider-specific block range scans and production indexer adapters.
+- Provider adapters beyond Alchemy ERC-20 transfers and the HTTP bridge, such as a production indexer.
 - Kafka, SQS, or Debezium-based outbox delivery.
 - Advisory locks for multi-instance sync coordination.
 - Balance projection as a rebuildable read model.

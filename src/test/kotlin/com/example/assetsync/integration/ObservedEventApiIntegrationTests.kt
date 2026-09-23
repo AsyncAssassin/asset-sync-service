@@ -65,6 +65,9 @@ class ObservedEventApiIntegrationTests(
         assertEquals(1, tableCount("outbox_events"))
         assertEquals("TRANSACTION_SEEN", singleString("SELECT event_type FROM outbox_events"))
         assertEquals(transactionId, singleString("SELECT payload ->> 'transactionId' FROM outbox_events"))
+        // The test profile authenticates nobody, so the API caller is recorded as anonymous.
+        assertEquals("rest:anonymous", singleString("SELECT source FROM observed_transactions"))
+        assertEquals("rest:anonymous", singleString("SELECT payload ->> 'source' FROM outbox_events"))
     }
 
     @Test
@@ -404,6 +407,68 @@ class ObservedEventApiIntegrationTests(
     }
 
     @Test
+    fun `extreme exponent amounts are rejected while ordinary exponent notation still fits`() {
+        createWatchedAddress(address = "0xobserved-amount-exponent")
+
+        // precision - scale overflowed Int for these, so they used to be stored as a CONFIRMED zero.
+        listOf("1e2147483647", "1e2147483648", "1e-2147483647").forEach { amount ->
+            postObservedEvent(txHash = "0xamount-exponent", address = "0xobserved-amount-exponent", amount = amount)
+                .andExpect(status().isBadRequest)
+                .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/validation-failed"))
+        }
+        assertEquals(0, tableCount("observed_transactions"))
+        assertEquals(0, tableCount("outbox_events"))
+
+        postObservedEvent(txHash = "0xamount-exponent", address = "0xobserved-amount-exponent", amount = "1e2")
+            .andExpect(status().isCreated)
+
+        assertEquals("100.000000000000000000", singleString("SELECT amount::text FROM observed_transactions"))
+        assertEquals("100.000000000000000000", singleString("SELECT payload ->> 'amount' FROM outbox_events"))
+    }
+
+    @Test
+    fun `transaction hashes must be well formed for their chain`() {
+        val sepoliaAddress = "0xAbC0000000000000000000000000000000000001"
+        createWatchedAddress(address = sepoliaAddress, chainId = "eth-sepolia")
+        createWatchedAddress(address = "0xobserved-txhash-format")
+
+        postObservedEvent(chainId = "eth-sepolia", txHash = "0xe2e-tx", address = sepoliaAddress)
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/invalid-request"))
+            .andExpect(jsonPath("$.detail").value("txHash must be 0x followed by 64 hex digits on eth-sepolia."))
+        listOf("0xhash:0", "0xhash/0", "0xhash 0", "0xhash\n0").forEach { txHash ->
+            postObservedEvent(txHash = txHash, address = "0xobserved-txhash-format")
+                .andExpect(status().isBadRequest)
+                .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/invalid-request"))
+        }
+        assertEquals(0, tableCount("observed_transactions"))
+
+        val sepoliaTxHash = "0x" + "AB".repeat(32)
+        postObservedEvent(chainId = "eth-sepolia", txHash = sepoliaTxHash, address = sepoliaAddress)
+            .andExpect(status().isCreated)
+        assertEquals(sepoliaTxHash.lowercase(), singleString("SELECT tx_hash FROM observed_transactions"))
+    }
+
+    @Test
+    fun `identities that differ only around a colon each get their own outbox event`() {
+        // Only a chain outside the EVM identity rules still accepts ':'. The outbox key used to join
+        // the natural key with ':', so these two transactions shared a key and the second event was lost.
+        insertEnabledChainWithUsdc("colon-chain")
+        createWatchedAddress(address = "0xcollision", chainId = "colon-chain")
+        createWatchedAddress(address = "0:0xcollision", chainId = "colon-chain")
+
+        postObservedEvent(chainId = "colon-chain", txHash = "0xhash:0", address = "0xcollision")
+            .andExpect(status().isCreated)
+            .andExpect(jsonPath("$.outboxEvents[0]").value("TRANSACTION_SEEN"))
+        postObservedEvent(chainId = "colon-chain", txHash = "0xhash", address = "0:0xcollision")
+            .andExpect(status().isCreated)
+            .andExpect(jsonPath("$.outboxEvents[0]").value("TRANSACTION_SEEN"))
+
+        assertEquals(2, tableCount("observed_transactions"))
+        assertEquals(2, tableCount("outbox_events"))
+    }
+
+    @Test
     fun `missing and disabled watched addresses return not found`() {
         createWatchedAddress(address = "0xobserved-disabled")
 
@@ -459,7 +524,7 @@ class ObservedEventApiIntegrationTests(
         }
     }
 
-    private fun createWatchedAddress(address: String, asset: String = "USDC"): JsonNode {
+    private fun createWatchedAddress(address: String, asset: String = "USDC", chainId: String = "local-evm"): JsonNode {
         val accountId = createAccount()
         val result = mockMvc.perform(
             post("/api/v1/accounts/$accountId/addresses")
@@ -467,7 +532,7 @@ class ObservedEventApiIntegrationTests(
                 .content(
                     objectMapper.writeValueAsString(
                         mapOf(
-                            "chainId" to "local-evm",
+                            "chainId" to chainId,
                             "address" to address,
                             "asset" to asset,
                             "label" to "primary",
@@ -503,12 +568,14 @@ class ObservedEventApiIntegrationTests(
         confirmations: Int = 1,
         direction: String = "INBOUND",
         statusValue: String = "SEEN",
+        chainId: String = "local-evm",
     ) =
         mockMvc.perform(
             post("/api/v1/observed-events")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(
                     observedEventBody(
+                        chainId = chainId,
                         txHash = txHash,
                         eventIndex = eventIndex,
                         address = address,
@@ -595,12 +662,38 @@ class ObservedEventApiIntegrationTests(
     private fun singleLong(sql: String): Long =
         requireNotNull(jdbcTemplate.queryForObject(sql, Long::class.java))
 
+    private fun insertEnabledChainWithUsdc(chainId: String) {
+        val now = Timestamp.from(Instant.now())
+        jdbcTemplate.update(
+            """
+            INSERT INTO chain_configs (chain_id, display_name, required_confirmations, enabled, created_at, updated_at)
+            VALUES (?, 'Test chain', 3, true, ?, ?)
+            """.trimIndent(),
+            chainId,
+            now,
+            now,
+        )
+        jdbcTemplate.update(
+            """
+            INSERT INTO asset_configs (
+                chain_id, asset, token_standard, contract_address, decimals, display_name, enabled, created_at, updated_at
+            )
+            VALUES (?, 'USDC', 'ERC20', ?, 6, NULL, true, ?, ?)
+            """.trimIndent(),
+            chainId,
+            "0x" + "c".repeat(40),
+            now,
+            now,
+        )
+    }
+
     private fun cleanDatabase() {
         jdbcTemplate.update("DELETE FROM outbox_events")
         jdbcTemplate.update("DELETE FROM sync_runs")
         jdbcTemplate.update("DELETE FROM observed_transactions")
         jdbcTemplate.update("DELETE FROM watched_addresses")
         jdbcTemplate.update("DELETE FROM accounts")
+        jdbcTemplate.update("DELETE FROM asset_configs WHERE chain_id NOT IN ('local-evm', 'eth-sepolia', 'eth-mainnet')")
         jdbcTemplate.update("DELETE FROM chain_configs WHERE chain_id NOT IN ('local-evm', 'eth-sepolia', 'eth-mainnet')")
         jdbcTemplate.update(
             """

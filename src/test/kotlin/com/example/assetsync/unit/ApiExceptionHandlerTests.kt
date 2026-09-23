@@ -1,12 +1,16 @@
 package com.example.assetsync.unit
 
 import com.example.assetsync.api.error.ApiExceptionHandler
+import com.example.assetsync.application.sync.SyncQueueFullException
+import java.time.Duration
 import org.hamcrest.Matchers.containsString
 import org.hamcrest.Matchers.not
 import org.junit.jupiter.api.Test
+import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.content
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.header
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 import org.springframework.test.web.servlet.setup.MockMvcBuilders
@@ -24,6 +28,10 @@ class ApiExceptionHandlerTests {
     inner class FailingController {
         @GetMapping("/boom")
         fun boom(): String = throw IllegalStateException("secret internal detail")
+
+        @GetMapping("/queue-full")
+        fun queueFull(): String =
+            throw SyncQueueFullException(maxInFlightRuns = 1, retryAfter = Duration.ofMillis(1_500))
     }
 
     private val mockMvc = MockMvcBuilders
@@ -41,6 +49,14 @@ class ApiExceptionHandlerTests {
             .andExpect(jsonPath("$.detail").value("The request could not be processed."))
             .andExpect(jsonPath("$.instance").value("/boom"))
             .andExpect(content().string(not(containsString("secret internal detail"))))
+    }
+
+    @Test
+    fun `sync queue full rounds a sub-second retry delay up to whole seconds`() {
+        mockMvc.perform(get("/queue-full"))
+            .andExpect(status().isTooManyRequests)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/sync-queue-full"))
+            .andExpect(header().string(HttpHeaders.RETRY_AFTER, "2"))
     }
 
     @Test

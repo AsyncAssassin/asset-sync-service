@@ -246,8 +246,10 @@ No outbox event is created for:
 Outbox idempotency key:
 
 ```text
-observed-tx:{chainId}:{txHash}:{eventIndex}:{address}:{asset}:status:{newStatus}:v:{version}
+observed-tx:{transactionId}:status:{newStatus}:v:{version}
 ```
+
+`transactionId` is the id of the observed transaction row, so the key stays unambiguous whatever characters the natural key holds.
 
 The observed transaction change and outbox insertion must happen in the same database transaction.
 

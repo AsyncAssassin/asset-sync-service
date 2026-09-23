@@ -111,9 +111,17 @@ interface WatchedAddressRepository {
 
     fun findByAccountId(accountId: UUID, limit: Int, offset: Int): List<WatchedAddress>
 
+    fun findById(addressId: UUID): WatchedAddress?
+
     fun findActiveById(addressId: UUID): WatchedAddress?
 
-    fun findActiveByAccountId(accountId: UUID, limit: Int, offset: Int): List<WatchedAddress>
+    /**
+     * Active addresses of the account in `(created_at, id)` order, strictly after the keyset
+     * position when one is given, so a traversal survives addresses added or disabled meanwhile.
+     */
+    fun findActiveByAccountIdAfter(accountId: UUID, afterCreatedAt: Instant?, afterId: UUID?, limit: Int): List<WatchedAddress>
+
+    fun updateStatus(addressId: UUID, status: WatchedAddressStatus, updatedAt: Instant): WatchedAddress?
 
     fun countActiveByAccountId(accountId: UUID): Int
 
@@ -142,6 +150,16 @@ class UnsupportedAssetException(
     val chainId: String,
     val asset: String,
 ) : RuntimeException("Asset configuration was not found or is disabled for the chain.")
+
+class InvalidWatchedAddressException(
+    val chainId: String,
+    override val message: String,
+) : RuntimeException(message)
+
+/** A watched address id that does not exist in any status; see WatchedAddressByIdNotFoundException for active ones. */
+class UnknownWatchedAddressException(
+    val addressId: UUID,
+) : RuntimeException("Watched address was not found.")
 
 class InvalidWatchedAddressPageException(
     val page: Int,

@@ -73,7 +73,8 @@ class AlchemyProviderConfiguration {
     /**
      * Runs during bean creation, after Liquibase (the `DSLContext` dependency already orders it and
      * the annotation makes that explicit), so a bad key or an unserved chain fails the context
-     * before any lifecycle bean, including the sync worker, starts.
+     * before any lifecycle bean, including the sync worker, starts. An Alchemy that is only
+     * unavailable at that moment does not: the provider starts DOWN and recovers on its own.
      */
     @Bean
     @DependsOnDatabaseInitialization

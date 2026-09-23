@@ -35,7 +35,11 @@ class SyncRunLifecycleService(
 
         val countInFlight = syncRunRepository.countInFlight()
         if (countInFlight >= syncProperties.worker.maxInFlightRuns) {
-            throw SyncQueueFullException(syncProperties.worker.maxInFlightRuns)
+            // The queue drains at the worker's pace, so its next claim tick is the earliest useful retry.
+            throw SyncQueueFullException(
+                maxInFlightRuns = syncProperties.worker.maxInFlightRuns,
+                retryAfter = syncProperties.worker.fixedDelay,
+            )
         }
 
         val now = Instant.now(clock)

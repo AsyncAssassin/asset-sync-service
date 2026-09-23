@@ -135,10 +135,12 @@ Expected behavior:
 - No long-lived database locks are held while waiting for provider response.
 - Under the Alchemy provider, a repeated `pageKey`, a restarted continuation page, a row outside the requested block window, a safe frontier above the latest block, and an exhausted per-fetch RPC or time budget before the first block was drained are all retryable: the cursor stays on its block boundary and the next attempt rescans from it. A budget exhausted after at least one drained block returns that prefix instead.
 - The local token bucket waits for a token only within the fetch deadline; a wait that cannot be met is a retryable outage rather than a provider 429.
+- An Alchemy that is unavailable when the service starts is the same case: the startup probe leaves the provider in the `probe-failed` state instead of stopping the process, and sync runs against it retry as above.
+- These availability failures, and for Alchemy rejected credentials or configuration, turn the provider health indicator `DOWN` until the next successful fetch. A data error for one address (a `4xx`, malformed JSON, an oversized body, an unmappable Alchemy row) keeps the indicator's state and appears as its `lastDataError` detail.
 
 Operational signal:
 
-- Store concise failure detail in `sync_runs.last_error`.
+- Store concise failure detail in `sync_runs.last_error`. Readers of the run see the service's own messages only; a database or unexpected failure is stored as its class, and the full exception is logged as `sync_run_failure_detail`.
 - Log `syncRunId`, target type, target id, and provider operation.
 
 ## 8. Malformed Provider Page
@@ -148,12 +150,15 @@ Scenario:
 - The HTTP provider omits required `events` or `hasMore`.
 - The provider returns too many events, an oversized cursor/body/checkpoint, `hasMore=true` without cursor progress, wrong address/asset, invalid high-water fields, or insufficient final resume state. A final empty page may omit `nextCursor` only when it supplies durable block high-water such as `safeBlockHeight` or `latestBlockHeight`.
 - The provider returns events out of non-decreasing `(blockHeight, eventIndex, txHash)` order, or a page whose first event is behind the stored `last_processed_block_height` / `last_processed_event_index` checkpoint.
+- An event carries an amount that is negative or does not fit `numeric(38, 18)`, which PostgreSQL would otherwise round or reject, or a transaction hash that is blank or breaks the chain's format rules (`0x` and 64 hex digits on `eth-sepolia` and `eth-mainnet`, no whitespace, `/`, or `:` on `local-evm`, no control characters anywhere). Every event of the page is checked before the first one is written.
 - The Alchemy adapter meets a row it cannot map honestly: a `uniqueId` without the ERC-20 `:log:{n}` suffix or not matching the transaction hash, a non-hex `blockNum` or `rawContract.value`, a `rawContract.decimal` that disagrees with the registry, a missing address or contract, a category other than `erc20`, a row on the wrong side of the watched address, or a malformed provider cursor.
 
 Expected behavior:
 
 - Classify the page as terminal provider data invalid.
 - Do not ingest any event from a page that fails validation.
+- An event that passes page validation but fails ingestion deterministically is terminal as well: an immutable-field conflict, an address that is not watched, a rejected ingest rule, or a broken domain invariant. Events of the page ingested before it stay committed, and the retry budget is not spent on attempts that would fail the same way.
+- In an account sync a terminal failure ends only that address. The pass continues with the other addresses and, once complete, marks the run `FAILED` with `<n> of <m> addresses failed terminally: <addressId>: <error>; ...` in `last_error`. An address that keeps failing is taken out of account syncs with `PATCH /api/v1/addresses/{addressId}` and `{"status":"DISABLED"}`.
 - Do not advance `sync_cursors`.
 - Mark the current sync run `FAILED` with bounded `last_error`.
 - Lifecycle updates for events already behind the checkpoint are not delivered through the sync path. They arrive through `POST /api/v1/observed-events`, and provider adapters are expected to emit only finalized events.
@@ -171,7 +176,7 @@ Scenario:
 
 Expected behavior:
 
-- A busy cursor lease does not mark success. Direct address sync requeues as `LEASE_BUSY`; account sync skips that address, processes later addresses, and requeues to revisit skipped work.
+- A busy cursor lease does not mark success. Direct address sync requeues as `LEASE_BUSY`; account sync defers that address, finishes its scan of the other addresses, and revisits the deferred ones once per claim until their leases are free, requeueing as `LEASE_BUSY` while any is still busy.
 - A worker must extend its cursor lease before checkpointing and through the cursor heartbeat while long page work is in progress. If extension fails, checkpoint advancement is skipped and the run is retried as a stale-owner failure.
 - Busy lease continuations increment `continuation_count`, not `failure_attempts`.
 - Stale checkpoint advancement affects zero rows. Already committed page events remain valid and the old checkpoint causes safe idempotent replay.
@@ -294,7 +299,7 @@ Expected behavior:
 - Already committed observed events and outbox rows remain valid.
 - If the crash happens after a page checkpoint advances but before sync-run completion, retry resumes from the advanced cursor.
 - If the crash happens before checkpoint advancement, retry replays the previous page and ingestion idempotency handles duplicates.
-- The `RUNNING` sync run is recovered after lease expiry and may execute again.
+- The `RUNNING` sync run is recovered after lease expiry and may execute again. The worker claims only `QUEUED` runs, so the recovery job requeues it on its first tick after the lease expires: every minute by default (`asset-sync.sync.recovery.fixed-delay`), which spends one retry attempt. Until then, a new sync request for the same target returns that run.
 - Duplicate future provider events are safe because observed-event ingestion is idempotent.
 - This is at-least-once sync execution, not exactly-once provider work.
 
@@ -311,6 +316,7 @@ Expected behavior:
 - Runs still in flight afterwards are interrupted. An interrupted run is requeued as `QUEUED` with `last_requeue_reason = FAILURE` and a `last_error` naming the shutdown; `failure_attempts` is not incremented, so restarts never consume retry budget.
 - The cursor lease of an interrupted run is released before the run is requeued; if the release fails, the lease expires and recovery clears it.
 - Already committed page events remain valid; the next claim resumes from the durable checkpoint.
+- The container stop timeout must outlast the shutdown phase. Docker Compose gives the application 40 seconds (`stop_grace_period`); with Docker's default of 10 seconds a run still in flight would be killed before it is requeued, stay `RUNNING` until recovery finds its expired lease, and lose one retry attempt.
 
 Operational signal:
 
@@ -320,17 +326,18 @@ Operational signal:
 
 Scenario:
 
-- The configured provider rejects the credentials (HTTP 401/403 or a JSON-RPC `-32600` envelope), an enabled chain has no provider network mapping, active watched addresses lack an enabled asset config, `start-mode=configured-block` has no start block for the chain, or one block holds more events for the watched address than `asset-sync.sync.pagination.page-size`, which the page contract cannot split.
+- The configured provider rejects the credentials (HTTP 401/403 or a JSON-RPC `-32600` envelope), an enabled chain with active watched addresses has no provider network mapping, active watched addresses lack an enabled asset config, `start-mode=configured-block` has no start block for the chain, one block holds more events for the watched address than `asset-sync.sync.pagination.page-size`, which the page contract cannot split, or the chain of a synced event was disabled after its addresses were registered.
 
 Expected behavior:
 
-- At startup with `asset-sync.provider.type=alchemy`, the preflight fails the process before the sync worker starts: static validation (key, auth mode, templates, numeric caps, `max-rpc-calls-per-fetch >= 4`), the registry rules, and one `eth_blockNumber` probe per required network. The failure is a `ProviderConfigurationException` whose message names the chains or `(chain_id, asset)` pairs and the operator action, never the key or the endpoint.
+- At startup with `asset-sync.provider.type=alchemy`, the preflight fails the process before the sync worker starts: static validation (key, auth mode, templates, numeric caps, `max-rpc-calls-per-fetch >= 4`), the registry rules, and one `eth_blockNumber` probe per required network that Alchemy rejects (HTTP 401/403, JSON-RPC `-32600`, or an answer that is not a block number). The failure is a `ProviderConfigurationException` whose message names the chains or `(chain_id, asset)` pairs and the operator action, never the key or the endpoint.
+- A probe that meets an outage (`5xx`, `429`, a timeout, a transport error) does not fail startup: the provider starts in the `probe-failed` state with health `DOWN` and the scrubbed error, and the first successful fetch clears it (section 7). An enabled chain without a mapping and without active watched addresses, such as the seeded `local-evm` on a fresh database, is only logged; a sync of an address registered there later fails terminally.
 - During a sync run, `ProviderConfigurationException` is terminal: the run is marked `FAILED` at once, `failure_attempts` is not spent on retries that cannot succeed, and the checkpoint does not move.
 - `sync_runs.last_error`, log lines, health details, and exception messages are scrubbed of the API key; transport failures that embed a request URL are rethrown with a bounded scrubbed message and without their cause.
 
 Operational signal:
 
-- Startup log `alchemy_preflight_succeeded` with the probed networks, or the startup failure with the scrubbed message.
+- Startup log `alchemy_preflight_succeeded` with the probed and the unavailable networks, or the startup failure with the scrubbed message; `alchemy_preflight_probe_unavailable` per unavailable network and `alchemy_preflight_unmapped_chains_skipped` for unmapped chains without active addresses.
 - Log `alchemy_rpc_failed` and `alchemy_provider_page_fetch_failed` with the scrubbed error.
 - Health component `alchemyChainProvider` with `provider`, `authMode`, `networks`, `state`, and the scrubbed `error`.
 
@@ -338,7 +345,7 @@ Operational signal:
 
 Deferred areas:
 
-- Real provider rate limiting and partial block-range failures.
+- Provider rate limiting shared across instances; the Alchemy token bucket is local to each process.
 - Broker-specific delivery errors.
 - CDC connector lag.
 - Balance projection rebuild failure.

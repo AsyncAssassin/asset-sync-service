@@ -37,6 +37,9 @@ class WatchedAddressApplicationService(
         // through it, and local/test/demo flows rely on the seeded `local-evm` USDC row.
         assetConfigRepository.findEnabledByChainIdAndAsset(chainId = identity.chainId, asset = identity.asset)
             ?: throw UnsupportedAssetException(chainId = identity.chainId, asset = identity.asset)
+        ChainIdentityNormalizer.addressViolation(identity.chainId, identity.address)?.let { violation ->
+            throw InvalidWatchedAddressException(chainId = identity.chainId, message = violation)
+        }
 
         val now = Instant.now(clock)
         return watchedAddressRepository.insert(
@@ -52,6 +55,22 @@ class WatchedAddressApplicationService(
                 updatedAt = now,
             ),
         )
+    }
+
+    /**
+     * Enables or disables a watched address. A disabled address is skipped by account sync and
+     * refused by address sync and event ingestion; enabling it again resumes from its stored cursor.
+     * Setting the current status again changes nothing.
+     */
+    @Transactional
+    fun updateStatus(addressId: UUID, status: WatchedAddressStatus): WatchedAddress {
+        val current = watchedAddressRepository.findById(addressId)
+            ?: throw UnknownWatchedAddressException(addressId)
+        if (current.status == status) {
+            return current
+        }
+        return watchedAddressRepository.updateStatus(addressId = addressId, status = status, updatedAt = Instant.now(clock))
+            ?: throw UnknownWatchedAddressException(addressId)
     }
 
     @Transactional(readOnly = true)

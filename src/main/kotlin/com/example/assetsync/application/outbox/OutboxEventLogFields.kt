@@ -10,6 +10,7 @@ data class OutboxEventLogFields(
     val txHash: String?,
     val eventIndex: Int?,
     val transactionStatus: String?,
+    val source: String?,
 )
 
 fun OutboxEvent.toLogFields(): OutboxEventLogFields =
@@ -21,6 +22,7 @@ fun OutboxEvent.toLogFields(): OutboxEventLogFields =
         txHash = payload.textOrNull("txHash"),
         eventIndex = payload.intOrNull("eventIndex"),
         transactionStatus = payload.textOrNull("status"),
+        source = payload.textOrNull("source"),
     )
 
 private fun JsonNode.textOrNull(fieldName: String): String? =

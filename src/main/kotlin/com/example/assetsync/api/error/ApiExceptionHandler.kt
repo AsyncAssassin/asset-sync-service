@@ -3,7 +3,9 @@ package com.example.assetsync.api.error
 import com.example.assetsync.application.account.AccountNotFoundException
 import com.example.assetsync.application.account.DuplicateAccountExternalRefException
 import com.example.assetsync.application.account.DuplicateWatchedAddressException
+import com.example.assetsync.application.account.InvalidWatchedAddressException
 import com.example.assetsync.application.account.InvalidWatchedAddressPageException
+import com.example.assetsync.application.account.UnknownWatchedAddressException
 import com.example.assetsync.application.account.UnsupportedAssetException
 import com.example.assetsync.application.account.UnsupportedChainException
 import com.example.assetsync.application.sync.SyncQueueFullException
@@ -14,6 +16,7 @@ import com.example.assetsync.application.transaction.ObservedTransactionConflict
 import com.example.assetsync.application.transaction.WatchedAddressNotFoundException
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
+import java.time.Duration
 import org.springframework.dao.DataAccessException
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.http.HttpHeaders
@@ -213,6 +216,19 @@ class ApiExceptionHandler {
             request = request,
         )
 
+    @ExceptionHandler(UnknownWatchedAddressException::class)
+    fun handleUnknownWatchedAddress(
+        exception: UnknownWatchedAddressException,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> =
+        problem(
+            status = HttpStatus.NOT_FOUND,
+            type = "not-found",
+            title = "Watched address not found",
+            detail = "Watched address ${exception.addressId} was not found.",
+            request = request,
+        )
+
     @ExceptionHandler(SyncRunNotFoundException::class)
     fun handleSyncRunNotFound(
         exception: SyncRunNotFoundException,
@@ -311,6 +327,20 @@ class ApiExceptionHandler {
             request = request,
         )
 
+    @ExceptionHandler(InvalidWatchedAddressException::class)
+    fun handleInvalidWatchedAddress(
+        exception: InvalidWatchedAddressException,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> =
+        problem(
+            status = HttpStatus.BAD_REQUEST,
+            type = "invalid-request",
+            title = "Invalid request",
+            detail = exception.message,
+            request = request,
+            properties = mapOf("chainId" to exception.chainId),
+        )
+
     @ExceptionHandler(SyncQueueFullException::class)
     fun handleSyncQueueFull(
         exception: SyncQueueFullException,
@@ -323,6 +353,9 @@ class ApiExceptionHandler {
             detail = "Too many sync runs are queued or running; retry shortly.",
             request = request,
             properties = mapOf("maxInFlightRuns" to exception.maxInFlightRuns),
+            headers = HttpHeaders().apply {
+                set(HttpHeaders.RETRY_AFTER, exception.retryAfter.toRetryAfterSeconds().toString())
+            },
         )
 
     @ExceptionHandler(DataIntegrityViolationException::class)
@@ -407,6 +440,10 @@ class ApiExceptionHandler {
 
     private fun FieldError.toErrorMessage(): String =
         "$field: ${defaultMessage ?: "invalid value"}"
+
+    // Retry-After takes whole seconds; round up so a sub-second delay never advertises zero.
+    private fun Duration.toRetryAfterSeconds(): Long =
+        maxOf(1L, toSeconds() + if (toNanosPart() > 0) 1 else 0)
 
     private fun problem(
         status: HttpStatus,

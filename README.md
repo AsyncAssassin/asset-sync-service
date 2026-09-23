@@ -27,7 +27,7 @@
 ## Implemented Features
 
 - Account creation and lookup.
-- Watched address registration and account-level address listing.
+- Watched address registration with chain-specific address formats, account-level address listing, and enabling or disabling an address.
 - Observed event ingestion for `local-evm`.
 - Asset registry: watched-address registration accepts only assets enabled for the chain in `asset_configs`, seeded with `USDC` on `local-evm` and `eth-sepolia` and a disabled `eth-mainnet` row.
 - Idempotent transaction lifecycle transitions: `SEEN`, `CONFIRMED`, and `REVERTED`.
@@ -48,12 +48,14 @@ PostgreSQL is the source of truth for accounts, watched addresses, observed tran
 ```mermaid
 flowchart LR
     client["REST clients"] --> api["REST API<br/>Spring MVC controllers"]
-    scheduler["Scheduler"] --> services["Application services"]
+    worker["Sync worker<br/>SyncRunWorkerJob"] --> services["Application services"]
+    recovery["Sync recovery<br/>SyncRunRecoveryJob"] --> services
     api --> services
     services --> state["Domain state machine"]
     services --> providerPort["ChainProviderPort"]
     providerPort --> fakeProvider["Fake chain provider<br/>local/test"]
-    providerPort --> httpProvider["HTTP chain provider<br/>non-local/test"]
+    providerPort --> httpProvider["HTTP bridge provider<br/>provider.type=http"]
+    providerPort --> alchemyProvider["Alchemy JSON-RPC provider<br/>provider.type=alchemy"]
     services --> repos["jOOQ repositories"]
     repos --> db[("PostgreSQL")]
     db --> outbox["Transactional outbox"]
@@ -78,7 +80,7 @@ Swagger UI shows the generated OpenAPI surface exposed by the running service.
 
 ![Swagger UI](docs/assets/swagger-ui.png)
 
-Actuator health captures show the service and readiness endpoints returning `UP`.
+Actuator health captures show the service and readiness endpoints returning `UP` as an anonymous caller sees them: the aggregate status without components. Authenticated callers in the protected profiles, and everyone in `local`, also see the database and chain provider components.
 
 ![Health endpoint](docs/assets/health.png)
 
@@ -93,17 +95,20 @@ When the app is running:
 - Swagger UI: [http://localhost:18080/swagger-ui.html](http://localhost:18080/swagger-ui.html)
 - OpenAPI JSON: [http://localhost:18080/v3/api-docs](http://localhost:18080/v3/api-docs)
 
+The OpenAPI document declares HTTP Basic, so **Authorize** in Swagger UI takes a username and password and sends them with every call. Outside `local` and `test` both pages and every API call require them.
+
 Current public endpoints:
 
 ```text
 POST /api/v1/accounts
 GET  /api/v1/accounts/{accountId}
-POST /api/v1/accounts/{accountId}/addresses
-GET  /api/v1/accounts/{accountId}/addresses
-POST /api/v1/observed-events
-POST /api/v1/addresses/{addressId}/sync
-POST /api/v1/accounts/{accountId}/sync
-GET  /api/v1/sync-runs/{id}
+POST  /api/v1/accounts/{accountId}/addresses
+GET   /api/v1/accounts/{accountId}/addresses
+PATCH /api/v1/addresses/{addressId}
+POST  /api/v1/observed-events
+POST  /api/v1/addresses/{addressId}/sync
+POST  /api/v1/accounts/{accountId}/sync
+GET   /api/v1/sync-runs/{id}
 ```
 
 Transaction read/list endpoints are intentionally deferred and are not exposed by this MVP.
@@ -225,12 +230,12 @@ docker compose down -v
 
 The `demo` profile is the fastest way to show every lifecycle stage and the real HTTP provider path without any external service. Compared with `local`:
 
-- Security is the same protected HTTP Basic chain as production. Two well-known users exist only under this profile: `demo-reader` / `demo-reader-pw` (role `READ`, read-only) and `demo-operator` / `demo-operator-pw` (role `OPERATOR`, mutations and sync).
-- `HttpChainProvider` is active and points at a bundled in-process simulator under `/simulator`, so an operator sync exercises the real HTTP provider path, per-address cursor checkpoints, and outbox publishing end to end. The simulator returns one `CONFIRMED` event per watched address on the first fetch and an empty page afterwards.
+- Security is the same protected HTTP Basic chain as production. The profile seeds two well-known users: `demo-reader` / `demo-reader-pw` (role `READ`, read-only) and `demo-operator` / `demo-operator-pw` (role `OPERATOR`, mutations and sync). They stay in the database the demo ran on, so never point `prod` at that database: `prod` refuses to start while either user exists and names the SQL that removes them.
+- `HttpChainProvider` is active and points at a bundled in-process simulator under `/simulator`, so an operator sync exercises the real HTTP provider path, per-address cursor checkpoints, and outbox publishing end to end. The simulator returns one `CONFIRMED` event per watched address on the first fetch and an empty page afterwards. Only `demo` opens `/simulator` without credentials; the other protected profiles serve no simulator and require authentication on that path like on any other.
 - `DemoDataSeeder` seeds an idempotent dataset on startup: one account and watched address, observed transactions in `SEEN`, `CONFIRMED`, and `REVERTED`, outbox rows in `NEW`, `PUBLISHED`, `FAILED`, and `DEAD`, and a stale `STARTED` sync run for the recovery job to abandon. Restarts do not duplicate rows.
 - Schedulers stay on, so the outbox poller, the sync worker, and the recovery job run live.
 
-Start PostgreSQL as in the quickstart, then run the app with the `demo` profile. `SERVER_PORT` must be passed as an environment variable because the simulator base URL is derived from it. The optional recovery delay override makes the stale-run recovery visible within seconds instead of the default five minutes:
+Start PostgreSQL as in the quickstart, then run the app with the `demo` profile. `SERVER_PORT` must be passed as an environment variable because the simulator base URL is derived from it. The optional recovery delay override makes the stale-run recovery visible within seconds instead of after the default one minute:
 
 ```bash
 SPRING_PROFILES_ACTIVE=demo ASSET_SYNC_DB_PORT=55432 SERVER_PORT=18080 \
@@ -305,6 +310,15 @@ Check the app:
 curl -s http://localhost:18081/actuator/health
 ```
 
+Compose publishes the API and PostgreSQL on `127.0.0.1` only, because the default `local` profile has no authentication and the database password is a well-known default. To reach the API from another machine, for example during a remote demo, set `ASSET_SYNC_HTTP_BIND_ADDRESS=0.0.0.0` together with a protected profile, never with `local`. The `demo` users have public passwords, so expose `demo` on a trusted network only. PostgreSQL stays on loopback either way.
+
+```bash
+SPRING_PROFILES_ACTIVE=demo ASSET_SYNC_HTTP_BIND_ADDRESS=0.0.0.0 ASSET_SYNC_DB_PORT=55433 ASSET_SYNC_HTTP_PORT=18081 \
+docker compose up --build -d
+```
+
+The application container has a 40-second stop grace period, longer than the 30-second graceful-shutdown phase, so `docker compose stop` lets in-flight sync runs finish or requeue before Docker kills the process.
+
 Stop containers:
 
 ```bash
@@ -325,7 +339,7 @@ Database configuration for the `local` profile:
 | `ASSET_SYNC_DB_MAX_POOL_SIZE` | `10` | Hikari max pool size |
 | `ASSET_SYNC_DB_MIN_IDLE` | `1` | Hikari minimum idle connections |
 
-The `prod` profile takes the datasource only from `ASSET_SYNC_DB_URL`, `ASSET_SYNC_DB_USER`, and `ASSET_SYNC_DB_PASSWORD`, with no defaults, and provisions its operator account from `ASSET_SYNC_ADMIN_USERNAME` and `ASSET_SYNC_ADMIN_PASSWORD`.
+The `prod` profile takes the datasource only from `ASSET_SYNC_DB_URL`, `ASSET_SYNC_DB_USER`, and `ASSET_SYNC_DB_PASSWORD`, with no defaults, and provisions its operator account from `ASSET_SYNC_ADMIN_USERNAME` and `ASSET_SYNC_ADMIN_PASSWORD`. It refuses to start on a database whose user store holds the `demo` users.
 
 Runtime configuration:
 
@@ -363,7 +377,7 @@ Runtime configuration:
 | `ASSET_SYNC_WORKER_MAX_IN_FLIGHT_RUNS` | `1000` | Soft cap for `QUEUED + RUNNING` sync runs |
 | `ASSET_SYNC_WORKER_SHUTDOWN_TIMEOUT` | `20s` | How long a shutdown waits for in-flight sync runs before interrupting them |
 | `ASSET_SYNC_SHUTDOWN_PHASE_TIMEOUT` | `30s` | Upper bound for one graceful-shutdown phase; the web server and the sync worker drain concurrently within it |
-| `ASSET_SYNC_WORKER_FIXED_DELAY` | `5s` | Delay between worker claim ticks |
+| `ASSET_SYNC_WORKER_FIXED_DELAY` | `5s` | Delay between worker claim ticks; also the `Retry-After` of a `429 sync-queue-full` response |
 | `ASSET_SYNC_WORKER_INITIAL_DELAY` | `10s` | Initial delay before the first worker claim |
 | `ASSET_SYNC_WORKER_RETRY_BACKOFF_BASE_DELAY` | `30s` | Base delay of the jittered retry backoff for failed sync runs |
 | `ASSET_SYNC_WORKER_RETRY_BACKOFF_MAX_DELAY` | `15m` | Maximum retry backoff; also caps a provider `Retry-After` |
@@ -377,8 +391,8 @@ Runtime configuration:
 | `ASSET_SYNC_PAGINATION_MAX_CHECKPOINT_JSON_LENGTH` | `16384` | Largest page checkpoint metadata accepted, in bytes |
 | `ASSET_SYNC_RECOVERY_ENABLED` | `true` | Enables the recovery job for expired leases and stale runs |
 | `ASSET_SYNC_RECOVERY_BATCH_SIZE` | `100` | Rows handled per recovery tick |
-| `ASSET_SYNC_RECOVERY_FIXED_DELAY` | `5m` | Delay between recovery ticks |
-| `ASSET_SYNC_RECOVERY_INITIAL_DELAY` | `5m` | Initial delay before the first recovery tick |
+| `ASSET_SYNC_RECOVERY_FIXED_DELAY` | `1m` | Delay between recovery ticks; a run left `RUNNING` by a crashed worker is requeued on the first tick after its lease expires |
+| `ASSET_SYNC_RECOVERY_INITIAL_DELAY` | `1m` | Initial delay before the first recovery tick |
 | `ASSET_SYNC_OUTBOX_PUBLISHED_RETENTION` | `7d` | Age after which published outbox rows are deleted when retention is enabled |
 | `ASSET_SYNC_OUTBOX_RETENTION_BATCH_SIZE` | `1000` | Published rows deleted per retention tick |
 | `ASSET_SYNC_OUTBOX_RETENTION_FIXED_DELAY` | `1h` | Delay between retention ticks |
@@ -391,14 +405,14 @@ Runtime configuration:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ASSET_SYNC_PROVIDER_TYPE` | `http` | `http` for the normalized HTTP bridge (the simulator in `demo`, an indexer in `prod`), `alchemy` for Alchemy JSON-RPC |
-| `ASSET_SYNC_PROVIDER_BASE_URL` | none in `prod` | HTTP bridge endpoint; required when the type is `http`, ignored for `alchemy` |
+| `ASSET_SYNC_PROVIDER_BASE_URL` | none in `prod` | HTTP bridge endpoint; required when the type is `http`, ignored for `alchemy`. The bridge page contract is in `docs/architecture.md` |
 | `ASSET_SYNC_PROVIDER_CONNECT_TIMEOUT` | `2s` | Connect timeout for provider HTTP requests |
 | `ASSET_SYNC_PROVIDER_READ_TIMEOUT` | `5s` | Read timeout for provider HTTP requests |
 | `ASSET_SYNC_PROVIDER_ALCHEMY_API_KEY` | none | Alchemy API key; required for `alchemy`, never logged or shown in health or error details |
 | `ASSET_SYNC_PROVIDER_ALCHEMY_AUTH_MODE` | `header` | `header` sends `Authorization: Bearer`; `path` embeds the key in the URL and exists only for compatibility |
 | `ASSET_SYNC_PROVIDER_ALCHEMY_ENDPOINT_TEMPLATE` | `https://{network}.g.alchemy.com/v2/` | Header-mode endpoint; `{network}` is replaced per chain |
 | `ASSET_SYNC_PROVIDER_ALCHEMY_PATH_ENDPOINT_TEMPLATE` | `https://{network}.g.alchemy.com/v2/{apiKey}` | Path-mode endpoint |
-| `ASSET_SYNC_PROVIDER_ALCHEMY_START_MODE` | `registration-safe` | `registration-safe` starts a new watched address at the current safe block; `configured-block` starts at the per-chain start block |
+| `ASSET_SYNC_PROVIDER_ALCHEMY_START_MODE` | `registration-safe` | `registration-safe` starts a new watched address at the safe block of its first sync; `configured-block` starts at the per-chain start block |
 | `ASSET_SYNC_PROVIDER_ALCHEMY_ETH_SEPOLIA_START_BLOCK` | none | Start block for `eth-sepolia`; required only with `configured-block` |
 | `ASSET_SYNC_PROVIDER_ALCHEMY_FINALITY_MODE` | `safe` | `safe`, `finalized`, or `depth` |
 | `ASSET_SYNC_PROVIDER_ALCHEMY_FINALITY_DEPTH_FALLBACK` | `64` | Blocks behind the latest block used by `depth` mode or as the fallback |
@@ -409,7 +423,7 @@ Runtime configuration:
 
 The chain-to-network mapping lives under `asset-sync.provider.alchemy.networks` in `application.yml`; `eth-sepolia` is the first and only mapped chain. Map keys contain dashes, so further chains are added in YAML or through `SPRING_APPLICATION_JSON`, not through environment variables. `max-window-blocks` bounds the block range of one page fetch, `max-rpc-calls-per-fetch` bounds its JSON-RPC calls, and the rate-limit settings size the local token bucket in front of every call.
 
-With `type=alchemy` the service validates the configuration and the registry before the sync worker starts: the key must be set, every enabled chain with enabled asset configs must map to a network, every mapped network must answer an `eth_blockNumber` probe with the configured credentials, and no active watched address may lack an enabled asset config. A violation stops the process with a `ProviderConfigurationException` whose message names the chains or `(chain_id, asset)` pairs and the operator action, never the key. The seeded `local-evm` chain is enabled and has no Alchemy network, so the first `alchemy` boot on a fresh database applies the migrations and then stops at that rule; disable the chain and restart:
+With `type=alchemy` the service validates the configuration and the registry before the sync worker starts: the key must be set, every enabled chain with enabled asset configs and active watched addresses must map to a network, every mapped network gets an `eth_blockNumber` probe with the configured credentials, and no active watched address may lack an enabled asset config. A violation, or a probe that Alchemy rejects (`401`, `403`, JSON-RPC `-32600`, or an answer that is not a block number), stops the process with a `ProviderConfigurationException` whose message names the chains or `(chain_id, asset)` pairs and the operator action, never the key. A probe that meets an outage (`5xx`, `429`, a timeout, a transport error) does not: the service starts with the `alchemyChainProvider` health component `DOWN` in the `probe-failed` state, sync runs retry with backoff, and the first successful fetch clears the state, while the REST API and outbox publishing keep working. An enabled chain without a mapping and without active watched addresses is only logged as `alchemy_preflight_unmapped_chains_skipped`, so a fresh database boots as is, although the seeded `local-evm` chain has no Alchemy network. An address registered on such a chain fails its syncs terminally, and the next start refuses the chain until the address or the chain is disabled; to rule that out, disable the chain before the rollout:
 
 ```sql
 UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm';
@@ -417,10 +431,14 @@ UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm';
 
 A page fetch under `alchemy` asks for the latest block and the finality frontier (the `safe` or `finalized` tag, or latest minus `finality-depth-fallback` in `depth` mode or when the tag is unavailable), then scans from the cursor's next block up to the frontier, at most `max-window-blocks` per fetch, with one `alchemy_getAssetTransfers` call per direction for the whole range. A range answered without `pageKey` is complete for every block in it, so quiet stretches cost two calls; a range that comes back paged is narrowed to the blocks before its page boundary and re-queried, and the boundary block is drained alone (`fromBlock == toBlock`) with `pageKey` followed only in memory. Events are emitted for whole blocks only, sorted by block and log index, with amounts converted from `rawContract.value` and the registry decimals; self-transfers and rows of another contract are skipped and counted in the checkpoint. The cursor is always a block boundary (`{"v":1,"p":"alchemy","nextBlock":N}`), a new watched address starts just above the frontier under `registration-safe` and at the configured block under `configured-block`, and a block that cannot be finished within the RPC and time budget is retried from the same cursor. One block holding more events for the watched address than `asset-sync.sync.pagination.page-size` is a terminal configuration error, because the page contract cannot split a block. `docs/alchemy-runbook.md` covers getting and rotating a key, the Sepolia rollout, the env-gated live smoke, what to inspect, and the failure actions.
 
+Every block is read once, which sets two limits. Under `registration-safe` the start block is fixed by an address's first sync, not by its registration: that sync starts just above the finality frontier of that moment and ingests nothing, so a transfer made between registration and the first sync that is already below the frontier by then is never ingested. Sync a new address right after registering it, and use `configured-block` with a block shortly before the first transfer for a demo or a backfill. An event also keeps the confirmations it had when its block was scanned, at least `latest - frontier + 1` (`finality-depth-fallback + 1` in `depth` mode), so a `required_confirmations` above that on an Alchemy chain leaves its events `SEEN`. The seeded thresholds, 1 for `eth-sepolia` and 12 for the disabled `eth-mainnet`, stay below the usual depth of the `safe` block on Ethereum and below the default `finality-depth-fallback` of 64.
+
 ## Reliability Highlights
 
 - Natural idempotency keys: watched addresses use `chainId + address + asset`; observed transactions use `chainId + txHash + eventIndex + address + asset`.
 - PostgreSQL constraints enforce uniqueness, enum-like values, non-negative amounts/counts, and foreign keys.
+- Every observed transaction and outbox event records its source, `rest:<user>` for the API or `provider:<type>` for a sync, so a status reported through the API stays distinguishable from provider data.
+- Ingestion rejects what PostgreSQL would round or refuse: amounts must fit `numeric(38, 18)`, exponent notation included, and are stored at scale 18; addresses and transaction hashes must be well formed for their chain (`0x` hex on `eth-sepolia` and `eth-mainnet`, no whitespace, `/`, or `:` on `local-evm`, no control characters anywhere); a provider page is checked in full before its first event is written.
 - Observed transaction ingestion locks existing rows with row-level `FOR UPDATE` before evaluating transitions.
 - jOOQ uses `INSERT ... ON CONFLICT` for idempotent observed-transaction and outbox writes.
 - Transactional outbox rows are inserted in the same database transaction as lifecycle state changes.
@@ -429,6 +447,7 @@ A page fetch under `alchemy` asks for the latest block and the finality frontier
 - Provider sync is page-based. Each watched address has a `sync_cursors` row; the worker acquires a cursor lease, fetches one bounded page, ingests the full page, and only then advances the checkpoint.
 - Healthy page/account continuations increment `continuation_count`, while retryable failures and 429 backpressure increment `failure_attempts`.
 - Duplicate in-flight sync requests for the same address/account return the existing run instead of starting duplicate provider work.
+- Account sync keeps its pass over the addresses in the run checkpoint, a keyset over `(created_at, id)`, so an account larger than one claim completes instead of starting over. A busy address is revisited after the scan, and an address that fails terminally ends only itself: the others still sync and the run finishes `FAILED` with the failed addresses in `lastError`. `PATCH /api/v1/addresses/{addressId}` with `{"status":"DISABLED"}` takes such an address out of account syncs.
 - Graceful shutdown stops claiming, drains in-flight sync runs up to the worker shutdown timeout, and requeues any run interrupted afterwards without consuming its retry budget.
 - Publishing is at-least-once; downstream consumers should deduplicate by event id or idempotency key.
 - Failed publishes store a bounded error message, use bounded retry backoff, and become terminal `DEAD` rows at max attempts.
@@ -439,11 +458,11 @@ A page fetch under `alchemy` asks for the latest block and the finality frontier
 - Actuator endpoints: `/actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness`, `/actuator/info`, `/actuator/metrics`, and `/actuator/prometheus`.
 - Readiness includes PostgreSQL connectivity.
 - `/actuator/info` reports the build name and version generated by the Gradle build.
-- Health component details (database, chain provider) are shown to authenticated callers in protected profiles and to everyone in `local`; anonymous probes see only the aggregate status.
-- Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere; the Alchemy indicator shows the auth mode, the probed networks, and the state, never an endpoint or the key.
+- Health component details (database, chain provider) are shown to authenticated callers in protected profiles and to everyone in `local`; anonymous probes see only the aggregate status. The disk-space indicator is off, because its details reveal the working directory's absolute path.
+- Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere; the Alchemy indicator shows the auth mode, the probed networks, and the state, never an endpoint or the key. Only availability failures (timeouts, transport errors, `5xx`, `429`, and for Alchemy rejected credentials, or an outage during the startup probe as `probe-failed`) turn it `DOWN`; invalid data for one address stays `UP` with a `lastDataError` detail.
 - Structured logs include account, watched-address, transaction, sync-run, provider, and outbox identifiers.
 - Micrometer meters cover observed event ingestion, transaction transitions, immutable conflicts, sync runs and continuations, provider fetches, latency and pages, cursor leases and checkpoints, outbox batches, events, backlog, dead-letter count, scheduler tick failures, and the Alchemy adapter's JSON-RPC calls, latency, one-block fallbacks, and skipped rows.
-- `local` and `test` profiles permit all endpoints. Other profiles enable HTTP Basic for API, Swagger, and Actuator endpoints except health probes; their `401` and `403` responses use the same `ProblemDetail` format as API errors, and `401` keeps the `WWW-Authenticate: Basic` challenge.
+- `local` and `test` profiles permit all endpoints. Other profiles enable HTTP Basic for API, Swagger, and Actuator endpoints except health probes; their `401` and `403` responses use the same `ProblemDetail` format as API errors, and `401` keeps the `WWW-Authenticate: Basic` challenge. A request that the security firewall rejects before authentication, for example one with `//` or `;` in its path, gets `400` in every profile, not a challenge. The API keeps no session, so CSRF protection is off; a browser that caches Basic credentials could still be made to post to the two body-less sync endpoints, which only queues extra sync runs. Keep browsers you use for other sites logged out of the API and put the service behind a gateway when it is exposed.
 
 ## Testing
 
@@ -457,8 +476,8 @@ Coverage highlights:
 - Observability tests for health and metrics.
 - Alchemy adapter contract tests and worker integration tests against a scripted JSON-RPC stub, including secret scrubbing down to `sync_runs.last_error`.
 - An env-gated live smoke against Alchemy Sepolia (`ALCHEMY_LIVE_SMOKE=true`, see `docs/alchemy-runbook.md`) that CI skips.
-- GitHub Actions CI runs Gradle checks, `bootJar`, `docker compose config`, and a generated jOOQ tracking guard.
-- Dependabot proposes weekly Gradle and GitHub Actions updates as pull requests that run the same CI.
+- GitHub Actions CI runs Gradle checks, `bootJar`, a Trivy scan of the Docker image that fails on HIGH and CRITICAL vulnerabilities with a fix, `docker compose config`, and a generated jOOQ tracking guard. The workflow token is read-only, actions are pinned to commit SHAs, and the Gradle wrapper verifies the distribution checksum.
+- Dependabot proposes weekly Gradle, GitHub Actions, and Docker base image updates as pull requests that run the same CI. Spring Boot 3.5 gets no more open-source releases, so `build.gradle.kts` pins patched Jackson, Tomcat, pgjdbc, Log4j API, and commons-lang3 versions over its BOM; those pins are maintained by hand.
 
 Verification commands:
 
@@ -480,15 +499,25 @@ SPRING_PROFILES_ACTIVE=local ./gradlew bootRun
 
 ## MVP Boundaries
 
-This service does not provide custody, signing, private key storage, wallet functionality, or real funds movement. The MVP includes basic non-local HTTP Basic protection, a Prometheus scrape endpoint, and an HTTP provider adapter, but it does not bundle a real blockchain node/indexer backend, Kafka, SQS, Redis, balance projection, tenant-level authorization, CD/deployment automation, or release automation.
+This service does not provide custody, signing, private key storage, wallet functionality, or real funds movement. The MVP includes basic non-local HTTP Basic protection, a Prometheus scrape endpoint, and HTTP bridge and Alchemy provider adapters, but it does not bundle a blockchain node or indexer of its own, Kafka, SQS, Redis, balance projection, tenant-level authorization, CD/deployment automation, or release automation.
+
+### Known Limitations
+
+- `REVERTED` is final. A transaction that a reorg reverted stays `REVERTED` even if the chain includes it again; a later event for it is a duplicate or a conflict. Nothing tracks reorgs automatically: `REVERTED` arrives only through `POST /api/v1/observed-events`, and the Alchemy adapter scans only up to the finality frontier, where reorgs are practically excluded.
+- No tenant isolation. The `READ` and `OPERATOR` roles are global: every `READ` user sees every account, and every `OPERATOR` user can change any account's addresses and report events on any chain.
+- Watched addresses are unique per `(chain_id, address, asset)` across all accounts, so registering an address that another account already watches returns `409` and tells the caller that someone watches it. Without tenant isolation this reveals nothing new; the rule is to be revisited together with isolation.
+- Basic authentication verifies the BCrypt hash on every request (about 70 ms of CPU), and nothing limits failed attempts: expose the service only behind a gateway that rate-limits requests.
+- The Alchemy rate limiter is local to each process. Instances that share one key send up to their number times the configured rate, and every `429` spends a retry attempt of the run, so run one instance per key or split the rate between them.
+- `sync_runs` has no retention: every sync request adds a row. `docs/database.md` has the SQL that deletes old finished runs.
+- The outbox publishes to the structured log only, at least once; there is no external broker, and consumers deduplicate by event id or idempotency key.
+- Self-transfers are not recorded. The Alchemy adapter skips a transfer from the watched address to itself, because it moves no funds, and only counts it: `skippedSelfTransfers` in the cursor checkpoint of that fetch and `asset.sync.provider.alchemy.skipped.rows` with the reason `SELF_TRANSFER`.
 
 ## Roadmap / Deferred Scope
 
-Future extensions, not implemented as of `v0.3.0`:
+Future extensions, not implemented yet:
 
 - Transaction read/list endpoints.
 - Provider coverage beyond Alchemy ERC-20 transfers and the generic HTTP page contract: native and internal transfers, ERC-721/1155, and a second provider on the same asset registry.
-- Provider-specific block-range scans.
 - External broker adapter for the outbox.
 - Balance projection read models.
 - Tenant-level authorization and account ownership.

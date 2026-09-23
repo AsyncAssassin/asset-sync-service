@@ -10,10 +10,10 @@ import liquibase.database.jvm.JdbcConnection
 import liquibase.resource.DirectoryResourceAccessor
 
 /**
- * Prepares a fresh database for a boot with `asset-sync.provider.type=alchemy`: applies the
- * migrations up front and disables the seeded `local-evm` chain, which has no Alchemy network.
- * This is exactly the operator step the README documents; without it the first `alchemy` boot
- * stops at the rollout preflight.
+ * Prepares a fresh database for a boot with `asset-sync.provider.type=alchemy` by applying the
+ * migrations up front. The seeded `local-evm` chain stays enabled without an Alchemy network: with
+ * no active watched addresses on it the startup preflight only warns, so a fresh database needs no
+ * operator step before the first `alchemy` boot.
  */
 object AlchemyRolloutDatabase {
 
@@ -25,11 +25,6 @@ object AlchemyRolloutDatabase {
             DirectoryResourceAccessor(Path.of("src/main/resources")).use { resourceAccessor ->
                 Liquibase("db/changelog/db.changelog-master.yaml", resourceAccessor, database)
                     .update(Contexts(), LabelExpression())
-            }
-            // Liquibase leaves the connection in manual-commit mode; switch back so the update is committed.
-            connection.autoCommit = true
-            connection.createStatement().use { statement ->
-                statement.executeUpdate("UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm'")
             }
         }
     }

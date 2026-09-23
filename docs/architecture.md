@@ -29,7 +29,7 @@ Stack: Kotlin, Spring Boot 3.x, Spring MVC, jOOQ, PostgreSQL, Liquibase, Testcon
 
 ## 3. Project Description
 
-`asset-sync-service` is a backend service that synchronizes public account, address, and asset state from observable transaction events. It tracks public facts such as `chainId`, `address`, `asset`, `txHash`, `eventIndex`, `amount`, `blockHeight`, `confirmations`, `direction`, and `status`. The service does not store private keys, sign transactions, provide wallet functionality, or move funds. It accepts events directly through an API or obtains them from the active chain provider during sync (`FakeChainProvider` in `local`/`test`, `HttpChainProvider` in non-local/test profiles). Events are processed through an idempotent state machine and persisted in PostgreSQL. Meaningful transaction state changes create transactional outbox events in the same database transaction.
+`asset-sync-service` is a backend service that synchronizes public account, address, and asset state from observable transaction events. It tracks public facts such as `chainId`, `address`, `asset`, `txHash`, `eventIndex`, `amount`, `blockHeight`, `confirmations`, `direction`, and `status`. The service does not store private keys, sign transactions, provide wallet functionality, or move funds. It accepts events directly through an API or obtains them from the active chain provider during sync (`FakeChainProvider` in `local`/`test`; elsewhere `HttpChainProvider` or `AlchemyChainProvider`, as `asset-sync.provider.type` selects). Events are processed through an idempotent state machine and persisted in PostgreSQL. Meaningful transaction state changes create transactional outbox events in the same database transaction.
 
 ## 4. Main Use Cases
 
@@ -50,13 +50,14 @@ Stack: Kotlin, Spring Boot 3.x, Spring MVC, jOOQ, PostgreSQL, Liquibase, Testcon
 The service is a blocking Spring MVC application. The main database is PostgreSQL. Schema evolution is managed by Liquibase. Persistence access uses jOOQ.
 
 ```text
-REST API / Scheduler
+REST API / Sync Worker / Sync Recovery
         |
         v
 Application Services
         |
         +--> ChainProviderPort -> Fake Chain Provider (local/test)
-        |                  \-> HTTP Chain Provider (non-local/test)
+        |                  \-> HTTP Bridge Provider (asset-sync.provider.type=http)
+        |                  \-> Alchemy JSON-RPC Provider (asset-sync.provider.type=alchemy)
         |
         +--> Domain State Machine
         |
@@ -93,8 +94,9 @@ Domain layer:
 Infrastructure layer:
 - Implements repositories with jOOQ.
 - Implements the chain providers: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere, selected by `asset-sync.provider.type`; every HTTP-only bean shares one composed condition and every Alchemy-only bean another, so the two never mix.
-- Runs the Alchemy startup preflight when `type=alchemy`: static validation of `asset-sync.provider.alchemy.*`, registry rules (a network mapping for every enabled chain with enabled asset configs, `ERC20` only, no active watched address without an enabled asset config), and one `eth_blockNumber` auth probe per required network, all during bean creation and therefore before the sync worker starts.
+- Runs the Alchemy startup preflight when `type=alchemy`: static validation of `asset-sync.provider.alchemy.*`, registry rules (a network mapping for every enabled chain with enabled asset configs and active watched addresses, `ERC20` only, no active watched address without an enabled asset config), and one `eth_blockNumber` auth probe per required network, all during bean creation and therefore before the sync worker starts. A rule violation or a rejected probe fails the context; a probe that meets an outage starts the provider in the `probe-failed` state instead.
 - Implements the outbox publisher adapter.
+- Runs the scheduled jobs: `SyncRunWorkerJob` claims queued sync runs and executes them; `SyncRunRecoveryJob` fails stale legacy runs, requeues `RUNNING` runs whose lease expired, and clears expired cursor leases; `OutboxPublisherJob` publishes due outbox rows; `OutboxRetentionJob` deletes old published rows.
 - Configures Liquibase, OpenAPI, metrics, logging, and health checks.
 
 ### Why jOOQ Instead of Spring Data JPA
@@ -183,6 +185,22 @@ The page contract is append-only. Events inside a page must arrive in non-decrea
 
 On shutdown the worker acts as a Spring `SmartLifecycle` in the web server's graceful-shutdown phase: it stops claiming, waits up to `asset-sync.sync.worker.shutdown-timeout` for in-flight runs, then interrupts the rest. Interrupted runs return to `QUEUED` without consuming their retry budget, and their cursor leases are released first.
 
+### HTTP Bridge Page Contract
+
+`HttpChainProvider` speaks to a normalized HTTP bridge: an indexer in `prod`, the bundled simulator in `demo`.
+
+Request: `GET {base-url}/v1/chains/{chainId}/addresses/{address}/events` with the query parameters `asset`, `limit` (the page size), `cursor` (the stored resume token, absent before the first page), and, once the address has a checkpoint, `fromBlockHeight` and `fromEventIndex` of its last processed event. A bridge resumes from `cursor` when one is sent, otherwise from the first event at or after `(fromBlockHeight, fromEventIndex)`, and from the start of its history when neither is sent. Serving the checkpoint event itself again is harmless; serving anything before it fails the page.
+
+Response body, at most `max-provider-page-bytes`:
+
+- `events` (required): objects with `txHash`, `eventIndex`, `address`, `asset`, `amount` (a JSON number or decimal string), `blockHeight`, `confirmations`, `direction` (`INBOUND` or `OUTBOUND`), and `status` (`SEEN`, `CONFIRMED`, or `REVERTED`), in non-decreasing `(blockHeight, eventIndex, txHash)` order and at most `limit` of them.
+- `hasMore` (required): whether another page follows now; `true` requires a `nextCursor` that differs from the request cursor.
+- `nextCursor` or `resumeCursor`: the opaque token for the next request; when both are sent they must be equal. A final page may omit it only when it carries events or `safeBlockHeight` / `latestBlockHeight` progress. After such a page the stored cursor is kept when the page had no events and cleared when it had some, because replaying from the old cursor would return those events behind the checkpoint.
+- `latestBlockHeight`, `safeBlockHeight`: block high-water, optional; `safeBlockHeight` must not exceed `latestBlockHeight`.
+- `metadata`: an optional JSON object stored as the address checkpoint, at most `max-checkpoint-json-length` bytes.
+
+Status handling: `2xx` is parsed as above; `408`, `429` (honoring `Retry-After`), and `5xx` are retryable and spend the run's retry budget; any other `4xx`, malformed JSON, and an oversized body are terminal provider data invalid for that address. Only the retryable class turns the `httpChainProvider` health indicator `DOWN`.
+
 Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. Retryable provider failures, including 429 throttling, increment `failure_attempts`. Provider configuration failures (`ProviderConfigurationException`: rejected credentials, a chain without a provider network mapping, a fetch the configured provider cannot serve) are terminal like malformed pages, so they never burn the retry budget on attempts that cannot succeed.
 
 ### Alchemy Provider Page Building
@@ -191,9 +209,9 @@ The Alchemy adapter serves one watched address and one ERC-20 registry asset per
 
 1. Resolve the network mapping and the enabled asset config; decode `request.cursor` as `{"v":1,"p":"alchemy","nextBlock":N}` (any other shape is provider-data invalid, never a restart from genesis).
 2. `eth_blockNumber`, then the finality frontier: `eth_getBlockByNumber("safe"|"finalized", false)` or latest minus `finality-depth-fallback` (`depth` mode, or fallback when the tag is unavailable, flagged in the checkpoint).
-3. Start block: the cursor, else the frontier plus one under `registration-safe` (no backfill before registration) or the configured per-chain block under `configured-block`; a stored event high-water at or above the start moves it to the next block and is flagged as `highWaterAdjusted`. A start above the frontier returns an idle page with the same cursor and fresh heights.
+3. Start block: the cursor, else the frontier plus one under `registration-safe` (no backfill; the first sync, not the registration, fixes the start, so that sync is idle) or the configured per-chain block under `configured-block`; a stored event high-water at or above the start moves it to the next block and is flagged as `highWaterAdjusted`. A start above the frontier returns an idle page with the same cursor and fresh heights.
 4. Scan at most `max-window-blocks` up to the frontier: one `alchemy_getAssetTransfers` call per direction (`toAddress` for `INBOUND`, `fromAddress` for `OUTBOUND`, `category=["erc20"]`, the registry contract, `order=asc`, `maxCount=1000`). A range answered without `pageKey` is complete for every block in it. A paged range is not trusted across pages, but its first page still shows the last block it reached, and ascending order means every block before that boundary was covered in full: the scan narrows the range to those blocks and re-queries them as a complete range while the RPC budget leaves room for it, then drains the boundary block alone with `fromBlock == toBlock`, following `pageKey` in memory with loop, restart, and window checks, and continues with the rest of the window.
-5. Merge both streams by `uniqueId`, skip self-transfers and rows of another contract (counted in the checkpoint), map `uniqueId` `:log:{n}` to `eventIndex`, `rawContract.value` and registry decimals to `amount`, `latest - blockHeight + 1` to `confirmations`, emit `SEEN` and let the confirmation policy promote it, and sort by `(blockHeight, eventIndex, txHash)`.
+5. Merge both streams by `uniqueId`, skip self-transfers, which move no funds and are deliberately not recorded, and rows of another contract (both counted in the checkpoint), map `uniqueId` `:log:{n}` to `eventIndex`, `rawContract.value` and registry decimals to `amount`, `latest - blockHeight + 1` to `confirmations`, emit `SEEN` and let the confirmation policy promote it, and sort by `(blockHeight, eventIndex, txHash)`. A block is never read again, so these confirmations are final: a chain's `required_confirmations` above `latest - frontier + 1` would leave its events `SEEN`.
 6. Emit whole blocks only, up to `request.limit`; the first block that does not fit becomes `nextBlock`, and one block with more events than the limit is a terminal `ProviderConfigurationException` because the page contract cannot split a block.
 
 Durable progress moves only past fully drained blocks: `nextCursor` is always a block boundary, `hasMore` is `nextBlock <= safe`, and a block that cannot be finished within `max-rpc-calls-per-fetch` and the provider timeout is left for the next fetch, or reported as a retryable `ChainProviderUnavailableException` when nothing was finished. `pageKey` never reaches `provider_cursor` or `checkpoint`. The checkpoint metadata stays under 1 KiB: provider, chain, network, asset, contract, scan mode and counters, `nextBlock`, latest and safe heights, finality mode and fallback flag, `initialStartBlock`, and skip counters.
@@ -208,22 +226,29 @@ sequenceDiagram
     participant Provider as ActiveChainProvider
     participant DB as PostgreSQL
 
-    Worker->>Repo: count active account addresses
-    Worker->>DB: read run_checkpoint.accountNextOffset
-    loop bounded circular traversal
-        Worker->>Repo: fetch deterministic active address slice
+    Worker->>Repo: count active account addresses (cap check)
+    Worker->>DB: read run_checkpoint.accountPass
+    loop scan after the keyset (created_at, id)
+        Worker->>Repo: fetch next active addresses after the keyset
         alt cursor lease acquired
             Worker->>Cursor: acquire address cursor lease
             Worker->>Provider: fetch bounded page(s)
             Worker->>Cursor: checkpoint after page ingest
         else cursor lease busy
-            Worker->>Worker: count address as visited and skip for this claim
+            Worker->>Worker: defer the address to the revisit list
+        else terminal address failure
+            Worker->>Worker: record the address and its error
         end
-        Worker->>DB: persist next traversal offset on continuation
+        Worker->>Worker: move the keyset past the address
     end
+    loop revisit deferred addresses once per claim
+        Worker->>Cursor: acquire address cursor lease
+        Worker->>Provider: fetch bounded page(s)
+    end
+    Worker->>DB: persist accountPass on continuation, or finish the run
 ```
 
-Account sync does not own a provider cursor. It stores only traversal fairness metadata in `sync_runs.run_checkpoint`; provider resume state remains per watched address in `sync_cursors`.
+Account sync does not own a provider cursor; provider resume state remains per watched address in `sync_cursors`. The run checkpoint holds only the pass: the keyset of the last address the scan finished, whether the scan is complete, the number of addresses visited, the addresses deferred because their lease was busy (at most 100), and the addresses that failed terminally (the count and the first 20 with their errors), well below the 16 KiB limit of `run_checkpoint`. The claim budget (pages, events, duration) ends a claim between addresses; an address with pages left ends the claim without moving the keyset, so the next claim drains it first. The run completes when the scan is complete and no revisit is pending: `SUCCEEDED`, or `FAILED` with the failed addresses in `last_error`. A run queued by an earlier version carries no pass and starts a fresh one, which only replays idempotent cursors.
 
 ### Observed Event Ingestion
 
@@ -541,6 +566,7 @@ Key columns:
 - `version bigint not null default 0`
 - `created_at timestamptz not null`
 - `updated_at timestamptz not null`
+- `source text null` (who made the last lifecycle change: `rest:<user>` or `provider:<type>`)
 
 Constraints and indexes:
 - `unique (chain_id, tx_hash, event_index, address, asset)`
@@ -686,6 +712,7 @@ All endpoints are under `/api/v1`.
 - `GET /api/v1/accounts/{accountId}`
 - `POST /api/v1/accounts/{accountId}/addresses`
 - `GET /api/v1/accounts/{accountId}/addresses`
+- `PATCH /api/v1/addresses/{addressId}`
 - `POST /api/v1/addresses/{addressId}/sync`
 - `POST /api/v1/accounts/{accountId}/sync`
 - `POST /api/v1/observed-events`
@@ -820,7 +847,7 @@ Duplicate no-op response:
 - `405 Method Not Allowed`: unsupported HTTP method for a known route, with an `Allow` header.
 - `409 Conflict`: duplicate watched address or immutable observed transaction field mismatch.
 - `415 Unsupported Media Type`: request body content type other than JSON.
-- `429 Too Many Requests`: the soft cap on queued plus running sync runs is reached.
+- `429 Too Many Requests`: the soft cap on queued plus running sync runs is reached; `Retry-After` carries the worker claim interval in whole seconds.
 - `500 Internal Server Error`: unexpected failure; the response carries a generic detail and the exception goes to the log.
 - `503 Service Unavailable`: request-time infrastructure failure, such as PostgreSQL unavailable.
 
@@ -898,16 +925,16 @@ Sync flow:
 Outbox events have a unique `idempotency_key`:
 
 ```text
-observed-tx:{naturalKey}:status:{newStatus}:v:{version}
+observed-tx:{transactionId}:status:{newStatus}:v:{version}
 ```
 
 Example:
 
 ```text
-observed-tx:local-evm:0xdeadbeef:0:0xabc123:USDC:status:CONFIRMED:v:2
+observed-tx:5e1c9c94-6e36-4fb9-bb27-67800e88ac51:status:CONFIRMED:v:2
 ```
 
-This prevents duplicate `TRANSACTION_SEEN`, `TRANSACTION_CONFIRMED`, and `TRANSACTION_REVERTED` events for the same transaction lifecycle stage.
+This prevents duplicate `TRANSACTION_SEEN`, `TRANSACTION_CONFIRMED`, and `TRANSACTION_REVERTED` events for the same transaction lifecycle stage. The transaction id is a UUID, so no free-text part of the natural key, such as a hash or address containing `:`, can make two transactions share a key. Earlier versions joined the natural key into the key; their rows keep those keys, and no key of the current format can equal one.
 
 ## 12. Confirmation And Reorg Design
 
@@ -949,6 +976,7 @@ Payload fields:
 - `status`
 - `confirmations`
 - `blockHeight`
+- `source`: who caused this lifecycle change, `rest:<user>` for `POST /api/v1/observed-events` or `provider:<http|alchemy|fake>` for a sync, so a status reported through the API stays distinguishable from provider data downstream. The published log line carries it too.
 
 Poller behavior:
 - Scheduled job selects due `NEW` or `FAILED` rows with `FOR UPDATE SKIP LOCKED`.
@@ -1171,7 +1199,7 @@ Health checks:
 - Spring Actuator liveness.
 - Spring Actuator readiness.
 - PostgreSQL connectivity.
-- Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere. The Alchemy indicator reports the provider, the auth mode, the probed networks, and the state, plus the scrubbed error after a failed fetch; never an endpoint, a header, or the API key.
+- Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere. It turns `DOWN` only on availability failures: a timeout, a transport error, `5xx`, `429`, and for Alchemy also rejected credentials or configuration, and an outage during the startup probe (`probe-failed`) until the first successful fetch. Invalid data for one address, such as a `4xx` answer or malformed JSON, keeps its state and appears as the `lastDataError` detail, so one bad address cannot turn the aggregate health into `503`; `asset.sync.provider.pages` counts those pages as `MALFORMED`. The Alchemy indicator reports the provider, the auth mode, the probed networks, and the state, plus the scrubbed error after a failed startup probe or fetch; never an endpoint, a header, or the API key.
 - Component details are shown to authenticated callers (`management.endpoint.health.show-details: when-authorized`) and to everyone in `local`; anonymous probes see only the aggregate status.
 
 Build information:
@@ -1182,6 +1210,8 @@ Build information:
 MVP services:
 - `asset-sync-service`
 - `postgres`
+
+Both services publish their ports on `127.0.0.1` only. `ASSET_SYNC_HTTP_BIND_ADDRESS` widens the application port for a remote demo under a protected profile; PostgreSQL stays on loopback. The application service has a 40-second `stop_grace_period`, longer than the 30-second graceful-shutdown phase.
 
 Metrics are exposed through Actuator. The MVP Docker Compose file does not include Prometheus or Grafana services.
 
@@ -1249,8 +1279,7 @@ asset-sync-service
 - Balance projection as an eventually consistent read model.
 - Kafka or SQS outbox publisher.
 - Debezium CDC-based outbox publishing.
-- Real blockchain/indexer backend integration beyond the generic HTTP page contract.
-- Provider-specific block range scans.
+- Provider coverage beyond Alchemy ERC-20 transfers and the generic HTTP page contract.
 - Multi-instance sync coordination with advisory locks or a scheduler lock.
 - Multi-tenant authorization and account ownership.
 - Audit event history.

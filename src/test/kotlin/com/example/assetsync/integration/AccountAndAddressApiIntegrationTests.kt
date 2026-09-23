@@ -26,6 +26,7 @@ import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.content
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.header
@@ -385,6 +386,100 @@ class AccountAndAddressApiIntegrationTests(
         assertEquals("0xabcdef0123456789abcdef0123456789abcdef01", response["address"].asText())
         assertEquals("USDC", response["asset"].asText())
     }
+
+    @Test
+    fun `sepolia registration rejects addresses that are not 0x and 40 hex digits`() {
+        val accountId = createAccount("address-format-sepolia")
+
+        expectInvalidAddress(accountId, "eth-sepolia", "0x123")
+            .andExpect(jsonPath("$.detail").value("address must be 0x followed by 40 hex digits on eth-sepolia."))
+        expectInvalidAddress(accountId, "eth-sepolia", "0x" + "g".repeat(40))
+        expectInvalidAddress(accountId, "eth-sepolia", "0x" + "a".repeat(41))
+        expectInvalidAddress(accountId, "eth-sepolia", "0xabcdef0123456789abcd\nf0123456789abcdef01")
+            .andExpect(jsonPath("$.detail").value("address must not contain control characters."))
+
+        assertEquals(0, tableCount("watched_addresses"))
+    }
+
+    @Test
+    fun `local evm registration keeps synthetic addresses but rejects whitespace slashes colons and control characters`() {
+        val accountId = createAccount("address-format-local")
+
+        listOf("0xab cd", "0xabc/def", "0xab:cd", "0xab\ncd").forEach { address ->
+            expectInvalidAddress(accountId, "local-evm", address)
+        }
+        assertEquals(0, tableCount("watched_addresses"))
+
+        assertEquals("0xsynthetic-demo", registerAddress(accountId = accountId, address = "0xSynthetic-Demo")["address"].asText())
+    }
+
+    @Test
+    fun `watched address status can be disabled and enabled again`() {
+        val accountId = createAccount("address-status")
+        val address = registerAddress(accountId = accountId, address = "0xstatus-toggle")
+        val addressId = address["id"].asText()
+
+        patchStatus(addressId, "DISABLED")
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.id").value(addressId))
+            .andExpect(jsonPath("$.status").value("DISABLED"))
+        mockMvc.perform(get("/api/v1/accounts/$accountId/addresses"))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.items[0].status").value("DISABLED"))
+        mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
+            .andExpect(status().isNotFound)
+        val disabledUpdatedAt = jdbcTemplate.queryForObject(
+            "SELECT updated_at FROM watched_addresses WHERE id = ?",
+            Timestamp::class.java,
+            UUID.fromString(addressId),
+        )
+
+        // Setting the current status again changes nothing, not even updated_at.
+        patchStatus(addressId, "DISABLED").andExpect(status().isOk)
+        assertEquals(
+            disabledUpdatedAt,
+            jdbcTemplate.queryForObject("SELECT updated_at FROM watched_addresses WHERE id = ?", Timestamp::class.java, UUID.fromString(addressId)),
+        )
+
+        patchStatus(addressId, "ACTIVE")
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("ACTIVE"))
+        mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
+            .andExpect(status().isAccepted)
+    }
+
+    @Test
+    fun `watched address status update rejects unknown addresses and statuses`() {
+        patchStatus(UUID.randomUUID().toString(), "DISABLED")
+            .andExpect(status().isNotFound)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/not-found"))
+            .andExpect(jsonPath("$.title").value("Watched address not found"))
+
+        val addressId = registerAddress(accountId = createAccount("address-status-invalid"), address = "0xstatus-invalid")["id"].asText()
+        listOf("PAUSED", "disabled", "").forEach { value ->
+            patchStatus(addressId, value)
+                .andExpect(status().isBadRequest)
+                .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/validation-failed"))
+        }
+        assertEquals("ACTIVE", jdbcTemplate.queryForObject("SELECT status FROM watched_addresses WHERE id = ?", String::class.java, UUID.fromString(addressId)))
+    }
+
+    private fun patchStatus(addressId: String, value: String) =
+        mockMvc.perform(
+            patch("/api/v1/addresses/$addressId")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(mapOf("status" to value))),
+        )
+
+    private fun expectInvalidAddress(accountId: String, chainId: String, address: String) =
+        mockMvc.perform(
+            post("/api/v1/accounts/$accountId/addresses")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(addressRequestBody(chainId = chainId, address = address)),
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/invalid-request"))
+            .andExpect(jsonPath("$.chainId").value(chainId))
 
     private fun expectUnsupportedAsset(accountId: String, chainId: String, asset: String) {
         mockMvc.perform(

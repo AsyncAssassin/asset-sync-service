@@ -41,6 +41,7 @@ src/main/resources/db/changelog
     013-async-sync-runs.yaml
     014-provider-pagination-cursors.yaml
     015-add-asset-configs.yaml
+    016-add-observed-transaction-source.yaml
 ```
 
 Changelog rules:
@@ -52,7 +53,7 @@ Changelog rules:
 - No PostgreSQL enum types in the MVP; use text plus `CHECK` constraints to keep status evolution simple.
 - Data-normalization changesets must fail fast when existing rows would collide after normalization. Operators must manually clean up or backfill those rows before rerunning the migration; changesets must not silently merge or delete business rows.
 - Changeset `006` adds input-length constraints as `NOT VALID`, so new writes are protected immediately while pre-existing oversized rows are not scanned during that upgrade step. Changeset `011` validates those constraints; operators with legacy oversized rows must clean them before applying `011`.
-- Changeset `009` normalizes local EVM watched addresses and observed transactions. Historical `PUBLISHED` outbox rows are kept as audit history, but pending `NEW` or `FAILED` local-evm outbox rows must already have canonical payload casing and current `observed-tx:...:status:{status}:v:{version}` idempotency keys. If not, the migration halts and operators must drain pending outbox rows or perform an audited manual cleanup before retrying.
+- Changeset `009` normalizes local EVM watched addresses and observed transactions. Historical `PUBLISHED` outbox rows are kept as audit history, but pending `NEW` or `FAILED` local-evm outbox rows must already have canonical payload casing and the natural-key `observed-tx:{chainId}:...:status:{status}:v:{version}` idempotency keys of that release; keys built from the transaction id came later and never exist when `009` runs. If not, the migration halts and operators must drain pending outbox rows or perform an audited manual cleanup before retrying.
 - Changeset `010` creates the standard Spring Security JDBC `users` and `authorities` tables.
 - Changeset `012` adds `observed_transactions.block_height >= 0` as `NOT VALID`, then validates it immediately. Legacy databases with negative block heights must be cleaned before applying `012`; operators can preflight with:
 
@@ -75,7 +76,8 @@ HAVING count(*) > 1;
 
 Drain, fail, or explicitly accept any legacy `STARTED` rows before enabling the worker. The worker processes only `QUEUED/RUNNING`; legacy stale-`STARTED` recovery remains separate.
 - Changeset `014` adds per-address `sync_cursors` and separates retry budget from worker claim count. Existing watched addresses receive one cursor row with null provider cursor and `{}` checkpoint. Existing `sync_runs.attempts` remains a total claim diagnostic; retry budget is backfilled into `failure_attempts`.
-- Changeset `015` adds the `asset_configs` registry keyed by `(chain_id, asset)`, upserts the `eth-sepolia` (enabled, `required_confirmations=1`) and `eth-mainnet` (disabled, `required_confirmations=12`) chain configs, and seeds `USDC` for `local-evm` (deterministic fake contract `0x000000000000000000000000000000000000f001`, decimals 18), `eth-sepolia` (Circle contract, decimals 6, enabled), and `eth-mainnet` (Circle contract, decimals 6, disabled). All seeds use insert-or-update semantics. Registration validation protects only new rows: before pointing a real provider at an existing database, run the rollout preflight below and seed or disable whatever it returns; it must come back empty. With `asset-sync.provider.type=alchemy` the service runs the same check at startup, together with a mapping check for every enabled chain that has enabled asset configs, and refuses to start while either returns rows; the seeded `local-evm` chain has no Alchemy network, so disable it (`UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm'`) before the first Alchemy boot.
+- Changeset `016` adds the nullable `observed_transactions.source` (the source of the row's last lifecycle change: `rest:<user>` or `provider:<type>`) with a 128-character check added `NOT VALID` and validated at once. Existing rows keep `NULL`, which means the source was not recorded; the column is added without a default, so no row is rewritten.
+- Changeset `015` adds the `asset_configs` registry keyed by `(chain_id, asset)`, upserts the `eth-sepolia` (enabled, `required_confirmations=1`) and `eth-mainnet` (disabled, `required_confirmations=12`) chain configs, and seeds `USDC` for `local-evm` (deterministic fake contract `0x000000000000000000000000000000000000f001`, decimals 18), `eth-sepolia` (Circle contract, decimals 6, enabled), and `eth-mainnet` (Circle contract, decimals 6, disabled). All seeds use insert-or-update semantics. Registration validation protects only new rows: before pointing a real provider at an existing database, run the rollout preflight below and seed or disable whatever it returns; it must come back empty. With `asset-sync.provider.type=alchemy` the service runs the same check at startup, together with a mapping check for every enabled chain that has enabled asset configs and active watched addresses, and refuses to start while either returns rows. The seeded `local-evm` chain has no Alchemy network; without active watched addresses it is only logged, so a fresh database boots, and disabling it (`UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm'`) keeps addresses from being registered there.
 
 ```sql
 SELECT
@@ -147,6 +149,7 @@ Constraints and indexes:
 Notes:
 
 - Confirmation thresholds are data, not code constants.
+- The Alchemy provider reads every block once, so the confirmations of its events never grow after the scan; keep `required_confirmations` of an Alchemy chain at or below the depth of its finality frontier, or its events stay `SEEN` (`docs/alchemy-runbook.md`, section 2).
 - The MVP should seed at least one local chain id for fake-provider flows.
 
 ### `asset_configs`
@@ -282,6 +285,7 @@ Key columns:
 | `version` | `bigint` | no | Diagnostic version, default `0` |
 | `created_at` | `timestamptz` | no | Creation timestamp |
 | `updated_at` | `timestamptz` | no | Last update timestamp |
+| `source` | `text` | yes | Source of the last lifecycle change: `rest:<user>` (`rest:anonymous` where nobody authenticates) or `provider:<http\|alchemy\|fake>`; `NULL` for rows written before changeset `016` and for rows the demo seeder inserts directly |
 
 Constraints and indexes:
 
@@ -344,7 +348,7 @@ Key columns:
 | `aggregate_type` | `text` | no | MVP value: `OBSERVED_TRANSACTION` |
 | `aggregate_id` | `uuid` | no | Observed transaction id |
 | `event_type` | `text` | no | Transaction lifecycle event type |
-| `idempotency_key` | `text` | no | Unique lifecycle event key |
+| `idempotency_key` | `text` | no | Unique lifecycle event key, `observed-tx:{transactionId}:status:{status}:v:{version}` |
 | `payload` | `jsonb` | no | Event payload |
 | `status` | `text` | no | `NEW`, `PUBLISHED`, `FAILED`, or `DEAD` |
 | `attempts` | `integer` | no | Publish attempts, default `0` |
@@ -369,8 +373,10 @@ Constraints and indexes:
 Idempotency key format:
 
 ```text
-observed-tx:{chainId}:{txHash}:{eventIndex}:{address}:{asset}:status:{newStatus}:v:{version}
+observed-tx:{transactionId}:status:{newStatus}:v:{version}
 ```
+
+Rows written by earlier versions keep their natural-key `observed-tx:{chainId}:{txHash}:{eventIndex}:{address}:{asset}:status:{newStatus}:v:{version}` keys. A key of the current format holds a UUID where those hold five natural-key parts, so the two formats never collide.
 
 Poller query requirement:
 
@@ -416,7 +422,7 @@ Key columns:
 | `attempts` | `integer` | no | Worker claim attempts |
 | `failure_attempts` | `integer` | no | Retryable failure budget counter |
 | `continuation_count` | `integer` | no | Healthy continuation requeue counter |
-| `run_checkpoint` | `jsonb` | no | Run-local metadata, currently account traversal offset |
+| `run_checkpoint` | `jsonb` | no | Run-local metadata: the account-sync pass (`accountPass`: scan keyset, scan completion, visited count, deferred busy addresses, failed addresses) |
 | `last_requeue_reason` | `text` | yes | `FAILURE`, `CONTINUATION`, or `LEASE_BUSY` |
 | `next_attempt_at` | `timestamptz` | no | Earliest claim/retry time |
 | `locked_by` | `varchar(200)` | yes | Current worker owner for `RUNNING` |
@@ -455,6 +461,13 @@ Notes:
 - Requeues caused by a rejected executor submission or by a worker shutdown also carry `last_requeue_reason = FAILURE` but leave `failure_attempts` unchanged; `last_error` names the cause.
 - Retryable provider failures, 429 throttling, capacity failures, and expired `RUNNING` recovery increment `failure_attempts`.
 - The partial unique in-flight index intentionally excludes legacy `STARTED`.
+- No retention job removes finished runs, so every sync request adds a row for good. No other table references `sync_runs`, and a finished run is only read back by `GET /api/v1/sync-runs/{id}`, so old terminal runs can be deleted by hand:
+
+```sql
+DELETE FROM sync_runs
+WHERE status IN ('SUCCEEDED', 'FAILED')
+  AND finished_at < now() - interval '30 days';
+```
 
 ### `sync_cursors`
 
@@ -465,7 +478,7 @@ Key columns:
 | Column | Type | Nullable | Notes |
 | --- | --- | --- | --- |
 | `watched_address_id` | `uuid` | no | Primary key and FK to `watched_addresses(id)` |
-| `provider_cursor` | `text` | yes | Opaque provider resume token |
+| `provider_cursor` | `text` | yes | Opaque provider resume token; kept after an empty final page without a cursor, cleared after a final page with events and without one |
 | `checkpoint` | `jsonb` | no | Provider metadata object |
 | `last_processed_block_height` | `bigint` | yes | Durable high-water block |
 | `last_processed_event_index` | `integer` | yes | Durable high-water event index |
@@ -576,7 +589,6 @@ Generation configuration should align Kotlin nullability with database nullabili
 Deferred database capabilities:
 
 - Balance projection tables derived from observed transactions.
-- Provider cursor tables for real chain scans.
 - Advisory locks or scheduler locks for multi-instance sync coordination.
 - Audit/event-history tables.
 - Partitioning or retention policies for high-volume transaction history.

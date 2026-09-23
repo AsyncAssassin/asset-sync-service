@@ -5,8 +5,10 @@ services:
       POSTGRES_DB: ${ASSET_SYNC_DB_NAME:-asset_sync}
       POSTGRES_USER: ${ASSET_SYNC_DB_USER:-asset_sync}
       POSTGRES_PASSWORD: ${ASSET_SYNC_DB_PASSWORD:-asset_sync}
+    # Loopback only: an app started on this host (the README quickstart) reaches the database, other
+    # machines do not. The application container uses the compose network instead.
     ports:
-      - "${ASSET_SYNC_DB_PORT:-5432}:5432"
+      - "127.0.0.1:${ASSET_SYNC_DB_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
@@ -26,8 +28,14 @@ services:
       ASSET_SYNC_DB_NAME: ${ASSET_SYNC_DB_NAME:-asset_sync}
       ASSET_SYNC_DB_USER: ${ASSET_SYNC_DB_USER:-asset_sync}
       ASSET_SYNC_DB_PASSWORD: ${ASSET_SYNC_DB_PASSWORD:-asset_sync}
+    # Loopback by default because the default `local` profile has no authentication. Set
+    # ASSET_SYNC_HTTP_BIND_ADDRESS=0.0.0.0 to reach the API from other machines, and only with a
+    # protected profile.
     ports:
-      - "${ASSET_SYNC_HTTP_PORT:-8080}:8080"
+      - "${ASSET_SYNC_HTTP_BIND_ADDRESS:-127.0.0.1}:${ASSET_SYNC_HTTP_PORT:-8080}:8080"
+    # Longer than the 30s graceful-shutdown phase, so in-flight sync runs drain or requeue before
+    # Docker kills the process.
+    stop_grace_period: 40s
     depends_on:
       postgres:
         condition: service_healthy

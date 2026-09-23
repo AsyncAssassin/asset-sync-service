@@ -115,6 +115,11 @@ class SyncApiIntegrationTests(
         assertEquals(1, tableCount("sync_runs"))
         assertEquals(2, tableCount("observed_transactions"))
         assertEquals(2, tableCount("outbox_events"))
+        assertEquals(listOf("provider:fake"), jdbcTemplate.queryForList("SELECT DISTINCT source FROM observed_transactions", String::class.java))
+        assertEquals(
+            listOf("provider:fake"),
+            jdbcTemplate.queryForList("SELECT DISTINCT payload ->> 'source' FROM outbox_events", String::class.java),
+        )
         assertEquals(
             listOf(FakeChainProviderKey("local-evm", "0xsync-address-success", "USDC")),
             fakeChainProvider.requestedKeys(),
@@ -213,7 +218,7 @@ class SyncApiIntegrationTests(
     }
 
     @Test
-    fun `empty final high water page preserves event checkpoint and updates finalized high water`() {
+    fun `empty final high water page preserves event checkpoint, cursor, and updates finalized high water`() {
         val accountId = createAccount()
         val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-high-water-after-cursor")
         val addressId = watchedAddress["id"].asText()
@@ -257,10 +262,80 @@ class SyncApiIntegrationTests(
         runNextClaimedSyncs()
 
         assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
-        assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        // The empty final page omitted its cursor; the stored one still points right after the
+        // last processed event, so a bridge that resumes only by cursor keeps working.
+        assertEquals(
+            "page-2",
+            singleString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)),
+        )
         assertEquals(100L, singleLong("SELECT last_processed_block_height FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
         assertEquals(5, singleInt("SELECT last_processed_event_index FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
         assertEquals(120L, singleLong("SELECT last_finalized_block_height FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+    }
+
+    @Test
+    fun `final page with events and no cursor clears the cursor and the next fetch resumes from the checkpoint`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-final-events-no-cursor")
+        val addressId = watchedAddress["id"].asText()
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-final-events-no-cursor",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = listOf(
+                            providerEvent(txHash = "0xsync-final-events-1", address = "0xsync-final-events-no-cursor", blockHeight = 100),
+                        ),
+                        nextCursor = "page-2",
+                        hasMore = true,
+                        latestBlockHeight = 100,
+                        safeBlockHeight = 100,
+                    ),
+                ),
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = "page-2",
+                        events = listOf(
+                            providerEvent(txHash = "0xsync-final-events-2", address = "0xsync-final-events-no-cursor", blockHeight = 101),
+                            providerEvent(txHash = "0xsync-final-events-3", address = "0xsync-final-events-no-cursor", eventIndex = 4, blockHeight = 102),
+                        ),
+                        nextCursor = null,
+                        hasMore = false,
+                        latestBlockHeight = 102,
+                        safeBlockHeight = 102,
+                    ),
+                ),
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = emptyList(),
+                        nextCursor = null,
+                        hasMore = false,
+                        latestBlockHeight = 110,
+                        safeBlockHeight = 110,
+                    ),
+                ),
+            ),
+        )
+
+        val firstRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+        // Replaying from "page-2" would return both events of the final page, now behind the checkpoint.
+        assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", firstRunId))
+        assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+
+        val secondRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", secondRunId))
+        val resumed = fakeChainProvider.requestedPageRequests().last()
+        assertNull(resumed.cursor)
+        assertEquals(102L, resumed.fromBlockHeight)
+        assertEquals(4, resumed.fromEventIndex)
     }
 
     @Test
@@ -812,6 +887,84 @@ class SyncApiIntegrationTests(
     }
 
     @Test
+    fun `a page with an invalid event fails terminally before any of its events is written`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-invalid-page")
+        val addressId = watchedAddress["id"].asText()
+        val validEvent = providerEvent(txHash = "0xsync-invalid-page-1", address = "0xsync-invalid-page", eventIndex = 0)
+        val invalidEvents = listOf(
+            // PostgreSQL would have rounded the 19th fraction digit away and confirmed the result.
+            providerEvent(txHash = "0xsync-invalid-page-2", address = "0xsync-invalid-page", eventIndex = 1, amount = "0.0000000000000000001")
+                to "does not fit numeric(38,18)",
+            providerEvent(txHash = "0xsync-invalid-page-2", address = "0xsync-invalid-page", eventIndex = 1, amount = "100000000000000000000")
+                to "does not fit numeric(38,18)",
+            // Domain invariants used to surface as IllegalArgumentException and burn five retries.
+            providerEvent(txHash = "0xsync-invalid-page-2", address = "0xsync-invalid-page", eventIndex = 1, amount = "-1")
+                to "negative",
+            providerEvent(txHash = " ", address = "0xsync-invalid-page", eventIndex = 1)
+                to "txHash must not be blank",
+            providerEvent(txHash = "0xsync:invalid-page", address = "0xsync-invalid-page", eventIndex = 1)
+                to "txHash must not contain whitespace, '/', or ':' on local-evm",
+        )
+
+        invalidEvents.forEach { (invalidEvent, expectedError) ->
+            fakeChainProvider.setScript(
+                chainId = "local-evm",
+                address = "0xsync-invalid-page",
+                asset = "USDC",
+                steps = listOf(
+                    FakeChainProviderStep.Page(
+                        FakeChainProviderPage(
+                            expectedCursor = null,
+                            events = listOf(validEvent, invalidEvent),
+                            nextCursor = "final-page",
+                            hasMore = false,
+                            latestBlockHeight = 100,
+                            safeBlockHeight = 100,
+                        ),
+                    ),
+                ),
+            )
+
+            val syncRunId = submitAddressSync(addressId)
+            runNextClaimedSyncs()
+
+            assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId), expectedError)
+            val lastError = singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId)
+            assertTrue(lastError.contains(expectedError), "last_error for $expectedError: $lastError")
+            assertEquals(0, tableCount("observed_transactions"))
+            assertEquals(0, tableCount("outbox_events"))
+            assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        }
+    }
+
+    @Test
+    fun `events of a chain disabled after registration fail the run terminally`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-disabled-chain")
+        val addressId = watchedAddress["id"].asText()
+        fakeChainProvider.setEvents(
+            chainId = "local-evm",
+            address = "0xsync-disabled-chain",
+            asset = "USDC",
+            events = listOf(providerEvent(txHash = "0xsync-disabled-chain-1", address = "0xsync-disabled-chain")),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        jdbcTemplate.update("UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm'")
+        runNextClaimedSyncs()
+
+        // Terminal on the first attempt instead of five retries with backoff that cannot succeed.
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(1, singleInt("SELECT attempts FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(
+            "Chain local-evm is not enabled, so its events cannot be ingested.",
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId),
+        )
+        assertEquals(0, tableCount("observed_transactions"))
+    }
+
+    @Test
     fun `provider timeout is an absolute deadline and requeues partial attempt`() {
         val accountId = createAccount()
         val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-slow-trickle")
@@ -871,6 +1024,11 @@ class SyncApiIntegrationTests(
         runNextClaimedSyncs()
 
         assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        // The constraint violation's message quotes SQL; readers of the run see only its class.
+        assertEquals(
+            "Database error (DataIntegrityViolationException).",
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId),
+        )
         assertEquals(1, singleInt("SELECT events_seen FROM sync_runs WHERE id = ?", syncRunId))
         assertEquals(0, singleInt("SELECT events_changed FROM sync_runs WHERE id = ?", syncRunId))
         assertEquals(0, tableCount("observed_transactions"))

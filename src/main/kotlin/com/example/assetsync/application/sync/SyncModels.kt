@@ -1,6 +1,7 @@
 package com.example.assetsync.application.sync
 
 import com.fasterxml.jackson.databind.node.ObjectNode
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 
@@ -263,4 +264,5 @@ class WatchedAddressByIdNotFoundException(
 
 class SyncQueueFullException(
     val maxInFlightRuns: Int,
+    val retryAfter: Duration,
 ) : RuntimeException("Sync queue is full: at most $maxInFlightRuns queued or running syncs.")

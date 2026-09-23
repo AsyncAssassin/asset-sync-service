@@ -23,6 +23,8 @@ data class IngestObservedEventCommand(
     val confirmations: Int,
     val direction: Direction,
     val status: TransactionStatus,
+    /** Who reports the event: `rest:<user>` for the API, `provider:<type>` for a sync. */
+    val source: String,
 )
 
 data class ObservedEventIngestionResult(
@@ -52,6 +54,8 @@ data class ObservedTransaction(
     val version: Long,
     val createdAt: Instant,
     val updatedAt: Instant,
+    /** Source of the last lifecycle change; null for rows written before sources were recorded. */
+    val source: String?,
 ) {
     fun toCurrentSnapshot(): CurrentTransactionSnapshot =
         CurrentTransactionSnapshot(
@@ -86,6 +90,7 @@ data class NewObservedTransaction(
     val version: Long,
     val createdAt: Instant,
     val updatedAt: Instant,
+    val source: String,
 )
 
 data class ObservedTransactionLifecycleUpdate(
@@ -96,6 +101,7 @@ data class ObservedTransactionLifecycleUpdate(
     val revertedAt: Instant?,
     val version: Long,
     val updatedAt: Instant,
+    val source: String,
 )
 
 data class ObservedTransactionOutboxPayload(
@@ -113,6 +119,8 @@ data class ObservedTransactionOutboxPayload(
     val status: String,
     val confirmations: Int,
     val blockHeight: Long,
+    /** Who caused this lifecycle change: `rest:<user>` or `provider:<type>`. */
+    val source: String?,
 )
 
 data class NewOutboxEvent(

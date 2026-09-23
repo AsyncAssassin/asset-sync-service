@@ -2,18 +2,20 @@ package com.example.assetsync.application.sync
 
 import com.example.assetsync.application.account.AccountNotFoundException
 import com.example.assetsync.application.account.AccountRepository
+import com.example.assetsync.application.account.UnsupportedChainException
 import com.example.assetsync.application.account.WatchedAddress
 import com.example.assetsync.application.account.WatchedAddressRepository
 import com.example.assetsync.application.observability.AssetSyncMetrics
+import com.example.assetsync.application.transaction.InvalidObservedEventRequestException
 import com.example.assetsync.application.transaction.ObservedEventApplicationService
 import com.example.assetsync.application.transaction.ObservedTransactionConflictException
 import com.example.assetsync.application.transaction.WatchedAddressNotFoundException
 import com.example.assetsync.config.SyncHeartbeatScheduler
 import com.example.assetsync.config.SyncProperties
 import com.example.assetsync.domain.model.TransitionOutcome
+import com.example.assetsync.domain.policy.AmountPolicy
 import com.example.assetsync.domain.policy.ChainIdentityNormalizer
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.databind.node.JsonNodeFactory
 import com.fasterxml.jackson.databind.node.ObjectNode
 import java.time.Clock
 import java.time.Duration
@@ -98,6 +100,21 @@ class SyncApplicationService(
                         runCheckpoint = outcome.runCheckpoint,
                         delay = outcome.delay,
                     )
+                is SyncClaimOutcome.Failed -> {
+                    syncRunLifecycleService.markFailed(
+                        claim = claim,
+                        eventsSeen = progress.eventsSeen,
+                        eventsChanged = progress.eventsChanged,
+                        lastError = outcome.lastError,
+                    )
+                    logger.warn(
+                        "sync_run_completed_with_failed_addresses syncRunId={} targetType={} targetId={} error={}",
+                        claim.run.id,
+                        claim.run.targetType,
+                        claim.run.targetId,
+                        outcome.lastError,
+                    )
+                }
             }
         } catch (throwable: Throwable) {
             // Thread.interrupted() also clears the flag on purpose: HikariCP refuses to lend a
@@ -136,6 +153,14 @@ class SyncApplicationService(
         }
     }
 
+    /**
+     * One claim of an account sync. The pass over the account's active addresses resumes from the
+     * keyset stored in the run checkpoint, so a run whose addresses do not fit one claim completes
+     * over several claims instead of starting over each time. An address whose cursor lease is
+     * busy is deferred to a revisit after the scan, an address with pages left keeps the scan in
+     * place until it is drained, and an address that fails terminally is recorded and skipped, so
+     * one broken address neither blocks the others nor the account.
+     */
     private fun executeAccount(
         claim: ClaimedSyncRun,
         progress: SyncProgress,
@@ -153,124 +178,122 @@ class SyncApplicationService(
                 maxAddresses = syncProperties.maxAccountSyncAddresses,
             )
         }
-        if (activeAddressCount == 0) {
-            return SyncClaimOutcome.Done
-        }
 
-        var skippedBusyLeases = 0
-        var visitedCount = 0
-        var continuationNeeded = false
-        var accountWrapped = false
-        var accountNextOffset = Math.floorMod(
-            claim.run.runCheckpoint.path(ACCOUNT_NEXT_OFFSET_FIELD).asInt(0),
-            activeAddressCount,
-        )
-        val startOffset = accountNextOffset
-
-        while (visitedCount < activeAddressCount) {
-            if (runBudget.accountBudgetExceeded(progress) || runBudget.durationExceeded(Instant.now(clock))) {
-                continuationNeeded = true
+        val pass = AccountSyncPass.from(claim.run.runCheckpoint)
+        while (!pass.scanComplete) {
+            val batch = watchedAddressRepository.findActiveByAccountIdAfter(
+                accountId = accountId,
+                afterCreatedAt = pass.scanAfterCreatedAt,
+                afterId = pass.scanAfterId,
+                limit = syncProperties.accountSyncBatchSize,
+            )
+            if (batch.isEmpty()) {
+                pass.scanComplete = true
                 break
             }
-
-            val remainingToVisit = activeAddressCount - visitedCount
-            val offset = accountNextOffset % activeAddressCount
-            val limit = minOf(syncProperties.accountSyncBatchSize, remainingToVisit)
-            val firstLimit = minOf(limit, activeAddressCount - offset)
-            val batch = mutableListOf<Pair<Int, WatchedAddress>>()
-
-            val firstSlice = watchedAddressRepository.findActiveByAccountId(
-                accountId = accountId,
-                limit = firstLimit,
-                offset = offset,
-            )
-            firstSlice.forEachIndexed { index, watchedAddress ->
-                batch += (offset + index) to watchedAddress
-            }
-
-            if (firstSlice.size < limit && visitedCount + batch.size < activeAddressCount) {
-                accountWrapped = true
-                val wrappedLimit = minOf(
-                    limit - firstSlice.size,
-                    activeAddressCount - visitedCount - batch.size,
-                    startOffset,
-                )
-                if (wrappedLimit > 0) {
-                    val wrappedSlice = watchedAddressRepository.findActiveByAccountId(
-                        accountId = accountId,
-                        limit = wrappedLimit,
-                        offset = 0,
-                    )
-                    wrappedSlice.forEachIndexed { index, watchedAddress ->
-                        batch += index to watchedAddress
+            for (watchedAddress in batch) {
+                if (claimBudgetExceeded(progress, runBudget)) {
+                    return accountContinuation(pass, SyncRunRequeueReason.CONTINUATION)
+                }
+                when (val outcome = processAccountAddress(claim, watchedAddress, progress, runBudget)) {
+                    AccountAddressOutcome.Done -> pass.advancePast(watchedAddress)
+                    AccountAddressOutcome.LeaseBusy -> {
+                        if (!pass.deferBusy(watchedAddress.id)) {
+                            // The revisit list is full: wait for this lease instead of skipping it.
+                            return accountContinuation(pass, SyncRunRequeueReason.LEASE_BUSY)
+                        }
+                        pass.advancePast(watchedAddress)
+                    }
+                    AccountAddressOutcome.Continuation ->
+                        return accountContinuation(pass, SyncRunRequeueReason.CONTINUATION)
+                    is AccountAddressOutcome.Failed -> {
+                        pass.recordFailure(watchedAddress.id, outcome.error)
+                        pass.advancePast(watchedAddress)
                     }
                 }
             }
-
-            if (batch.isEmpty()) {
-                break
-            }
-
-            for ((currentOffset, watchedAddress) in batch) {
-                when (
-                    processAddressWithinClaim(
-                        claim = claim,
-                        watchedAddress = watchedAddress,
-                        progress = progress,
-                        runBudget = runBudget,
-                    )
-                ) {
-                    AddressSyncOutcome.Done -> Unit
-                    AddressSyncOutcome.LeaseBusy -> skippedBusyLeases += 1
-                    AddressSyncOutcome.Continuation -> continuationNeeded = true
-                }
-
-                visitedCount += 1
-                progress.addressesVisitedThisClaim += 1
-                accountNextOffset = (currentOffset + 1) % activeAddressCount
-                accountWrapped = accountWrapped || accountNextOffset == 0
-
-                if (
-                    continuationNeeded ||
-                    (
-                        visitedCount < activeAddressCount &&
-                            (runBudget.accountBudgetExceeded(progress) || runBudget.durationExceeded(Instant.now(clock)))
-                        )
-                ) {
-                    continuationNeeded = true
-                    break
-                }
-            }
-
-            if (continuationNeeded) {
-                break
-            }
         }
 
-        val runCheckpoint = accountTraversalCheckpoint(
-            accountNextOffset = accountNextOffset,
-            skippedBusyLeases = skippedBusyLeases,
-            accountWrapped = accountWrapped,
+        // Each deferred address gets one attempt per claim; the ones still busy wait for the next.
+        for (watchedAddressId in pass.pendingRevisits()) {
+            if (claimBudgetExceeded(progress, runBudget)) {
+                return accountContinuation(pass, SyncRunRequeueReason.CONTINUATION)
+            }
+            val watchedAddress = watchedAddressRepository.findActiveById(watchedAddressId)
+                ?.takeIf { it.accountId == accountId }
+            if (watchedAddress == null) {
+                // Disabled or moved since it was deferred: no longer part of this account's pass.
+                pass.revisitDone(watchedAddressId)
+                continue
+            }
+            when (val outcome = processAccountAddress(claim, watchedAddress, progress, runBudget)) {
+                AccountAddressOutcome.Done -> pass.revisitDone(watchedAddressId)
+                AccountAddressOutcome.LeaseBusy -> Unit
+                AccountAddressOutcome.Continuation ->
+                    return accountContinuation(pass, SyncRunRequeueReason.CONTINUATION)
+                is AccountAddressOutcome.Failed -> {
+                    pass.revisitDone(watchedAddressId)
+                    pass.recordFailure(watchedAddressId, outcome.error)
+                }
+            }
+        }
+        if (pass.pendingRevisits().isNotEmpty()) {
+            return accountContinuation(pass, SyncRunRequeueReason.LEASE_BUSY)
+        }
+
+        return if (pass.hasFailures) SyncClaimOutcome.Failed(pass.failureSummary()) else SyncClaimOutcome.Done
+    }
+
+    private fun claimBudgetExceeded(progress: SyncProgress, runBudget: RunBudget): Boolean =
+        runBudget.accountBudgetExceeded(progress) || runBudget.durationExceeded(Instant.now(clock))
+
+    private fun accountContinuation(pass: AccountSyncPass, reason: SyncRunRequeueReason): SyncClaimOutcome =
+        SyncClaimOutcome.Continuation(
+            reason = reason,
+            runCheckpoint = pass.toCheckpoint(),
+            delay = if (reason == SyncRunRequeueReason.LEASE_BUSY) {
+                syncProperties.pagination.cursorLeaseRetryDelay
+            } else {
+                syncProperties.pagination.continuationRequeueDelay
+            },
         )
 
-        return when {
-            continuationNeeded -> SyncClaimOutcome.Continuation(
-                reason = SyncRunRequeueReason.CONTINUATION,
-                runCheckpoint = runCheckpoint,
-                delay = syncProperties.pagination.continuationRequeueDelay,
+    /**
+     * Syncs one address of an account run. Failures that would fail the same way on every attempt
+     * (malformed or rejected provider data, provider configuration, a database constraint) end
+     * that address only; anything retryable, a lost claim or lease, and shutdown interrupts keep
+     * failing the whole claim so the run retries or requeues as before.
+     */
+    private fun processAccountAddress(
+        claim: ClaimedSyncRun,
+        watchedAddress: WatchedAddress,
+        progress: SyncProgress,
+        runBudget: RunBudget,
+    ): AccountAddressOutcome =
+        try {
+            when (processAddressWithinClaim(claim = claim, watchedAddress = watchedAddress, progress = progress, runBudget = runBudget)) {
+                AddressSyncOutcome.Done -> AccountAddressOutcome.Done
+                AddressSyncOutcome.LeaseBusy -> AccountAddressOutcome.LeaseBusy
+                AddressSyncOutcome.Continuation -> AccountAddressOutcome.Continuation
+            }
+        } catch (exception: RuntimeException) {
+            val addressTerminal = exception is ProviderDataInvalidException ||
+                exception is ProviderConfigurationException ||
+                exception is DataIntegrityViolationException
+            if (!addressTerminal || Thread.currentThread().isInterrupted) {
+                throw exception
+            }
+            val error = exception.runError()
+            logger.warn(
+                "account_sync_address_failed syncRunId={} accountId={} watchedAddressId={} error={}",
+                claim.run.id,
+                watchedAddress.accountId,
+                watchedAddress.id,
+                error,
             )
-            skippedBusyLeases > 0 -> SyncClaimOutcome.Continuation(
-                reason = SyncRunRequeueReason.LEASE_BUSY,
-                runCheckpoint = runCheckpoint,
-                delay = if (skippedBusyLeases == visitedCount) {
-                    syncProperties.pagination.cursorLeaseRetryDelay
-                } else {
-                    syncProperties.pagination.continuationRequeueDelay
-                },
-            )
-            else -> SyncClaimOutcome.Done
+            logFailureDetail(claim, error, exception)
+            AccountAddressOutcome.Failed(error)
         }
-    }
 
     private fun processAddressWithinClaim(
         claim: ClaimedSyncRun,
@@ -338,6 +361,7 @@ class SyncApplicationService(
                     cursor = current.providerCursor,
                     limit = syncProperties.pagination.pageSize,
                     fromBlockHeight = current.lastProcessedBlockHeight,
+                    fromEventIndex = current.lastProcessedEventIndex,
                     safeBlockHeight = current.lastFinalizedBlockHeight,
                     checkpoint = current.checkpoint,
                 )
@@ -363,7 +387,7 @@ class SyncApplicationService(
 
                 val checkpoint = page.metadata?.deepCopy() ?: current.checkpoint.deepCopy()
                 val highWater = resolveDurableHighWater(current = current, page = page)
-                val providerCursor = resolveDurableProviderCursor(page = page)
+                val providerCursor = resolveDurableProviderCursor(current = current, page = page)
                 val advanceNow = Instant.now(clock)
                 val advanced = syncCursorRepository.advanceCheckpointFenced(
                     AdvanceSyncCheckpointCommand(
@@ -562,12 +586,20 @@ class SyncApplicationService(
         events.forEach { event ->
             progress.eventsSeen += 1
             progress.claimEventsSeen += 1
+            // The failures mapped below are deterministic for this event, so they are terminal
+            // instead of burning retries: the same event would fail the same way on every attempt.
             val result = try {
-                observedEventApplicationService.ingest(event.toIngestCommand())
+                observedEventApplicationService.ingest(event.toIngestCommand(source = "provider:${chainProviderPort.providerName}"))
             } catch (exception: WatchedAddressNotFoundException) {
                 throw ProviderDataInvalidException("Provider returned an event for an address that is not watched.", exception)
             } catch (exception: ObservedTransactionConflictException) {
                 throw ProviderDataInvalidException("Provider returned an event that conflicts with stored immutable fields.", exception)
+            } catch (exception: InvalidObservedEventRequestException) {
+                throw ProviderDataInvalidException("Provider returned an invalid event: ${exception.message}", exception)
+            } catch (exception: IllegalArgumentException) {
+                throw ProviderDataInvalidException("Provider returned an event that breaks a domain invariant: ${exception.message}", exception)
+            } catch (exception: UnsupportedChainException) {
+                throw ProviderConfigurationException("Chain ${exception.chainId} is not enabled, so its events cannot be ingested.", exception)
             }
             if (result.result == TransitionOutcome.CREATED || result.result == TransitionOutcome.UPDATED) {
                 changed += 1
@@ -636,6 +668,17 @@ class SyncApplicationService(
             if (event.eventIndex < 0 || event.blockHeight < 0 || event.confirmations < 0) {
                 throw ProviderDataInvalidException("Provider returned an event with negative block metadata.")
             }
+            // Checked for every event before the first one is written, so a bad event later in
+            // the page cannot leave the events before it committed behind a terminal failure.
+            ChainIdentityNormalizer.txHashViolation(
+                chainId = expected.chainId,
+                txHash = ChainIdentityNormalizer.normalizeTxHash(expected.chainId, event.txHash),
+            )?.let { violation ->
+                throw ProviderDataInvalidException("Provider returned an event with a malformed transaction hash: $violation")
+            }
+            if (AmountPolicy.normalizedOrNull(event.amount) == null) {
+                throw ProviderDataInvalidException("Provider returned an amount that is negative or does not fit numeric(38,18).")
+            }
             val previousEvent = previous
             if (previousEvent != null && compareEvents(previousEvent, event) > 0) {
                 throw ProviderDataInvalidException("Provider returned events out of checkpoint order.")
@@ -691,8 +734,15 @@ class SyncApplicationService(
     private fun pageDurableBlockHighWater(page: ChainProviderEventsPage): Long? =
         page.safeBlockHeight ?: page.latestBlockHeight
 
-    private fun resolveDurableProviderCursor(page: ChainProviderEventsPage): String? =
-        page.nextCursor
+    /**
+     * A final page may omit its cursor. After an empty final page the stored cursor still points
+     * right after the last processed event, so it is kept for bridges that resume only by cursor.
+     * After a final page with events it is cleared: replaying from it would return those events,
+     * which now sit behind the checkpoint. Every request also carries the checkpoint's block and
+     * event index, so a bridge without a cursor resumes from there instead of from the start.
+     */
+    private fun resolveDurableProviderCursor(current: SyncCursor, page: ChainProviderEventsPage): String? =
+        page.nextCursor ?: current.providerCursor.takeIf { page.events.isEmpty() }
 
     private fun compareEvents(left: ChainProviderObservedEvent, right: ChainProviderObservedEvent): Int =
         compareValuesBy(
@@ -708,17 +758,6 @@ class SyncApplicationService(
             left == null -> right
             right == null -> left
             else -> maxOf(left, right)
-        }
-
-    private fun accountTraversalCheckpoint(
-        accountNextOffset: Int,
-        skippedBusyLeases: Int,
-        accountWrapped: Boolean,
-    ): ObjectNode =
-        JsonNodeFactory.instance.objectNode().apply {
-            put(ACCOUNT_NEXT_OFFSET_FIELD, accountNextOffset)
-            put(ACCOUNT_SKIPPED_BUSY_FIELD, skippedBusyLeases)
-            put(ACCOUNT_WRAPPED_FIELD, accountWrapped)
         }
 
     private fun extendCursorLeaseOrThrow(
@@ -848,7 +887,8 @@ class SyncApplicationService(
             .any { it is InterruptedException }
 
     private fun handleClaimFailure(claim: ClaimedSyncRun, progress: SyncProgress, throwable: Throwable) {
-        val error = throwable.conciseMessage().take(syncProperties.worker.maxErrorLength)
+        val error = throwable.runError().take(syncProperties.worker.maxErrorLength)
+        logFailureDetail(claim, error, throwable)
         val terminal = isTerminalFailure(throwable)
         try {
             if (terminal) {
@@ -929,6 +969,33 @@ class SyncApplicationService(
         }
     }
 
+    /**
+     * The `last_error` a sync run shows to API readers. The service's own exceptions carry messages
+     * written for that purpose; a database or unexpected failure is reduced to its class, because
+     * its message can quote SQL and bound values. The full detail goes to the log instead.
+     */
+    private fun Throwable.runError(): String =
+        when (this) {
+            is DataAccessException -> "Database error (${javaClass.simpleName})."
+            is ChainProviderUnavailableException,
+            is ProviderDataInvalidException,
+            is ProviderConfigurationException,
+            is AccountNotFoundException,
+            is WatchedAddressByIdNotFoundException,
+            is AccountSyncTooLargeException,
+            is SyncCapacityExceededException,
+            is CursorCheckpointAdvanceStaleException,
+            is SyncRunClaimLostException,
+            -> conciseMessage()
+            else -> "Unexpected error (${javaClass.simpleName})."
+        }
+
+    private fun logFailureDetail(claim: ClaimedSyncRun, error: String, throwable: Throwable) {
+        if (error != throwable.conciseMessage()) {
+            logger.warn("sync_run_failure_detail syncRunId={} error={}", claim.run.id, error, throwable)
+        }
+    }
+
     private fun Throwable.conciseMessage(): String {
         val raw = message?.takeIf { it.isNotBlank() } ?: javaClass.simpleName
         return raw
@@ -942,7 +1009,6 @@ class SyncApplicationService(
         var claimEventsSeen: Int = 0,
         var claimEventsChanged: Int = 0,
         var accountPagesThisClaim: Int = 0,
-        var addressesVisitedThisClaim: Int = 0,
     )
 
     private data class RunBudget(
@@ -988,6 +1054,9 @@ class SyncApplicationService(
             val runCheckpoint: ObjectNode,
             val delay: Duration,
         ) : SyncClaimOutcome
+
+        /** An account pass that finished with addresses that failed terminally. */
+        data class Failed(val lastError: String) : SyncClaimOutcome
     }
 
     private enum class AddressSyncOutcome {
@@ -996,11 +1065,18 @@ class SyncApplicationService(
         Continuation,
     }
 
+    private sealed interface AccountAddressOutcome {
+        data object Done : AccountAddressOutcome
+
+        data object LeaseBusy : AccountAddressOutcome
+
+        data object Continuation : AccountAddressOutcome
+
+        data class Failed(val error: String) : AccountAddressOutcome
+    }
+
     private companion object {
         const val INTERRUPTED_REQUEUE_ERROR = "worker interrupted during shutdown; requeued without consuming retry budget"
-        const val ACCOUNT_NEXT_OFFSET_FIELD = "accountNextOffset"
-        const val ACCOUNT_SKIPPED_BUSY_FIELD = "accountSkippedBusy"
-        const val ACCOUNT_WRAPPED_FIELD = "accountWrapped"
     }
 }
 

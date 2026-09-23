@@ -142,7 +142,7 @@ class AlchemyProviderPropertiesTests {
     }
 
     @Test
-    fun `rollout rules fail enabled chains without a network mapping and name the operator action`() {
+    fun `rollout rules fail enabled chains with active addresses but no network mapping and name the operator action`() {
         val properties = AlchemyProviderProperties(apiKey = "k", networks = sepolia)
         val required = listOf(
             AlchemyRequiredChain("eth-sepolia", setOf("ERC20")),
@@ -152,8 +152,21 @@ class AlchemyProviderPropertiesTests {
         val violations = AlchemyRolloutRules.violations(properties, required, emptyList())
 
         assertEquals(1, violations.size, violations.toString())
-        assertTrue(violations.single().contains("[local-evm]"), violations.single())
+        assertTrue(violations.single().contains("with active watched addresses but no Alchemy network mapping: [local-evm]"), violations.single())
         assertTrue(violations.single().contains("disable them in chain_configs"), violations.single())
+        assertEquals(emptyList(), AlchemyRolloutRules.unmappedIdleChains(properties, required))
+    }
+
+    @Test
+    fun `an enabled chain without a network mapping and without active addresses is only reported as idle`() {
+        val properties = AlchemyProviderProperties(apiKey = "k", networks = sepolia)
+        val required = listOf(
+            AlchemyRequiredChain("eth-sepolia", setOf("ERC20"), hasActiveAddresses = false),
+            AlchemyRequiredChain("local-evm", setOf("ERC20"), hasActiveAddresses = false),
+        )
+
+        assertEquals(emptyList(), AlchemyRolloutRules.violations(properties, required, emptyList()))
+        assertEquals(listOf("local-evm"), AlchemyRolloutRules.unmappedIdleChains(properties, required))
     }
 
     @Test

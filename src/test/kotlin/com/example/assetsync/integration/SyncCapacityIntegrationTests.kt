@@ -14,12 +14,14 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.context.annotation.Import
+import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.annotation.DirtiesContext
 import org.springframework.test.context.ActiveProfiles
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.header
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 
@@ -73,6 +75,8 @@ class SyncCapacityIntegrationTests(
             .andExpect(status().isTooManyRequests)
             .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/sync-queue-full"))
             .andExpect(jsonPath("$.maxInFlightRuns").value(1))
+            // The default worker claim interval (asset-sync.sync.worker.fixed-delay, 5s).
+            .andExpect(header().string(HttpHeaders.RETRY_AFTER, "5"))
 
         assertEquals(1, tableCount("sync_runs"))
         assertEquals(0, tableCount("observed_transactions"))

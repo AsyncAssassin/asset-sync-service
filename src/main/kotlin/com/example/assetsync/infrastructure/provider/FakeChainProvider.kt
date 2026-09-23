@@ -22,6 +22,8 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 @Component
 @Profile("local", "test")
 class FakeChainProvider : ChainProviderPort {
+    override val providerName: String = "fake"
+
     private val logger = LoggerFactory.getLogger(FakeChainProvider::class.java)
     private val scripts = ConcurrentHashMap<FakeChainProviderKey, List<FakeChainProviderStep>>()
     private val scriptPositions = ConcurrentHashMap<FakeChainProviderKey, AtomicInteger>()
@@ -42,6 +44,8 @@ class FakeChainProvider : ChainProviderPort {
                 key = key,
                 cursor = request.cursor,
                 limit = request.limit,
+                fromBlockHeight = request.fromBlockHeight,
+                fromEventIndex = request.fromEventIndex,
             ),
         )
         recordTransactionState()
@@ -265,6 +269,8 @@ data class FakeChainProviderPageRequest(
     val key: FakeChainProviderKey,
     val cursor: String?,
     val limit: Int,
+    val fromBlockHeight: Long? = null,
+    val fromEventIndex: Int? = null,
 )
 
 data class FakeChainProviderPage(

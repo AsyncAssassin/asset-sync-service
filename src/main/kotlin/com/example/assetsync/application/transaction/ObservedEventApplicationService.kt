@@ -12,6 +12,8 @@ import com.example.assetsync.domain.model.TransactionLifecycleState
 import com.example.assetsync.domain.model.TransactionStatus
 import com.example.assetsync.domain.model.TransactionTransitionResult
 import com.example.assetsync.domain.model.TransitionOutcome
+import com.example.assetsync.domain.model.outboxIdempotencyKey
+import com.example.assetsync.domain.policy.AmountPolicy
 import com.example.assetsync.domain.policy.ChainIdentityNormalizer
 import com.example.assetsync.domain.state.TransactionStateMachine
 import java.time.Clock
@@ -57,6 +59,7 @@ class ObservedEventApplicationService(
                 watchedAddress = watchedAddress,
                 incoming = incoming,
                 requiredConfirmations = chainConfig.requiredConfirmations,
+                source = command.source,
             )
         } else {
             evaluateExisting(
@@ -64,6 +67,7 @@ class ObservedEventApplicationService(
                 current = current,
                 incoming = incoming,
                 requiredConfirmations = chainConfig.requiredConfirmations,
+                source = command.source,
             )
         }
     }
@@ -72,6 +76,7 @@ class ObservedEventApplicationService(
         watchedAddress: WatchedAddress,
         incoming: IncomingObservedTransaction,
         requiredConfirmations: Int,
+        source: String,
     ): ObservedEventIngestionResult {
         val transition = stateMachine.evaluate(
             current = null,
@@ -98,6 +103,7 @@ class ObservedEventApplicationService(
                 version = 0,
                 createdAt = now,
                 updatedAt = now,
+                source = source,
             ),
         )
 
@@ -119,6 +125,7 @@ class ObservedEventApplicationService(
                 current = existing,
                 incoming = incoming,
                 requiredConfirmations = requiredConfirmations,
+                source = source,
             )
         }
 
@@ -135,6 +142,7 @@ class ObservedEventApplicationService(
         current: ObservedTransaction,
         incoming: IncomingObservedTransaction,
         requiredConfirmations: Int,
+        source: String,
     ): ObservedEventIngestionResult {
         val transition = stateMachine.evaluate(
             current = current.toCurrentSnapshot(),
@@ -193,6 +201,7 @@ class ObservedEventApplicationService(
                 revertedAt = current.revertedAt ?: transition.state.revertedAt(now),
                 version = current.version + 1,
                 updatedAt = now,
+                source = source,
             ),
         )
 
@@ -287,20 +296,33 @@ class ObservedEventApplicationService(
         )
     }
 
+    /**
+     * The application boundary shared by REST and provider ingestion: nothing past it sees a
+     * malformed transaction hash or an amount that PostgreSQL would round or reject. The address
+     * must match an active watched address, whose format registration already checked.
+     */
     private fun IngestObservedEventCommand.toIncomingObservedTransaction(): IncomingObservedTransaction {
         val identity = ChainIdentityNormalizer.normalize(
             chainId = chainId,
             address = address,
             asset = asset,
         )
+        val normalizedTxHash = ChainIdentityNormalizer.normalizeTxHash(identity.chainId, txHash)
+        ChainIdentityNormalizer.txHashViolation(identity.chainId, normalizedTxHash)?.let { violation ->
+            throw InvalidObservedEventRequestException(violation)
+        }
+        val normalizedAmount = AmountPolicy.normalizedOrNull(amount)
+            ?: throw InvalidObservedEventRequestException(
+                "amount must be a non-negative decimal that fits numeric(38,18).",
+            )
         return IncomingObservedTransaction(
             chainId = identity.chainId,
-            txHash = ChainIdentityNormalizer.normalizeTxHash(identity.chainId, txHash),
+            txHash = normalizedTxHash,
             eventIndex = eventIndex,
             address = identity.address,
             asset = identity.asset,
             direction = direction,
-            amount = amount,
+            amount = normalizedAmount,
             blockHeight = blockHeight,
             confirmations = confirmations,
             status = status,
@@ -323,7 +345,7 @@ class ObservedEventApplicationService(
             aggregateType = "OBSERVED_TRANSACTION",
             aggregateId = id,
             eventType = eventType,
-            idempotencyKey = naturalKey().outboxIdempotencyKey(status = status, version = version),
+            idempotencyKey = outboxIdempotencyKey(transactionId = id, status = status, version = version),
             payload = ObservedTransactionOutboxPayload(
                 eventId = eventId,
                 eventType = eventType.name,
@@ -339,6 +361,7 @@ class ObservedEventApplicationService(
                 status = status.name,
                 confirmations = confirmations,
                 blockHeight = blockHeight,
+                source = source,
             ),
             createdAt = occurredAt,
             updatedAt = occurredAt,

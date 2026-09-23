@@ -23,9 +23,9 @@ import org.springframework.test.web.servlet.result.MockMvcResultMatchers.header
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 
 /**
- * Guards N10: the request correlation id is not only echoed on the response, it actually reaches the
- * application log lines (via the `%X{requestId}` pattern) — the whole point of F17, which the
- * remediation had left half-done (id echoed but absent from logs).
+ * Guards request correlation: the request id is not only echoed on the response, it actually
+ * reaches the application log lines (via the `%X{requestId}` pattern), which is the point of having
+ * it; an earlier version echoed the id but left it out of the logs.
  */
 @ActiveProfiles("test")
 @Import(TestcontainersConfiguration::class)

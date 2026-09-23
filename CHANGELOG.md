@@ -4,6 +4,55 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- `429 sync-queue-full` responses carry `Retry-After` with the sync worker claim interval (`asset-sync.sync.worker.fixed-delay`, 5 seconds by default), rounded up to whole seconds.
+- The OpenAPI document declares HTTP Basic as the global security requirement, so Swagger UI offers **Authorize** and can switch between the `READ` and `OPERATOR` users.
+- `PATCH /api/v1/addresses/{addressId}` for `OPERATOR` sets a watched address `ACTIVE` or `DISABLED`. A disabled address is skipped by account sync, refused by address sync and event ingestion, and resumes from its stored cursor once enabled again.
+- HTTP bridge requests carry the address's durable checkpoint as `fromBlockHeight` and `fromEventIndex`, and the bridge page contract is documented in `docs/architecture.md`.
+- Observed transactions record the source of their last lifecycle change in the new `source` column (changeset 016), and outbox payloads and their published log lines carry the source of each event: `rest:<user>` for `POST /api/v1/observed-events`, `provider:<http|alchemy|fake>` for a sync.
+- CI scans the Docker image with Trivy and fails on HIGH and CRITICAL vulnerabilities that have a fix, in OS packages and in the libraries inside the jar; a finding that does not apply goes to `.trivyignore` with its reason. Trivy runs from its image pinned by digest.
+- Dependabot proposes Docker base image updates.
+- The README lists the known limitations: `REVERTED` is final, the roles are global, watched addresses are unique across accounts, Basic authentication verifies BCrypt on every request with no limit on failed attempts, the Alchemy rate limiter is per process, `sync_runs` has no retention (`docs/database.md` has the SQL that trims it), the outbox publishes to the log only, and the Alchemy adapter does not record self-transfers.
+- `docs/api.md` names the one exception to the `ProblemDetail` format: a request that Tomcat refuses before the application, such as a path with `%2F`, gets Tomcat's minimal HTML page without the error report or the server version.
+- `README.md` and `docs/alchemy-runbook.md` describe two limits of reading every Alchemy block once: `registration-safe` fixes the start block at an address's first sync, not at its registration, so a new address should be synced right away; and a `required_confirmations` above the depth of the finality frontier leaves events `SEEN`.
+
+### Changed
+
+- **Breaking:** watched-address registration checks the address format of its chain: `0x` and 40 hex digits on `eth-sepolia` and `eth-mainnet`, no whitespace, `/`, or `:` on `local-evm`, and no control characters on any chain. A malformed address returns `400 invalid-request`. Observed events apply the same rules to `txHash`, with 64 hex digits on `eth-sepolia` and `eth-mainnet`.
+- **Breaking:** outbox idempotency keys are built from the observed transaction id as `observed-tx:{transactionId}:status:{status}:v:{version}` instead of the natural key. Existing rows keep their keys, and no new key can equal an old one.
+- In an account sync, an address that fails terminally ends only itself: the pass continues with the other addresses, and the run finishes `FAILED` with `<n> of <m> addresses failed terminally: <addressId>: <error>; ...` in `lastError`.
+- Provider health turns `DOWN` only on availability failures. Invalid data for one address, such as a `4xx` answer, malformed JSON, or an unmappable Alchemy row, keeps the state and appears as `lastDataError`, so one bad address no longer turns `/actuator/health` into `503`.
+- The recovery job runs every minute and first a minute after startup instead of every five minutes, so a run left `RUNNING` by a crashed worker is requeued about a minute after its lease expires.
+- A sync run whose event fails ingestion deterministically fails at once instead of spending its retries: an event that breaks a domain invariant or an ingest rule is provider data invalid, and events of a chain disabled after registration are a provider configuration failure.
+- With `asset-sync.provider.type=alchemy`, an Alchemy that is unavailable at startup (`5xx`, `429`, a timeout, a transport error) no longer stops the service. It starts with the `alchemyChainProvider` health component `DOWN` in the new `probe-failed` state, sync runs retry with backoff, and the first successful fetch clears the state; the REST API and outbox publishing keep working. A rejected key (`401`, `403`, JSON-RPC `-32600`) still stops startup.
+- The Alchemy startup preflight requires a network mapping only for enabled chains with active watched addresses and logs other unmapped chains as `alchemy_preflight_unmapped_chains_skipped`, so a fresh database boots without disabling the seeded `local-evm` chain first.
+
+### Fixed
+
+- In the protected profiles, a request that Spring Security's firewall rejects before authentication, for example one with `//` or `;` in its path, gets `400` instead of a `401` Basic challenge, also with valid credentials: error dispatches no longer require authentication.
+- The `demo` simulator answers a non-positive `limit` with a `400` ProblemDetail instead of `500`.
+- An amount with an extreme exponent such as `1e2147483647` passed the `numeric(38, 18)` check through an `Int` overflow and was stored as a confirmed zero. Digits are now counted in `Long`, exponent notation within range still works, and amounts are stored at scale 18. REST ingestion and provider pages share this rule.
+- A provider page is checked in full before its first event is written: an amount that is negative or does not fit `numeric(38, 18)`, which PostgreSQL used to round silently, or a malformed transaction hash fails the run terminally and writes nothing.
+- Two transactions whose hash or address contains `:` could share an outbox idempotency key, and the lifecycle event of the second one was dropped.
+- An account sync that did not fit one claim never completed: each claim had to visit every address again, so an account with more addresses than the per-claim budget allows ran until the continuation limit failed it. The pass now keeps its keyset in the run checkpoint and completes over several claims.
+- A final HTTP bridge page without a cursor cleared the stored cursor, so the next sync fetched the bridge's history from the start and failed on the first event behind the checkpoint. The next request now carries the checkpoint, and the stored cursor is kept when the final page had no events.
+- The documentation no longer lists block-range scans and provider cursors as future work, names the provider that `asset-sync.provider.type` selects where it said the HTTP provider runs in every protected profile, and shows the Alchemy adapter, the sync worker, and the recovery job in the architecture diagrams.
+- Docker Compose gives the application a 40-second stop grace period, longer than the 30-second graceful-shutdown phase. With Docker's default 10 seconds a sync run still in flight was killed before it could requeue, waited in `RUNNING` for recovery, and lost a retry attempt.
+
+### Security
+
+- Docker Compose publishes the API and PostgreSQL on `127.0.0.1` only. `ASSET_SYNC_HTTP_BIND_ADDRESS` opens the API port to other machines, for use with a protected profile; PostgreSQL stays on loopback.
+- The protected security chain opens `/simulator/**` only under `demo`. In `prod` and `e2e`, which serve no simulator, the path requires authentication.
+- Addresses and transaction hashes with control characters are rejected on every chain, so they can no longer forge log lines.
+- The `prod` profile refuses to start on a database whose user store holds the `demo` users, whose passwords are public, and its message names the SQL that removes them; it never changes the data itself.
+- A sync run's `lastError` no longer quotes SQL: a database failure is stored as its class, for example `Database error (DataIntegrityViolationException).`, other unexpected failures as `Unexpected error (<class>).`, and the full exception goes to the log.
+- The disk-space health indicator is off, because its details showed the working directory's absolute path to every `READ` user.
+- The documentation explains why CSRF protection is off and what a browser that caches Basic credentials exposes.
+- Tomcat 10.1.60, pgjdbc 42.7.13, Log4j API 2.25.5, and commons-lang3 3.20.0 are pinned over the Spring Boot BOM, which gets no more open-source releases. None of the advisories they close is reachable in the service, but scanners reported them, three as CRITICAL.
+- The Docker image is built on `eclipse-temurin:21.0.12_8-jre-noble` instead of `21.0.8_9-jre`: the JRE is four quarterly updates newer, and the 11 HIGH advisories in the base image's GnuPG and OpenSSL packages are gone.
+- CI runs with a read-only `GITHUB_TOKEN` and actions pinned to commit SHAs, and the Gradle wrapper verifies the checksum of the distribution it downloads.
+
 ## [0.3.0] - 2026-09-23
 
 ### Added

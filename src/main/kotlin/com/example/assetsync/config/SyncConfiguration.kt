@@ -159,8 +159,8 @@ data class SyncProperties(
     data class Recovery(
         val enabled: Boolean = true,
         val batchSize: Int = 100,
-        val fixedDelay: Duration = Duration.ofMinutes(5),
-        val initialDelay: Duration = Duration.ofMinutes(5),
+        val fixedDelay: Duration = Duration.ofMinutes(1),
+        val initialDelay: Duration = Duration.ofMinutes(1),
     ) {
         init {
             require(batchSize > 0) { "asset-sync.sync.recovery.batch-size must be positive." }

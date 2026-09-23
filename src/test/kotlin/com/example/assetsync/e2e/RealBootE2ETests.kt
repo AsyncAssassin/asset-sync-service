@@ -3,11 +3,18 @@ package com.example.assetsync.e2e
 import com.example.assetsync.TestcontainersConfiguration
 import com.example.assetsync.application.sync.SyncApplicationService
 import com.example.assetsync.application.sync.SyncRunLifecycleService
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.AfterAll
@@ -37,7 +44,7 @@ import org.springframework.test.context.DynamicPropertySource
  * over HTTP, and proves auth + the real provider path end to end. The provider points at an
  * in-test JDK HttpServer stub (deterministic, no extra dependency, port fixed before context start
  * via @DynamicPropertySource). Schedulers are OFF (application-e2e.yml) so assertions are
- * deterministic. This is the layer that would have caught N2 (prod bootability) and N4 (auth).
+ * deterministic. This is the layer that catches regressions in prod bootability and authentication.
  */
 @ActiveProfiles("e2e")
 @Import(TestcontainersConfiguration::class)
@@ -50,6 +57,7 @@ class RealBootE2ETests(
     @Autowired private val passwordEncoder: PasswordEncoder,
     @Autowired private val syncRunLifecycleService: SyncRunLifecycleService,
     @Autowired private val syncApplicationService: SyncApplicationService,
+    @Autowired private val objectMapper: ObjectMapper,
 ) {
 
     @BeforeEach
@@ -71,9 +79,10 @@ class RealBootE2ETests(
         assertEquals(HttpStatus.OK, readerHealth.statusCode)
         assertTrue(readerHealth.body?.contains("\"db\"") == true, "authenticated health must expose the db component")
         assertTrue(readerHealth.body?.contains("httpChainProvider") == true, "authenticated health must include the HTTP provider indicator")
+        assertTrue(readerHealth.body?.contains("diskSpace") != true, "health must not reveal the working directory: ${readerHealth.body}")
 
         // 2) Unauthenticated API access is rejected — and the 401 still carries the request id,
-        //    proving RequestIdFilter runs before the security chain (N10).
+        //    proving RequestIdFilter runs before the security chain.
         val anonymous = restTemplate.getForEntity(
             "/api/v1/accounts/00000000-0000-0000-0000-000000000000",
             String::class.java,
@@ -125,11 +134,111 @@ class RealBootE2ETests(
         assertEquals("SUCCEEDED", syncRunStatus(sync.body!!["id"] as String))
         assertEquals(1, jdbcTemplate.queryForObject("SELECT count(*) FROM observed_transactions", Int::class.java))
         assertEquals(1, jdbcTemplate.queryForObject("SELECT count(*) FROM outbox_events", Int::class.java))
+        assertEquals("provider:http", jdbcTemplate.queryForObject("SELECT source FROM observed_transactions", String::class.java))
+        assertEquals("provider:http", jdbcTemplate.queryForObject("SELECT payload ->> 'source' FROM outbox_events", String::class.java))
+
+        // 5b) An event reported through the API records the authenticated caller as its source.
+        val reported = operator().postForEntity(
+            "/api/v1/observed-events",
+            json(
+                """{"chainId":"local-evm","txHash":"0xe2e-reported","eventIndex":0,"address":"0xe2eaddr","asset":"USDC",
+                "amount":"2.5","blockHeight":1001,"confirmations":1,"direction":"INBOUND","status":"SEEN"}""",
+            ),
+            Map::class.java,
+        )
+        assertEquals(HttpStatus.CREATED, reported.statusCode)
+        assertEquals(
+            "rest:e2e-operator",
+            jdbcTemplate.queryForObject("SELECT source FROM observed_transactions WHERE tx_hash = '0xe2e-reported'", String::class.java),
+        )
 
         // 6) Prometheus is served by Boot's autoconfig endpoint and exposes application meters.
         val prometheus = operator().getForEntity("/actuator/prometheus", String::class.java)
         assertEquals(HttpStatus.OK, prometheus.statusCode)
         assertTrue(prometheus.body?.contains("asset_sync") == true)
+    }
+
+    @Test
+    fun `a bridge that returns no cursor resumes from the checkpoint the provider sends`() {
+        val accountId = operator()
+            .postForEntity("/api/v1/accounts", json("""{"externalRef":"e2e-resume"}"""), Map::class.java)
+            .let { assertEquals(HttpStatus.CREATED, it.statusCode); it.body!!["id"] as String }
+        val addressId = operator()
+            .postForEntity(
+                "/api/v1/accounts/$accountId/addresses",
+                json("""{"chainId":"local-evm","address":"$RESUME_ADDRESS","asset":"USDC"}"""),
+                Map::class.java,
+            )
+            .let { assertEquals(HttpStatus.CREATED, it.statusCode); it.body!!["id"] as String }
+
+        val first = operator().postForEntity("/api/v1/addresses/$addressId/sync", HttpEntity<Void>(HttpHeaders()), Map::class.java)
+        runNextClaimedSync()
+        assertEquals("SUCCEEDED", syncRunStatus(first.body!!["id"] as String))
+        assertEquals(2, jdbcTemplate.queryForObject("SELECT count(*) FROM observed_transactions", Int::class.java))
+
+        // The final page carried no cursor. Without the checkpoint the bridge would serve its
+        // history again, and the first event, now behind the checkpoint, would fail the run.
+        val second = operator().postForEntity("/api/v1/addresses/$addressId/sync", HttpEntity<Void>(HttpHeaders()), Map::class.java)
+        runNextClaimedSync()
+        assertEquals("SUCCEEDED", syncRunStatus(second.body!!["id"] as String))
+        assertEquals("asset=USDC&limit=100&fromBlockHeight=101&fromEventIndex=0", resumeQueries.last())
+    }
+
+    @Test
+    fun `only the operator can disable a watched address, and a disabled address cannot be synced`() {
+        val accountId = operator()
+            .postForEntity("/api/v1/accounts", json("""{"externalRef":"e2e-disable"}"""), Map::class.java)
+            .let { assertEquals(HttpStatus.CREATED, it.statusCode); it.body!!["id"] as String }
+        val addressId = operator()
+            .postForEntity(
+                "/api/v1/accounts/$accountId/addresses",
+                json("""{"chainId":"local-evm","address":"0xe2e-disable","asset":"USDC"}"""),
+                Map::class.java,
+            )
+            .let { assertEquals(HttpStatus.CREATED, it.statusCode); it.body!!["id"] as String }
+        val disable = json("""{"status":"DISABLED"}""")
+
+        assertEquals(
+            HttpStatus.FORBIDDEN,
+            reader().exchange("/api/v1/addresses/$addressId", HttpMethod.PATCH, disable, String::class.java).statusCode,
+        )
+        val disabled = operator().exchange("/api/v1/addresses/$addressId", HttpMethod.PATCH, disable, Map::class.java)
+        assertEquals(HttpStatus.OK, disabled.statusCode)
+        assertEquals("DISABLED", disabled.body!!["status"])
+        assertEquals(
+            HttpStatus.NOT_FOUND,
+            operator().postForEntity("/api/v1/addresses/$addressId/sync", HttpEntity<Void>(HttpHeaders()), String::class.java).statusCode,
+        )
+    }
+
+    @Test
+    fun `a path that tomcat rejects before spring gets a bare error page without the server version`() {
+        // An encoded slash is refused by Tomcat itself, so neither Spring Security nor the API's
+        // ProblemDetail handler sees the request; Tomcat's error report valve answers it.
+        val response = HttpClient.newHttpClient().send(
+            HttpRequest.newBuilder(URI.create("${restTemplate.rootUri}/api/v1/accounts/a%2Fb")).GET().build(),
+            HttpResponse.BodyHandlers.ofString(),
+        )
+
+        assertEquals(400, response.statusCode(), response.body())
+        assertTrue(response.body().contains("HTTP Status 400"), response.body())
+        assertFalse(response.body().contains("Apache Tomcat"), "the page must not name the server release: ${response.body()}")
+        assertFalse(response.body().contains("Description"), "the page must not carry the error report: ${response.body()}")
+    }
+
+    @Test
+    fun `openapi declares http basic so swagger ui offers authorize`() {
+        val apiDocs = reader().getForEntity("/v3/api-docs", String::class.java)
+        assertEquals(HttpStatus.OK, apiDocs.statusCode, "unexpected api-docs response: ${apiDocs.body}")
+
+        val document = objectMapper.readTree(apiDocs.body)
+        val scheme = document.path("components").path("securitySchemes").path("basicAuth")
+        assertEquals("http", scheme.path("type").asText(), "api-docs: ${apiDocs.body}")
+        assertEquals("basic", scheme.path("scheme").asText(), "api-docs: ${apiDocs.body}")
+        assertTrue(
+            document.path("security").any { it.has("basicAuth") },
+            "HTTP Basic must be the global requirement: ${document.path("security")}",
+        )
     }
 
     private fun operator() = restTemplate.withBasicAuth("e2e-operator", "operator-pw")
@@ -178,20 +287,47 @@ class RealBootE2ETests(
         )
 
     companion object {
+        private const val RESUME_ADDRESS = "0xe2e-resume"
+
+        /** Query strings the resume stub received, in order. */
+        private val resumeQueries = CopyOnWriteArrayList<String>()
+
         private val providerStub: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             createContext("/") { exchange ->
-                val body = """
-                    {"events":[{"txHash":"0xe2e-tx","eventIndex":0,"address":"0xe2eaddr","asset":"USDC",
-                    "amount":1.000000000000000000,"blockHeight":1000,"confirmations":6,
-                    "direction":"INBOUND","status":"CONFIRMED"}],
-                    "nextCursor":"e2e-final","hasMore":false,"latestBlockHeight":1000,"safeBlockHeight":1000}
-                """.trimIndent().replace("\n", "")
+                val body = if (exchange.requestURI.path.contains("/addresses/$RESUME_ADDRESS/")) {
+                    resumeQueries += exchange.requestURI.rawQuery
+                    resumeBridgePage(exchange.requestURI.rawQuery)
+                } else {
+                    """
+                        {"events":[{"txHash":"0xe2e-tx","eventIndex":0,"address":"0xe2eaddr","asset":"USDC",
+                        "amount":1.000000000000000000,"blockHeight":1000,"confirmations":6,
+                        "direction":"INBOUND","status":"CONFIRMED"}],
+                        "nextCursor":"e2e-final","hasMore":false,"latestBlockHeight":1000,"safeBlockHeight":1000}
+                    """.trimIndent().replace("\n", "")
+                }
                 val bytes = body.toByteArray(StandardCharsets.UTF_8)
                 exchange.responseHeaders.add("Content-Type", "application/json")
                 exchange.sendResponseHeaders(200, bytes.size.toLong())
                 exchange.responseBody.use { it.write(bytes) }
             }
             start()
+        }
+
+        /**
+         * A bridge that never returns a cursor: it serves the address's two events at or after
+         * `(fromBlockHeight, fromEventIndex)`, or from the start of its history without them.
+         */
+        private fun resumeBridgePage(query: String?): String {
+            val params = query.orEmpty().split("&").filter { it.contains("=") }.associate { it.substringBefore("=") to it.substringAfter("=") }
+            val fromBlock = params["fromBlockHeight"]?.toLong() ?: Long.MIN_VALUE
+            val fromIndex = params["fromEventIndex"]?.toInt() ?: 0
+            val events = listOf(100L to "0xe2e-resume-1", 101L to "0xe2e-resume-2")
+                .filter { (block, _) -> block > fromBlock || (block == fromBlock && 0 >= fromIndex) }
+                .joinToString(",") { (block, txHash) ->
+                    """{"txHash":"$txHash","eventIndex":0,"address":"$RESUME_ADDRESS","asset":"USDC","amount":1,""" +
+                        """"blockHeight":$block,"confirmations":6,"direction":"INBOUND","status":"CONFIRMED"}"""
+                }
+            return """{"events":[$events],"hasMore":false,"latestBlockHeight":101,"safeBlockHeight":101}"""
         }
 
         @JvmStatic
