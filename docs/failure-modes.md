@@ -135,6 +135,7 @@ Expected behavior:
 - No long-lived database locks are held while waiting for provider response.
 - Under the Alchemy provider, a repeated `pageKey`, a restarted continuation page, a row outside the requested block window, a safe frontier above the latest block, and an exhausted per-fetch RPC or time budget before the first block was drained are all retryable: the cursor stays on its block boundary and the next attempt rescans from it. A budget exhausted after at least one drained block returns that prefix instead.
 - The local token bucket waits for a token only within the fetch deadline; a wait that cannot be met is a retryable outage rather than a provider 429.
+- An Alchemy that is unavailable when the service starts is the same case: the startup probe leaves the provider in the `probe-failed` state instead of stopping the process, and sync runs against it retry as above.
 - These availability failures, and for Alchemy rejected credentials or configuration, turn the provider health indicator `DOWN` until the next successful fetch. A data error for one address (a `4xx`, malformed JSON, an oversized body, an unmappable Alchemy row) keeps the indicator's state and appears as its `lastDataError` detail.
 
 Operational signal:
@@ -325,17 +326,18 @@ Operational signal:
 
 Scenario:
 
-- The configured provider rejects the credentials (HTTP 401/403 or a JSON-RPC `-32600` envelope), an enabled chain has no provider network mapping, active watched addresses lack an enabled asset config, `start-mode=configured-block` has no start block for the chain, one block holds more events for the watched address than `asset-sync.sync.pagination.page-size`, which the page contract cannot split, or the chain of a synced event was disabled after its addresses were registered.
+- The configured provider rejects the credentials (HTTP 401/403 or a JSON-RPC `-32600` envelope), an enabled chain with active watched addresses has no provider network mapping, active watched addresses lack an enabled asset config, `start-mode=configured-block` has no start block for the chain, one block holds more events for the watched address than `asset-sync.sync.pagination.page-size`, which the page contract cannot split, or the chain of a synced event was disabled after its addresses were registered.
 
 Expected behavior:
 
-- At startup with `asset-sync.provider.type=alchemy`, the preflight fails the process before the sync worker starts: static validation (key, auth mode, templates, numeric caps, `max-rpc-calls-per-fetch >= 4`), the registry rules, and one `eth_blockNumber` probe per required network. The failure is a `ProviderConfigurationException` whose message names the chains or `(chain_id, asset)` pairs and the operator action, never the key or the endpoint.
+- At startup with `asset-sync.provider.type=alchemy`, the preflight fails the process before the sync worker starts: static validation (key, auth mode, templates, numeric caps, `max-rpc-calls-per-fetch >= 4`), the registry rules, and one `eth_blockNumber` probe per required network that Alchemy rejects (HTTP 401/403, JSON-RPC `-32600`, or an answer that is not a block number). The failure is a `ProviderConfigurationException` whose message names the chains or `(chain_id, asset)` pairs and the operator action, never the key or the endpoint.
+- A probe that meets an outage (`5xx`, `429`, a timeout, a transport error) does not fail startup: the provider starts in the `probe-failed` state with health `DOWN` and the scrubbed error, and the first successful fetch clears it (section 7). An enabled chain without a mapping and without active watched addresses, such as the seeded `local-evm` on a fresh database, is only logged; a sync of an address registered there later fails terminally.
 - During a sync run, `ProviderConfigurationException` is terminal: the run is marked `FAILED` at once, `failure_attempts` is not spent on retries that cannot succeed, and the checkpoint does not move.
 - `sync_runs.last_error`, log lines, health details, and exception messages are scrubbed of the API key; transport failures that embed a request URL are rethrown with a bounded scrubbed message and without their cause.
 
 Operational signal:
 
-- Startup log `alchemy_preflight_succeeded` with the probed networks, or the startup failure with the scrubbed message.
+- Startup log `alchemy_preflight_succeeded` with the probed and the unavailable networks, or the startup failure with the scrubbed message; `alchemy_preflight_probe_unavailable` per unavailable network and `alchemy_preflight_unmapped_chains_skipped` for unmapped chains without active addresses.
 - Log `alchemy_rpc_failed` and `alchemy_provider_page_fetch_failed` with the scrubbed error.
 - Health component `alchemyChainProvider` with `provider`, `authMode`, `networks`, `state`, and the scrubbed `error`.
 

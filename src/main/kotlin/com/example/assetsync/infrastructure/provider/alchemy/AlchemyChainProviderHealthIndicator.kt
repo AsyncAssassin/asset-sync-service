@@ -5,11 +5,11 @@ import org.springframework.boot.actuate.health.HealthIndicator
 
 /**
  * Mirrors the HTTP provider indicator for the Alchemy provider: UP after a successful startup
- * probe, DOWN after a fetch failed on availability or configuration (5xx, 429, a timeout, a
- * rejected key), with the scrubbed error. Invalid data for one address keeps the state and is
- * shown as `lastDataError`. Details name the provider, the auth mode, the probed networks, and the
- * state; never an endpoint, a header, or the API key. Like the HTTP indicator it stays out of the
- * readiness group so a provider outage does not flap probes.
+ * probe, DOWN after a startup probe or a fetch failed on availability or configuration (5xx, 429,
+ * a timeout, a rejected key), with the scrubbed error. Invalid data for one address keeps the
+ * state and is shown as `lastDataError`. Details name the provider, the auth mode, the probed
+ * networks, and the state; never an endpoint, a header, or the API key. Like the HTTP indicator
+ * it stays out of the readiness group so a provider outage does not flap probes.
  */
 class AlchemyChainProviderHealthIndicator(
     private val provider: AlchemyChainProvider,
@@ -17,7 +17,8 @@ class AlchemyChainProviderHealthIndicator(
 
     override fun health(): Health {
         val state = provider.state()
-        val builder = if (state == AlchemyProviderState.FETCH_FAILED) Health.down() else Health.up()
+        val down = state == AlchemyProviderState.FETCH_FAILED || state == AlchemyProviderState.PROBE_FAILED
+        val builder = if (down) Health.down() else Health.up()
         builder
             .withDetail("provider", "alchemy")
             .withDetail("authMode", provider.authMode.name.lowercase())

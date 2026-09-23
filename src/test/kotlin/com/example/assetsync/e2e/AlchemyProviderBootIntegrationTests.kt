@@ -13,6 +13,7 @@ import com.example.assetsync.infrastructure.provider.HttpChainProviderHealthIndi
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProvider
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProviderHealthIndicator
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyJsonRpcClient
+import com.example.assetsync.infrastructure.provider.alchemy.AlchemyProviderState
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -23,11 +24,13 @@ import kotlin.test.assertTrue
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.actuate.health.Status
 import org.springframework.boot.builder.SpringApplicationBuilder
 import org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.web.client.TestRestTemplate
 import org.springframework.context.ApplicationContext
+import org.springframework.context.ConfigurableApplicationContext
 import org.springframework.http.HttpStatus
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.test.context.ActiveProfiles
@@ -43,11 +46,13 @@ private const val ALCHEMY_BOOT_API_KEY = "boot-secret-key-123"
  * only the Alchemy beans exist, the startup preflight probes `eth-sepolia` with a bearer token
  * against an in-test JSON-RPC stub, and health names the provider without leaking the key. The
  * negative cases boot separate contexts and prove the fail-fast rules: a missing key, a rejected
- * key, an enabled chain without a network mapping, and legacy watched addresses each stop the
- * process with a scrubbed `ProviderConfigurationException`.
+ * key, an enabled chain with active watched addresses but no network mapping, and legacy watched
+ * addresses each stop the process with a scrubbed `ProviderConfigurationException`, while an
+ * Alchemy that is only unavailable at startup does not.
  *
- * The database is migrated before the first boot and the seeded `local-evm` chain is disabled,
- * exactly the operator step the README documents for an Alchemy rollout.
+ * The database is migrated before the first boot and otherwise left as fresh: the seeded
+ * `local-evm` chain stays enabled without a network mapping, which only warns while it has no
+ * active watched addresses.
  */
 @ActiveProfiles("prod")
 @AutoConfigureObservability
@@ -74,6 +79,11 @@ class AlchemyProviderBootIntegrationTests(
     fun `alchemy type boots without a base url, probes sepolia with a bearer token, and wires only alchemy beans`() {
         assertEquals(ProviderType.ALCHEMY, providerProperties.type)
         assertEquals("", providerProperties.baseUrl, "the HTTP bridge base-url must stay unset")
+        assertEquals(
+            true,
+            jdbcTemplate.queryForObject("SELECT enabled FROM chain_configs WHERE chain_id = 'local-evm'", Boolean::class.java),
+            "a fresh database boots with the unmapped local-evm chain still enabled",
+        )
         assertNull(alchemyProperties.networkFor("eth-sepolia")?.startBlock, "an empty env placeholder binds start-block to null")
 
         // Exactly one port, the Alchemy one; no HTTP bridge bean of any kind.
@@ -136,26 +146,53 @@ class AlchemyProviderBootIntegrationTests(
     }
 
     @Test
-    fun `an enabled chain without a network mapping fails startup`() {
-        jdbcTemplate.update("UPDATE chain_configs SET enabled = true WHERE chain_id = 'local-evm'")
+    fun `an enabled chain with active watched addresses but no network mapping fails startup`() {
+        val accountId = insertAccount()
+        jdbcTemplate.update(
+            """
+            INSERT INTO watched_addresses (id, account_id, chain_id, address, asset, label, status, created_at, updated_at)
+            VALUES (?, ?, 'local-evm', '0xalchemy-boot-local', 'USDC', NULL, 'ACTIVE', now(), now())
+            """.trimIndent(),
+            UUID.randomUUID(),
+            accountId,
+        )
         try {
             val failure = bootFailure()
 
-            assertTrue(failure.message!!.contains("no Alchemy network mapping: [local-evm]"), failure.message)
+            assertTrue(failure.message!!.contains("with active watched addresses but no Alchemy network mapping: [local-evm]"), failure.message)
             assertTrue(failure.message!!.contains("disable them in chain_configs"), failure.message)
         } finally {
-            jdbcTemplate.update("UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm'")
+            jdbcTemplate.update("DELETE FROM watched_addresses WHERE account_id = ?", accountId)
+            jdbcTemplate.update("DELETE FROM accounts WHERE id = ?", accountId)
+        }
+    }
+
+    @Test
+    fun `an alchemy unavailable at startup does not stop the service and reports probe-failed`() {
+        stub.responseStatus = 503
+        try {
+            bootContext().use { booted ->
+                val provider = booted.getBean(AlchemyChainProvider::class.java)
+                assertEquals(AlchemyProviderState.PROBE_FAILED, provider.state())
+
+                val health = booted.getBean(AlchemyChainProviderHealthIndicator::class.java).health()
+                assertEquals(Status.DOWN, health.status)
+                assertEquals("probe-failed", health.details["state"])
+                assertEquals(emptyList<String>(), health.details["networks"])
+                assertEquals(
+                    "Alchemy startup probe failed for network eth-sepolia: Alchemy returned HTTP 503 for network eth-sepolia.",
+                    health.details["error"],
+                )
+                assertFalse(health.details.toString().contains(ALCHEMY_BOOT_API_KEY), health.details.toString())
+            }
+        } finally {
+            stub.responseStatus = 200
         }
     }
 
     @Test
     fun `active watched addresses without an enabled asset config fail startup`() {
-        val accountId = UUID.randomUUID()
-        jdbcTemplate.update(
-            "INSERT INTO accounts (id, external_ref, status, created_at, updated_at) VALUES (?, ?, 'ACTIVE', now(), now())",
-            accountId,
-            "alchemy-boot-$accountId",
-        )
+        val accountId = insertAccount()
         jdbcTemplate.update(
             """
             INSERT INTO watched_addresses (id, account_id, chain_id, address, asset, label, status, created_at, updated_at)
@@ -175,12 +212,29 @@ class AlchemyProviderBootIntegrationTests(
         }
     }
 
+    private fun insertAccount(): UUID {
+        val accountId = UUID.randomUUID()
+        jdbcTemplate.update(
+            "INSERT INTO accounts (id, external_ref, status, created_at, updated_at) VALUES (?, ?, 'ACTIVE', now(), now())",
+            accountId,
+            "alchemy-boot-$accountId",
+        )
+        return accountId
+    }
+
+    private fun bootFailure(vararg overrides: Pair<String, String>): ProviderConfigurationException {
+        val thrown = assertFailsWith<Throwable> { bootContext(*overrides).close() }
+        val cause = generateSequence(thrown) { it.cause }.filterIsInstance<ProviderConfigurationException>().firstOrNull()
+        assertNotNull(cause, "expected a ProviderConfigurationException in the failure chain of: $thrown")
+        return cause
+    }
+
     /**
      * Boots a separate prod context with the same wiring as the cached one; command-line args
      * override every other property source. Overrides replace base entries by key, because a
      * repeated `--key=` argument would be joined into one comma-separated value instead.
      */
-    private fun bootFailure(vararg overrides: Pair<String, String>): ProviderConfigurationException {
+    private fun bootContext(vararg overrides: Pair<String, String>): ConfigurableApplicationContext {
         val properties = mapOf(
             "server.port" to "0",
             "spring.main.banner-mode" to "off",
@@ -201,15 +255,9 @@ class AlchemyProviderBootIntegrationTests(
             "asset-sync.provider.alchemy.endpoint-template" to stub.headerEndpointTemplate(),
         ) + overrides
         val arguments = properties.map { (key, value) -> "--$key=$value" }
-        val thrown = assertFailsWith<Throwable> {
-            SpringApplicationBuilder(AssetSyncServiceApplication::class.java)
-                .profiles("prod")
-                .run(*arguments.toTypedArray())
-                .close()
-        }
-        val cause = generateSequence(thrown) { it.cause }.filterIsInstance<ProviderConfigurationException>().firstOrNull()
-        assertNotNull(cause, "expected a ProviderConfigurationException in the failure chain of: $thrown")
-        return cause
+        return SpringApplicationBuilder(AssetSyncServiceApplication::class.java)
+            .profiles("prod")
+            .run(*arguments.toTypedArray())
     }
 
     companion object {

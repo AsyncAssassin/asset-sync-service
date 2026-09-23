@@ -7,7 +7,7 @@ Operating `asset-sync-service` with `asset-sync.provider.type=alchemy`: getting 
 1. Create an Alchemy account at <https://dashboard.alchemy.com> (the free tier needs no card and covers development and testnet smoke: 30M compute units per month, 500 CU/s at the time of writing).
 2. Create an app: chain **Ethereum**, network **Sepolia**. The app's API key is shown on the app page (`API key` button). Only that key is needed; the service builds `https://eth-sepolia.g.alchemy.com/v2/` itself and sends the key as `Authorization: Bearer <key>` (header auth mode, the default).
 3. Put the key into `ASSET_SYNC_PROVIDER_ALCHEMY_API_KEY` in the deployment's secret store or shell. Never write it into YAML, docs, tickets, or logs; the service redacts it from every log line, exception, health detail, checkpoint, and `sync_runs.last_error`.
-4. To rotate the key, create a new key in the dashboard, restart the service with the new value, then revoke the old key. The startup preflight probes every required network with the new key, so a bad rotation stops the process before the worker runs.
+4. To rotate the key, create a new key in the dashboard, restart the service with the new value, then revoke the old key. The startup preflight probes every required network with the new key, so a rejected key stops the process before the worker runs. An Alchemy outage during that probe does not; see section 6.
 
 Mainnet is deliberately not mapped and the seeded `eth-mainnet` chain and asset rows are disabled. Enabling it needs an `asset-sync.provider.alchemy.networks.eth-mainnet` mapping in YAML, a start-block strategy (`registration-safe` avoids a historical backfill), a compute budget review, and the CU/s ceiling of the plan in `rate-limit-capacity` / `rate-limit-refill-per-second`.
 
@@ -19,14 +19,19 @@ Mainnet is deliberately not mapped and the seeded `eth-mainnet` chain and asset 
 | `ASSET_SYNC_PROVIDER_TYPE` | `alchemy` |
 | `ASSET_SYNC_PROVIDER_ALCHEMY_API_KEY` | the key from section 1 |
 | `ASSET_SYNC_PROVIDER_ALCHEMY_AUTH_MODE` | leave `header`; `path` puts the key into request URLs and exists only for compatibility |
-| `ASSET_SYNC_PROVIDER_ALCHEMY_START_MODE` | `registration-safe` (new addresses start at the current safe block, no backfill) or `configured-block` with `ASSET_SYNC_PROVIDER_ALCHEMY_ETH_SEPOLIA_START_BLOCK` for a bounded historical backfill |
+| `ASSET_SYNC_PROVIDER_ALCHEMY_START_MODE` | `registration-safe` (a new address starts at the safe block of its first sync, no backfill) or `configured-block` with `ASSET_SYNC_PROVIDER_ALCHEMY_ETH_SEPOLIA_START_BLOCK` for a bounded historical backfill |
 | `ASSET_SYNC_PROVIDER_BASE_URL` | not needed |
 
 The other Alchemy settings keep their defaults: `safe` finality, `max-window-blocks=5000`, `max-rpc-calls-per-fetch=8`, token bucket 6 burst / 3 per second.
 
+The adapter reads every block once, which sets two limits:
+
+- Under `registration-safe` the start block is fixed by the first sync of an address, not by its registration. That sync starts just above the finality frontier of that moment and ingests nothing, so a transfer made between registration and the first sync that is already below the frontier by then is never ingested. Sync every new address right after registering it. For a demo or a backfill use `configured-block` with a start block shortly before the first transfer.
+- An event keeps the confirmations it had when its block was scanned, at least `latest - frontier + 1` (`finality-depth-fallback + 1` in `depth` mode). Keep `chain_configs.required_confirmations` of an Alchemy chain at or below that, or its events stay `SEEN`. The seeded `eth-sepolia` requires 1.
+
 ## 3. Database Preparation
 
-The seeded `local-evm` chain is enabled and has no Alchemy network, so the first `alchemy` boot on a fresh database applies the migrations and then stops with `enabled chains with enabled asset configs but no Alchemy network mapping: [local-evm]`. Run the operator step and restart:
+A fresh database needs no operator step. The seeded `local-evm` chain is enabled and has no Alchemy network, but it has no active watched addresses, so the startup preflight only logs `alchemy_preflight_unmapped_chains_skipped chains=[local-evm]`. An address registered there fails its syncs terminally, and the next start stops with `enabled chains with active watched addresses but no Alchemy network mapping: [local-evm]` until the address (`PATCH /api/v1/addresses/{addressId}` with `{"status":"DISABLED"}`) or the chain is disabled. To rule that out, disable the chain before the rollout:
 
 ```sql
 UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm';
@@ -74,8 +79,8 @@ FROM sync_cursors;
 SELECT block_height, event_index, direction, amount, status FROM observed_transactions ORDER BY block_height, event_index;
 ```
 
-- `/actuator/health` (authenticated) shows `alchemyChainProvider` with `provider`, `authMode`, `networks`, `state` (`probe-succeeded`, `fetch-succeeded`, `fetch-failed`) and the scrubbed `error`; it never shows an endpoint or the key.
-- Logs: `alchemy_preflight_succeeded` at startup, `alchemy_provider_page_fetch_succeeded` per page (mode, blocks, events, RPC calls, fallbacks), `alchemy_rpc_failed` and `alchemy_provider_page_fetch_failed` on errors, `alchemy_finality_tag_unavailable` once per network when the tag falls back to depth.
+- `/actuator/health` (authenticated) shows `alchemyChainProvider` with `provider`, `authMode`, `networks`, `state` (`probe-succeeded`, `probe-failed`, `fetch-succeeded`, `fetch-failed`) and the scrubbed `error`; it never shows an endpoint or the key.
+- Logs: `alchemy_preflight_succeeded` at startup, with `alchemy_preflight_probe_unavailable` for a network that was unavailable and `alchemy_preflight_unmapped_chains_skipped` for unmapped chains without active addresses, `alchemy_provider_page_fetch_succeeded` per page (mode, blocks, events, RPC calls, fallbacks), `alchemy_rpc_failed` and `alchemy_provider_page_fetch_failed` on errors, `alchemy_finality_tag_unavailable` once per network when the tag falls back to depth.
 - Cost: an idle address costs about 30 CU for the two head calls plus two transfer calls (120 CU each) per 5000-block window; dense stretches cost the narrowing attempts (`scan.narrowings` in the checkpoint) plus one extra call per block that still had to be drained alone (`scan.oneBlockFallbacks`).
 - Meters on `/actuator/prometheus`: `asset.sync.provider.alchemy.rpc` and `asset.sync.provider.alchemy.rpc.duration` per network, method, and result, `asset.sync.provider.alchemy.block.fallbacks`, `asset.sync.provider.alchemy.narrowings`, and `asset.sync.provider.alchemy.skipped.rows` per reason; a rising `UNAVAILABLE` or `CONFIGURATION` result count is the earliest signal of provider trouble.
 
@@ -85,7 +90,9 @@ SELECT block_height, event_index, direction, amount, status FROM observed_transa
 | --- | --- | --- |
 | Startup: `api-key must be set` | no key in the environment | set `ASSET_SYNC_PROVIDER_ALCHEMY_API_KEY` |
 | Startup: `startup probe failed ... HTTP 401` or `403` | rejected key, inactive app, or allowlist | check the app in the dashboard; rotate the key |
-| Startup: `no Alchemy network mapping: [...]` | an enabled chain with enabled assets is not mapped | disable the chain (section 3) or add the mapping in YAML |
+| Startup: `no Alchemy network mapping: [...]` | an enabled chain with active watched addresses is not mapped | disable the addresses or the chain (section 3), or add the mapping in YAML |
+| Health `DOWN` with `state` `probe-failed`, log `alchemy_preflight_probe_unavailable` | Alchemy was unavailable at startup (`5xx`, `429`, a timeout, a transport error); the service runs, sync runs retry with backoff | nothing while it recovers: the first successful fetch clears the state; if it persists, check the network path and Alchemy's status page |
+| Events stay `SEEN` | `required_confirmations` is above the frontier depth, and blocks are not re-read | lower the threshold (section 2); rows already stored stay `SEEN` until they are reported `CONFIRMED` through `POST /api/v1/observed-events` |
 | Startup: `active watched addresses without an enabled asset config` | legacy rows | seed or enable the asset configs, or deactivate the addresses |
 | Run `FAILED`, `last_error` `HTTP 401/403` or `JSON-RPC error -32600` | credentials rejected at fetch time (terminal, no retries spent) | fix the key and re-enqueue the sync |
 | Run `FAILED`, `Alchemy block N has M ERC20 events ... exceeding request.limit` | one block holds more events than the page size (terminal) | raise `ASSET_SYNC_PAGINATION_PAGE_SIZE` above M and re-enqueue; never clear the cursor to skip the block |

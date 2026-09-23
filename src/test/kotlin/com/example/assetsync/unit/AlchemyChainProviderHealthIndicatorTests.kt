@@ -28,8 +28,9 @@ import org.springframework.web.client.RestClient
 
 /**
  * Locks what the Alchemy provider exposes through health: UP after the startup probe with the
- * provider, auth mode, networks, and state; UP again with `fetch-succeeded` after a page; DOWN with
- * the scrubbed error after a failed fetch; and never the API key anywhere in the details.
+ * provider, auth mode, networks, and state; DOWN with `probe-failed` when Alchemy was unavailable
+ * at startup; UP again with `fetch-succeeded` after a page; DOWN with the scrubbed error after a
+ * failed fetch; and never the API key anywhere in the details.
  */
 class AlchemyChainProviderHealthIndicatorTests {
 
@@ -124,12 +125,35 @@ class AlchemyChainProviderHealthIndicatorTests {
         assertEquals(emptyList<String>(), health.details["networks"])
     }
 
-    private fun provider(probedNetworks: Map<String, Long>): AlchemyChainProvider =
+    @Test
+    fun `an alchemy unavailable at startup is down until the first successful fetch`() {
+        val probeError = "Alchemy startup probe failed for network eth-sepolia: Alchemy returned HTTP 503 for network eth-sepolia."
+        val provider = provider(probedNetworks = emptyMap(), unavailableNetworks = mapOf("eth-sepolia" to probeError))
+        val indicator = AlchemyChainProviderHealthIndicator(provider)
+
+        val down = indicator.health()
+        assertEquals(Status.DOWN, down.status)
+        assertEquals("probe-failed", down.details["state"])
+        assertEquals(probeError, down.details["error"])
+        assertEquals(emptyList<String>(), down.details["networks"])
+
+        provider.fetchObservedEventsPage(pageRequest("eth-sepolia"))
+        val up = indicator.health()
+        assertEquals(Status.UP, up.status, "the first successful fetch recovers")
+        assertEquals("fetch-succeeded", up.details["state"])
+        assertNull(up.details["error"])
+    }
+
+    private fun provider(
+        probedNetworks: Map<String, Long>,
+        unavailableNetworks: Map<String, String> = emptyMap(),
+    ): AlchemyChainProvider =
         AlchemyChainProvider(
             properties = properties,
             preflight = AlchemyPreflightReport(
-                requiredChains = probedNetworks.keys.map { AlchemyRequiredChain(it, setOf("ERC20")) },
+                requiredChains = (probedNetworks.keys + unavailableNetworks.keys).map { AlchemyRequiredChain(it, setOf("ERC20")) },
                 probedBlockHeights = probedNetworks,
+                unavailableNetworks = unavailableNetworks,
             ),
             client = AlchemyJsonRpcClient(restClient = RestClient.builder().build(), properties = properties),
             assetConfigRepository = object : AssetConfigRepository {

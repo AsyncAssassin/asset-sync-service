@@ -11,6 +11,7 @@ All notable changes to this project are documented in this file. The format is b
 - `PATCH /api/v1/addresses/{addressId}` for `OPERATOR` sets a watched address `ACTIVE` or `DISABLED`. A disabled address is skipped by account sync, refused by address sync and event ingestion, and resumes from its stored cursor once enabled again.
 - HTTP bridge requests carry the address's durable checkpoint as `fromBlockHeight` and `fromEventIndex`, and the bridge page contract is documented in `docs/architecture.md`.
 - Observed transactions record the source of their last lifecycle change in the new `source` column (changeset 016), and outbox payloads and their published log lines carry the source of each event: `rest:<user>` for `POST /api/v1/observed-events`, `provider:<http|alchemy|fake>` for a sync.
+- `README.md` and `docs/alchemy-runbook.md` describe two limits of reading every Alchemy block once: `registration-safe` fixes the start block at an address's first sync, not at its registration, so a new address should be synced right away; and a `required_confirmations` above the depth of the finality frontier leaves events `SEEN`.
 
 ### Changed
 
@@ -20,6 +21,8 @@ All notable changes to this project are documented in this file. The format is b
 - Provider health turns `DOWN` only on availability failures. Invalid data for one address, such as a `4xx` answer, malformed JSON, or an unmappable Alchemy row, keeps the state and appears as `lastDataError`, so one bad address no longer turns `/actuator/health` into `503`.
 - The recovery job runs every minute and first a minute after startup instead of every five minutes, so a run left `RUNNING` by a crashed worker is requeued about a minute after its lease expires.
 - A sync run whose event fails ingestion deterministically fails at once instead of spending its retries: an event that breaks a domain invariant or an ingest rule is provider data invalid, and events of a chain disabled after registration are a provider configuration failure.
+- With `asset-sync.provider.type=alchemy`, an Alchemy that is unavailable at startup (`5xx`, `429`, a timeout, a transport error) no longer stops the service. It starts with the `alchemyChainProvider` health component `DOWN` in the new `probe-failed` state, sync runs retry with backoff, and the first successful fetch clears the state; the REST API and outbox publishing keep working. A rejected key (`401`, `403`, JSON-RPC `-32600`) still stops startup.
+- The Alchemy startup preflight requires a network mapping only for enabled chains with active watched addresses and logs other unmapped chains as `alchemy_preflight_unmapped_chains_skipped`, so a fresh database boots without disabling the seeded `local-evm` chain first.
 
 ### Fixed
 

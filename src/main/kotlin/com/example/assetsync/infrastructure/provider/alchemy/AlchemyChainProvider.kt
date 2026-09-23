@@ -69,11 +69,15 @@ class AlchemyChainProvider(
         get() = properties.authMode
 
     @Volatile
-    private var state: AlchemyProviderState =
-        if (networks.isEmpty()) AlchemyProviderState.NO_REQUIRED_NETWORKS else AlchemyProviderState.PROBE_SUCCEEDED
+    private var state: AlchemyProviderState = when {
+        // Alchemy was unavailable at startup; the first successful fetch clears it.
+        preflight.unavailableNetworks.isNotEmpty() -> AlchemyProviderState.PROBE_FAILED
+        networks.isEmpty() -> AlchemyProviderState.NO_REQUIRED_NETWORKS
+        else -> AlchemyProviderState.PROBE_SUCCEEDED
+    }
 
     @Volatile
-    private var lastError: String? = null
+    private var lastError: String? = preflight.unavailableNetworks.values.takeIf { it.isNotEmpty() }?.joinToString("; ")
 
     @Volatile
     private var lastDataError: String? = null
@@ -605,6 +609,7 @@ class AlchemyChainProvider(
 
 enum class AlchemyProviderState {
     PROBE_SUCCEEDED,
+    PROBE_FAILED,
     NO_REQUIRED_NETWORKS,
     FETCH_SUCCEEDED,
     FETCH_FAILED,
