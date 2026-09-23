@@ -13,6 +13,7 @@ All notable changes to this project are documented in this file. The format is b
 - A request that PostgreSQL cannot serve gets `503 database-unavailable`, as documented. Most endpoints answered `500 internal-error` in `local`, because a transaction that cannot get a connection fails with a `TransactionException`, not a `DataAccessException`. In `demo` and `prod` a request with valid credentials got `401` with a Basic challenge, because the user store behind HTTP Basic could not be read; it now gets the same `503` without a challenge, while a request without credentials keeps its `401`. An SQL error Spring cannot classify, such as a write to a read-only database, gets the `503` too instead of `500`, and a sync run that meets such a failure records `Database error (<class>).` instead of `Unexpected error (<class>).`.
 - A query to a PostgreSQL that stops answering without closing the connection, such as a paused container or a network partition, ends after the 40-second JDBC socket timeout instead of holding the request thread and its connection indefinitely. A new connection gives up on the TCP connect after 5 seconds. A `COMMIT` that waits longer, behind a stalled synchronous standby or disk, is cut off too and may still commit; `docs/failure-modes.md` describes what that means for a retry.
 - The immutable-conflict `ProblemDetail` examples in `docs/api.md` and `docs/architecture.md` show the fields the service writes, in its order, and `docs/architecture.md` lists the `404` for an unsupported asset and the `409` for a duplicate account; `docs/failure-modes.md` names the metrics and log lines that exist instead of promising them.
+- An `amount`, `direction`, or `status` made only of Unicode spaces such as U+00A0 gets `400 validation-failed` naming the field. It passed validation and got `400 invalid-request` without the errors list.
 
 ### Security
 
@@ -23,10 +24,7 @@ All notable changes to this project are documented in this file. The format is b
 - The application's JSON reader accepts strings of at most 100 000 characters instead of Jackson's 20 million, in request bodies and HTTP bridge pages alike. A longer string in a request field fails the request with `400 invalid-request`, and in a page field the page. Every such field already had a lower limit, so no valid request or page is refused.
 - Request and bridge page DTOs skip unknown fields as they read them. Jackson kept them in memory until the known fields were complete, at many times their size: a 20 MB body of small unknown values ran a 256 MiB heap out of memory.
 - A request body in YAML gets `415`. Spring MVC read it, because springdoc brings the YAML data format, with none of the JSON limits, although the API speaks JSON only.
-
-### Fixed
-
-- An `amount`, `direction`, or `status` made only of Unicode spaces such as U+00A0 gets `400 validation-failed` naming the field. It passed validation and got `400 invalid-request` without the errors list.
+- A failure to reach the HTTP bridge no longer quotes the bridge URL. The I/O error text contains the request URL with the userinfo and the path of `base-url`, the only places the bridge credentials can live, and it reached the health details, the WARN log, and the `lastError` of sync runs that the `READ` role sees. The message now names the kind of failure, such as `Provider transport failure: connection refused (ConnectException).`, and the cause chain goes to the DEBUG log with every URL cut out.
 
 ## [0.4.0] - 2026-09-23
 

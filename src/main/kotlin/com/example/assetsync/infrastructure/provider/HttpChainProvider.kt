@@ -17,9 +17,15 @@ import com.fasterxml.jackson.core.JsonProcessingException
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ObjectNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import java.io.IOException
 import java.io.InputStream
 import java.math.BigDecimal
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.net.http.HttpTimeoutException
 import java.time.Instant
+import javax.net.ssl.SSLException
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.context.annotation.Profile
@@ -120,8 +126,16 @@ class HttpChainProvider @Autowired constructor(
             recordFailure(request = request, exception = exception)
             throw exception
         } catch (exception: RuntimeException) {
-            recordFailure(request = request, exception = exception)
-            throw ChainProviderUnavailableException(exception.message ?: "Provider request failed.", exception)
+            val failure = ChainProviderUnavailableException(transportFailureMessage(exception))
+            logger.debug(
+                "http_provider_transport_failure chainId={} address={} asset={} causes={}",
+                request.chainId,
+                request.address,
+                request.asset,
+                exception.causeChainWithoutUrls(),
+            )
+            recordFailure(request = request, exception = failure)
+            throw failure
         }
 
     fun lastFetchHealthy(): Boolean? = lastFetchHealthy
@@ -172,6 +186,27 @@ class HttpChainProvider @Autowired constructor(
 
     private fun parseRetryAfter(value: String?): Instant? = ProviderHttpSupport.parseRetryAfter(value)
 
+    /**
+     * A fixed description of a failure that happened before the bridge answered with a status,
+     * named by the first known kind in its cause chain. The exception's own text is never used:
+     * Spring's `ResourceAccessException` quotes the request URL, whose userinfo or path may carry
+     * the bridge credentials, and this text reaches the health details, the WARN log, and the
+     * `lastError` of sync runs that `READ` callers see. The cause is not attached for the same reason.
+     */
+    private fun transportFailureMessage(exception: RuntimeException): String {
+        val causes = exception.causeChain()
+        TRANSPORT_FAILURE_KINDS.forEach { (type, kind) ->
+            causes.firstOrNull(type::isInstance)?.let { return "Provider transport failure: $kind (${it.javaClass.simpleName})." }
+        }
+        return "Provider request failed (${exception.javaClass.simpleName})."
+    }
+
+    private fun Throwable.causeChain(): List<Throwable> = generateSequence(this) { it.cause }.take(MAX_CAUSE_DEPTH).toList()
+
+    /** The whole cause chain for the DEBUG log, with every URL in it cut out. */
+    private fun Throwable.causeChainWithoutUrls(): String =
+        causeChain().joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message?.replace(URL_PATTERN, "<url>")}" }
+
     private fun recordFailure(request: ChainProviderEventsPageRequest, exception: RuntimeException) {
         lastFetchHealthy = false
         lastError = exception.message?.take(240)
@@ -199,6 +234,21 @@ class HttpChainProvider @Autowired constructor(
             request.asset,
             request.limit,
             lastDataError,
+        )
+    }
+
+    private companion object {
+        const val MAX_CAUSE_DEPTH = 16
+        val URL_PATTERN = Regex("[A-Za-z][A-Za-z0-9+.-]*://\\S+")
+
+        /** In priority order: a specific kind anywhere in the chain wins over a generic I/O error. */
+        val TRANSPORT_FAILURE_KINDS: List<Pair<Class<out Throwable>, String>> = listOf(
+            ConnectException::class.java to "connection refused",
+            SocketTimeoutException::class.java to "timeout",
+            HttpTimeoutException::class.java to "timeout",
+            UnknownHostException::class.java to "unknown host",
+            SSLException::class.java to "TLS failure",
+            IOException::class.java to "I/O error",
         )
     }
 }
