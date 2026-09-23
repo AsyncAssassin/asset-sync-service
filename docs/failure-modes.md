@@ -345,7 +345,7 @@ Operational signal:
 
 Deferred areas:
 
-- Real provider rate limiting and partial block-range failures.
+- Provider rate limiting shared across instances; the Alchemy token bucket is local to each process.
 - Broker-specific delivery errors.
 - CDC connector lag.
 - Balance projection rebuild failure.

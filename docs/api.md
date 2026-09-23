@@ -414,7 +414,7 @@ Response shape is the same transaction object used by the list endpoint.
 
 ## 11. Start Address Sync
 
-Enqueues a durable sync run for one watched address. The POST request validates that the address exists, creates or reuses an in-flight `sync_runs` row, and returns before provider work starts. Local/test profiles use the fake provider; non-local/test profiles use the HTTP provider from the background worker. Provider pagination and cursor checkpoints are internal; the public API exposes the durable run state only.
+Enqueues a durable sync run for one watched address. The POST request validates that the address exists, creates or reuses an in-flight `sync_runs` row, and returns before provider work starts. Local/test profiles use the fake provider; other profiles use the provider that `asset-sync.provider.type` selects, the HTTP bridge or Alchemy, from the background worker. Provider pagination and cursor checkpoints are internal; the public API exposes the durable run state only.
 
 Request:
 
@@ -597,7 +597,7 @@ Responses echo `X-Request-Id` when supplied, or generate and return one when abs
 
 Deferred API capabilities:
 
-- Real provider cursor management.
+- Endpoints to inspect or reset the per-address provider cursors, which only SQL shows today.
 - Scheduled sync management endpoints.
 - Multi-tenant authorization and account ownership.
 - Balance projection read APIs.

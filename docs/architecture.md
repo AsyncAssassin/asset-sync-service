@@ -29,7 +29,7 @@ Stack: Kotlin, Spring Boot 3.x, Spring MVC, jOOQ, PostgreSQL, Liquibase, Testcon
 
 ## 3. Project Description
 
-`asset-sync-service` is a backend service that synchronizes public account, address, and asset state from observable transaction events. It tracks public facts such as `chainId`, `address`, `asset`, `txHash`, `eventIndex`, `amount`, `blockHeight`, `confirmations`, `direction`, and `status`. The service does not store private keys, sign transactions, provide wallet functionality, or move funds. It accepts events directly through an API or obtains them from the active chain provider during sync (`FakeChainProvider` in `local`/`test`, `HttpChainProvider` in non-local/test profiles). Events are processed through an idempotent state machine and persisted in PostgreSQL. Meaningful transaction state changes create transactional outbox events in the same database transaction.
+`asset-sync-service` is a backend service that synchronizes public account, address, and asset state from observable transaction events. It tracks public facts such as `chainId`, `address`, `asset`, `txHash`, `eventIndex`, `amount`, `blockHeight`, `confirmations`, `direction`, and `status`. The service does not store private keys, sign transactions, provide wallet functionality, or move funds. It accepts events directly through an API or obtains them from the active chain provider during sync (`FakeChainProvider` in `local`/`test`; elsewhere `HttpChainProvider` or `AlchemyChainProvider`, as `asset-sync.provider.type` selects). Events are processed through an idempotent state machine and persisted in PostgreSQL. Meaningful transaction state changes create transactional outbox events in the same database transaction.
 
 ## 4. Main Use Cases
 
@@ -50,13 +50,14 @@ Stack: Kotlin, Spring Boot 3.x, Spring MVC, jOOQ, PostgreSQL, Liquibase, Testcon
 The service is a blocking Spring MVC application. The main database is PostgreSQL. Schema evolution is managed by Liquibase. Persistence access uses jOOQ.
 
 ```text
-REST API / Scheduler
+REST API / Sync Worker / Sync Recovery
         |
         v
 Application Services
         |
         +--> ChainProviderPort -> Fake Chain Provider (local/test)
-        |                  \-> HTTP Chain Provider (non-local/test)
+        |                  \-> HTTP Bridge Provider (asset-sync.provider.type=http)
+        |                  \-> Alchemy JSON-RPC Provider (asset-sync.provider.type=alchemy)
         |
         +--> Domain State Machine
         |
@@ -95,6 +96,7 @@ Infrastructure layer:
 - Implements the chain providers: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere, selected by `asset-sync.provider.type`; every HTTP-only bean shares one composed condition and every Alchemy-only bean another, so the two never mix.
 - Runs the Alchemy startup preflight when `type=alchemy`: static validation of `asset-sync.provider.alchemy.*`, registry rules (a network mapping for every enabled chain with enabled asset configs and active watched addresses, `ERC20` only, no active watched address without an enabled asset config), and one `eth_blockNumber` auth probe per required network, all during bean creation and therefore before the sync worker starts. A rule violation or a rejected probe fails the context; a probe that meets an outage starts the provider in the `probe-failed` state instead.
 - Implements the outbox publisher adapter.
+- Runs the scheduled jobs: `SyncRunWorkerJob` claims queued sync runs and executes them; `SyncRunRecoveryJob` fails stale legacy runs, requeues `RUNNING` runs whose lease expired, and clears expired cursor leases; `OutboxPublisherJob` publishes due outbox rows; `OutboxRetentionJob` deletes old published rows.
 - Configures Liquibase, OpenAPI, metrics, logging, and health checks.
 
 ### Why jOOQ Instead of Spring Data JPA
@@ -209,7 +211,7 @@ The Alchemy adapter serves one watched address and one ERC-20 registry asset per
 2. `eth_blockNumber`, then the finality frontier: `eth_getBlockByNumber("safe"|"finalized", false)` or latest minus `finality-depth-fallback` (`depth` mode, or fallback when the tag is unavailable, flagged in the checkpoint).
 3. Start block: the cursor, else the frontier plus one under `registration-safe` (no backfill; the first sync, not the registration, fixes the start, so that sync is idle) or the configured per-chain block under `configured-block`; a stored event high-water at or above the start moves it to the next block and is flagged as `highWaterAdjusted`. A start above the frontier returns an idle page with the same cursor and fresh heights.
 4. Scan at most `max-window-blocks` up to the frontier: one `alchemy_getAssetTransfers` call per direction (`toAddress` for `INBOUND`, `fromAddress` for `OUTBOUND`, `category=["erc20"]`, the registry contract, `order=asc`, `maxCount=1000`). A range answered without `pageKey` is complete for every block in it. A paged range is not trusted across pages, but its first page still shows the last block it reached, and ascending order means every block before that boundary was covered in full: the scan narrows the range to those blocks and re-queries them as a complete range while the RPC budget leaves room for it, then drains the boundary block alone with `fromBlock == toBlock`, following `pageKey` in memory with loop, restart, and window checks, and continues with the rest of the window.
-5. Merge both streams by `uniqueId`, skip self-transfers and rows of another contract (counted in the checkpoint), map `uniqueId` `:log:{n}` to `eventIndex`, `rawContract.value` and registry decimals to `amount`, `latest - blockHeight + 1` to `confirmations`, emit `SEEN` and let the confirmation policy promote it, and sort by `(blockHeight, eventIndex, txHash)`. A block is never read again, so these confirmations are final: a chain's `required_confirmations` above `latest - frontier + 1` would leave its events `SEEN`.
+5. Merge both streams by `uniqueId`, skip self-transfers, which move no funds and are deliberately not recorded, and rows of another contract (both counted in the checkpoint), map `uniqueId` `:log:{n}` to `eventIndex`, `rawContract.value` and registry decimals to `amount`, `latest - blockHeight + 1` to `confirmations`, emit `SEEN` and let the confirmation policy promote it, and sort by `(blockHeight, eventIndex, txHash)`. A block is never read again, so these confirmations are final: a chain's `required_confirmations` above `latest - frontier + 1` would leave its events `SEEN`.
 6. Emit whole blocks only, up to `request.limit`; the first block that does not fit becomes `nextBlock`, and one block with more events than the limit is a terminal `ProviderConfigurationException` because the page contract cannot split a block.
 
 Durable progress moves only past fully drained blocks: `nextCursor` is always a block boundary, `hasMore` is `nextBlock <= safe`, and a block that cannot be finished within `max-rpc-calls-per-fetch` and the provider timeout is left for the next fetch, or reported as a retryable `ChainProviderUnavailableException` when nothing was finished. `pageKey` never reaches `provider_cursor` or `checkpoint`. The checkpoint metadata stays under 1 KiB: provider, chain, network, asset, contract, scan mode and counters, `nextBlock`, latest and safe heights, finality mode and fallback flag, `initialStartBlock`, and skip counters.
@@ -1277,8 +1279,7 @@ asset-sync-service
 - Balance projection as an eventually consistent read model.
 - Kafka or SQS outbox publisher.
 - Debezium CDC-based outbox publishing.
-- Real blockchain/indexer backend integration beyond the generic HTTP page contract.
-- Provider-specific block range scans.
+- Provider coverage beyond Alchemy ERC-20 transfers and the generic HTTP page contract.
 - Multi-instance sync coordination with advisory locks or a scheduler lock.
 - Multi-tenant authorization and account ownership.
 - Audit event history.

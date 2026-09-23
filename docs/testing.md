@@ -196,7 +196,7 @@ Do not add a markdown or test tool only for the Specs phase.
 
 Deferred test areas:
 
-- Provider-specific block-range scan contracts beyond the generic page/cursor contract.
+- Scan contract tests for providers beyond the Alchemy ERC-20 adapter and the generic HTTP page contract.
 - Broker publisher tests for Kafka, SQS, or CDC.
 - Balance projection rebuild tests.
 - Multi-tenant authorization tests.

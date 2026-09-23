@@ -13,6 +13,7 @@ All notable changes to this project are documented in this file. The format is b
 - Observed transactions record the source of their last lifecycle change in the new `source` column (changeset 016), and outbox payloads and their published log lines carry the source of each event: `rest:<user>` for `POST /api/v1/observed-events`, `provider:<http|alchemy|fake>` for a sync.
 - CI scans the Docker image with Trivy and fails on HIGH and CRITICAL vulnerabilities that have a fix, in OS packages and in the libraries inside the jar; a finding that does not apply goes to `.trivyignore` with its reason. Trivy runs from its image pinned by digest.
 - Dependabot proposes Docker base image updates.
+- The README lists the known limitations: `REVERTED` is final, the roles are global, the outbox publishes to the log only, and the Alchemy adapter does not record self-transfers.
 - `README.md` and `docs/alchemy-runbook.md` describe two limits of reading every Alchemy block once: `registration-safe` fixes the start block at an address's first sync, not at its registration, so a new address should be synced right away; and a `required_confirmations` above the depth of the finality frontier leaves events `SEEN`.
 
 ### Changed
@@ -35,6 +36,7 @@ All notable changes to this project are documented in this file. The format is b
 - Two transactions whose hash or address contains `:` could share an outbox idempotency key, and the lifecycle event of the second one was dropped.
 - An account sync that did not fit one claim never completed: each claim had to visit every address again, so an account with more addresses than the per-claim budget allows ran until the continuation limit failed it. The pass now keeps its keyset in the run checkpoint and completes over several claims.
 - A final HTTP bridge page without a cursor cleared the stored cursor, so the next sync fetched the bridge's history from the start and failed on the first event behind the checkpoint. The next request now carries the checkpoint, and the stored cursor is kept when the final page had no events.
+- The documentation no longer lists block-range scans and provider cursors as future work, names the provider that `asset-sync.provider.type` selects where it said the HTTP provider runs in every protected profile, and shows the Alchemy adapter, the sync worker, and the recovery job in the architecture diagrams.
 - Docker Compose gives the application a 40-second stop grace period, longer than the 30-second graceful-shutdown phase. With Docker's default 10 seconds a sync run still in flight was killed before it could requeue, waited in `RUNNING` for recovery, and lost a retry attempt.
 
 ### Security

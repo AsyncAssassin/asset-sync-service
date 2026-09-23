@@ -39,7 +39,7 @@ import org.springframework.test.context.DynamicPropertySource
  * over HTTP, and proves auth + the real provider path end to end. The provider points at an
  * in-test JDK HttpServer stub (deterministic, no extra dependency, port fixed before context start
  * via @DynamicPropertySource). Schedulers are OFF (application-e2e.yml) so assertions are
- * deterministic. This is the layer that would have caught N2 (prod bootability) and N4 (auth).
+ * deterministic. This is the layer that catches regressions in prod bootability and authentication.
  */
 @ActiveProfiles("e2e")
 @Import(TestcontainersConfiguration::class)
@@ -77,7 +77,7 @@ class RealBootE2ETests(
         assertTrue(readerHealth.body?.contains("diskSpace") != true, "health must not reveal the working directory: ${readerHealth.body}")
 
         // 2) Unauthenticated API access is rejected — and the 401 still carries the request id,
-        //    proving RequestIdFilter runs before the security chain (N10).
+        //    proving RequestIdFilter runs before the security chain.
         val anonymous = restTemplate.getForEntity(
             "/api/v1/accounts/00000000-0000-0000-0000-000000000000",
             String::class.java,

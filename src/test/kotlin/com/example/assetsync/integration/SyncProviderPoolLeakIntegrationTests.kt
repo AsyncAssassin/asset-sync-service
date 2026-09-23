@@ -29,10 +29,11 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 
 /**
- * Guards N3: a provider fetch that floods the bounded hand-off queue while the consumer aborts must
- * not leak the executor thread. With `provider-max-threads=1` a single leaked thread would exhaust
- * the pool, so the second sync would be rejected (503). Before the fix the producer blocked forever
- * on a full queue after cancellation; after the fix it unwinds and the pool recovers.
+ * Guards the provider pool: a provider fetch that floods the bounded hand-off queue while the
+ * consumer aborts must not leak the executor thread. With `provider-max-threads=1` a single leaked
+ * thread would exhaust the pool, so the second sync would be rejected (503). Before the fix the
+ * producer blocked forever on a full queue after cancellation; after the fix it unwinds and the pool
+ * recovers.
  */
 @ActiveProfiles("test")
 @Import(TestcontainersConfiguration::class)

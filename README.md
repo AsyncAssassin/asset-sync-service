@@ -48,12 +48,14 @@ PostgreSQL is the source of truth for accounts, watched addresses, observed tran
 ```mermaid
 flowchart LR
     client["REST clients"] --> api["REST API<br/>Spring MVC controllers"]
-    scheduler["Scheduler"] --> services["Application services"]
+    worker["Sync worker<br/>SyncRunWorkerJob"] --> services["Application services"]
+    recovery["Sync recovery<br/>SyncRunRecoveryJob"] --> services
     api --> services
     services --> state["Domain state machine"]
     services --> providerPort["ChainProviderPort"]
     providerPort --> fakeProvider["Fake chain provider<br/>local/test"]
-    providerPort --> httpProvider["HTTP chain provider<br/>non-local/test"]
+    providerPort --> httpProvider["HTTP bridge provider<br/>provider.type=http"]
+    providerPort --> alchemyProvider["Alchemy JSON-RPC provider<br/>provider.type=alchemy"]
     services --> repos["jOOQ repositories"]
     repos --> db[("PostgreSQL")]
     db --> outbox["Transactional outbox"]
@@ -78,7 +80,7 @@ Swagger UI shows the generated OpenAPI surface exposed by the running service.
 
 ![Swagger UI](docs/assets/swagger-ui.png)
 
-Actuator health captures show the service and readiness endpoints returning `UP`.
+Actuator health captures show the service and readiness endpoints returning `UP` as an anonymous caller sees them: the aggregate status without components. Authenticated callers in the protected profiles, and everyone in `local`, also see the database and chain provider components.
 
 ![Health endpoint](docs/assets/health.png)
 
@@ -497,15 +499,21 @@ SPRING_PROFILES_ACTIVE=local ./gradlew bootRun
 
 ## MVP Boundaries
 
-This service does not provide custody, signing, private key storage, wallet functionality, or real funds movement. The MVP includes basic non-local HTTP Basic protection, a Prometheus scrape endpoint, and an HTTP provider adapter, but it does not bundle a real blockchain node/indexer backend, Kafka, SQS, Redis, balance projection, tenant-level authorization, CD/deployment automation, or release automation.
+This service does not provide custody, signing, private key storage, wallet functionality, or real funds movement. The MVP includes basic non-local HTTP Basic protection, a Prometheus scrape endpoint, and HTTP bridge and Alchemy provider adapters, but it does not bundle a blockchain node or indexer of its own, Kafka, SQS, Redis, balance projection, tenant-level authorization, CD/deployment automation, or release automation.
+
+### Known Limitations
+
+- `REVERTED` is final. A transaction that a reorg reverted stays `REVERTED` even if the chain includes it again; a later event for it is a duplicate or a conflict. Nothing tracks reorgs automatically: `REVERTED` arrives only through `POST /api/v1/observed-events`, and the Alchemy adapter scans only up to the finality frontier, where reorgs are practically excluded.
+- No tenant isolation. The `READ` and `OPERATOR` roles are global: every `READ` user sees every account, and every `OPERATOR` user can change any account's addresses and report events on any chain.
+- The outbox publishes to the structured log only, at least once; there is no external broker, and consumers deduplicate by event id or idempotency key.
+- Self-transfers are not recorded. The Alchemy adapter skips a transfer from the watched address to itself, because it moves no funds, and only counts it: `skippedSelfTransfers` in the cursor checkpoint of that fetch and `asset.sync.provider.alchemy.skipped.rows` with the reason `SELF_TRANSFER`.
 
 ## Roadmap / Deferred Scope
 
-Future extensions, not implemented as of `v0.3.0`:
+Future extensions, not implemented yet:
 
 - Transaction read/list endpoints.
 - Provider coverage beyond Alchemy ERC-20 transfers and the generic HTTP page contract: native and internal transfers, ERC-721/1155, and a second provider on the same asset registry.
-- Provider-specific block-range scans.
 - External broker adapter for the outbox.
 - Balance projection read models.
 - Tenant-level authorization and account ownership.

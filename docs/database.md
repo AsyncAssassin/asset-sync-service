@@ -582,7 +582,6 @@ Generation configuration should align Kotlin nullability with database nullabili
 Deferred database capabilities:
 
 - Balance projection tables derived from observed transactions.
-- Provider cursor tables for real chain scans.
 - Advisory locks or scheduler locks for multi-instance sync coordination.
 - Audit/event-history tables.
 - Partitioning or retention policies for high-volume transaction history.

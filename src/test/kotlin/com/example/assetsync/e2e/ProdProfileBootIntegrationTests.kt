@@ -36,10 +36,10 @@ import org.testcontainers.utility.DockerImageName
 
 /**
  * Boots the real `prod` profile end to end so the prod-only wiring is exercised by a test, not just
- * config review — closing the round-2 blind spot where a prod-path regression could ship green.
- * It proves: the env-driven datasource boots (N2), the dedicated Liquibase datasource applies the
- * migrations incl. the users table (N5), and the env-provisioned prod admin can authenticate
- * against the DB-backed store (N4). Fail-fast on missing secrets is verified separately (a bootRun
+ * config review, so a regression on the prod path cannot ship green.
+ * It proves: the env-driven datasource boots, the dedicated Liquibase datasource applies the
+ * migrations incl. the users table, and the env-provisioned prod admin can authenticate
+ * against the DB-backed store. Fail-fast on missing secrets is verified separately (a bootRun
  * with no env dies with an unresolved-placeholder error). It also pins the provider wiring of a
  * default prod context: the HTTP bridge beans and nothing Alchemy-specific, and a blank
  * `base-url` still fails the boot.
@@ -204,7 +204,7 @@ class ProdProfileBootIntegrationTests(
             registry.add("spring.datasource.url") { postgres.jdbcUrl }
             registry.add("spring.datasource.username") { postgres.username }
             registry.add("spring.datasource.password") { postgres.password }
-            // Distinct Liquibase datasource (N5) — same DB, bare connection without the app-pool init-sql.
+            // Distinct Liquibase datasource: same DB, bare connection without the app-pool init-sql.
             registry.add("spring.liquibase.url") { postgres.jdbcUrl }
             registry.add("spring.liquibase.user") { postgres.username }
             registry.add("spring.liquibase.password") { postgres.password }
