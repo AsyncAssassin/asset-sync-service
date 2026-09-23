@@ -1215,7 +1215,7 @@ MVP services:
 - `asset-sync-service`
 - `postgres`
 
-Both services publish their ports on `127.0.0.1` only. `ASSET_SYNC_HTTP_BIND_ADDRESS` widens the application port for a remote demo under a protected profile; PostgreSQL stays on loopback. The application service has a 40-second `stop_grace_period`, longer than the 30-second graceful-shutdown phase.
+Both services publish their ports on `127.0.0.1` only. Started on a host instead, `local` and `demo` listen on `127.0.0.1` themselves (`server.address`, overridden by `SERVER_ADDRESS`); the image sets `SERVER_ADDRESS=0.0.0.0`, because a container is reached through its published port. `ASSET_SYNC_HTTP_BIND_ADDRESS` widens the application port for a remote demo under a protected profile; PostgreSQL stays on loopback. The application service has a 40-second `stop_grace_period`, longer than the 30-second graceful-shutdown phase.
 
 Metrics are exposed through Actuator. The MVP Docker Compose file does not include Prometheus or Grafana services.
 

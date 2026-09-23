@@ -324,7 +324,7 @@ Check the app:
 curl -s http://localhost:18081/actuator/health
 ```
 
-Compose publishes the API and PostgreSQL on `127.0.0.1` only, because the default `local` profile has no authentication and the database password is a well-known default. To reach the API from another machine, for example during a remote demo, set `ASSET_SYNC_HTTP_BIND_ADDRESS=0.0.0.0` together with a protected profile, never with `local`. The `demo` users have public passwords, so expose `demo` on a trusted network only. PostgreSQL stays on loopback either way.
+Compose publishes the API and PostgreSQL on `127.0.0.1` only, because the default `local` profile has no authentication and the database password is a well-known default. To reach the API from another machine, for example during a remote demo, set `ASSET_SYNC_HTTP_BIND_ADDRESS=0.0.0.0` together with a protected profile, never with `local`. The `demo` users have public passwords, so expose `demo` on a trusted network only. PostgreSQL stays on loopback either way. Started on the host, as with `./gradlew bootRun`, `local` and `demo` listen on `127.0.0.1` too; `SERVER_ADDRESS=0.0.0.0` opens `demo` under the same conditions. Inside the container the server listens on all container interfaces, so the published port is the one gate.
 
 ```bash
 SPRING_PROFILES_ACTIVE=demo ASSET_SYNC_HTTP_BIND_ADDRESS=0.0.0.0 ASSET_SYNC_DB_PORT=55433 ASSET_SYNC_HTTP_PORT=18081 \
@@ -360,6 +360,7 @@ Runtime configuration:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SERVER_PORT` | `8080` | HTTP port used by the Spring Boot app |
+| `SERVER_ADDRESS` | `127.0.0.1` in `local` and `demo`, all interfaces elsewhere and in the Docker image | Interface the HTTP server listens on; `0.0.0.0` opens `demo` to a trusted network, never use it with `local` |
 | `ASSET_SYNC_OUTBOX_BATCH_SIZE` | `50` | Due outbox rows claimed per poll |
 | `ASSET_SYNC_OUTBOX_RETRY_BACKOFF_BASE_DELAY` | `30s` | Retry backoff base delay |
 | `ASSET_SYNC_OUTBOX_RETRY_BACKOFF_MAX_DELAY` | `15m` | Maximum retry backoff delay |
