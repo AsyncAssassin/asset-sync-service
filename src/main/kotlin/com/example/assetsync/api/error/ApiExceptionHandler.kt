@@ -17,6 +17,7 @@ import com.example.assetsync.application.transaction.WatchedAddressNotFoundExcep
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import java.time.Duration
+import org.springframework.core.NestedRuntimeException
 import org.springframework.dao.DataAccessException
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.http.HttpHeaders
@@ -27,6 +28,8 @@ import org.springframework.http.converter.HttpMessageNotReadableException
 import org.slf4j.LoggerFactory
 import org.springframework.security.access.AccessDeniedException
 import org.springframework.security.core.AuthenticationException
+import org.springframework.transaction.CannotCreateTransactionException
+import org.springframework.transaction.TransactionSystemException
 import org.springframework.validation.FieldError
 import org.springframework.web.ErrorResponse
 import org.springframework.web.HttpMediaTypeNotSupportedException
@@ -378,23 +381,26 @@ class ApiExceptionHandler {
         )
     }
 
-    @ExceptionHandler(DataAccessException::class)
+    // A transaction that cannot begin because no connection is available, or whose rollback fails
+    // on a connection the outage broke, surfaces as a TransactionException, not a
+    // DataAccessException; both mean the database could not serve the request. Other
+    // TransactionExceptions, such as an unexpected rollback, are programming errors and stay 500.
+    @ExceptionHandler(
+        DataAccessException::class,
+        CannotCreateTransactionException::class,
+        TransactionSystemException::class,
+    )
     fun handleDatabaseFailure(
-        exception: DataAccessException,
+        exception: NestedRuntimeException,
         request: HttpServletRequest,
     ): ResponseEntity<ProblemDetail> {
         logger.error(
-            "database_operation_failed path={} exceptionClass={}",
+            "database_operation_failed path={} exceptionClass={} causeClass={}",
             request.requestURI,
             exception.javaClass.simpleName,
+            exception.mostSpecificCause.javaClass.simpleName,
         )
-        return problem(
-            status = HttpStatus.SERVICE_UNAVAILABLE,
-            type = "database-unavailable",
-            title = "Database unavailable",
-            detail = "Database operation failed.",
-            request = request,
-        )
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(ProblemDetails.databaseUnavailable(request))
     }
 
     @ExceptionHandler(Exception::class)
@@ -429,13 +435,7 @@ class ApiExceptionHandler {
             exception.javaClass.simpleName,
             exception,
         )
-        return problem(
-            status = HttpStatus.INTERNAL_SERVER_ERROR,
-            type = "internal-error",
-            title = "Internal server error",
-            detail = "The request could not be processed.",
-            request = request,
-        )
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ProblemDetails.internalError(request))
     }
 
     private fun FieldError.toErrorMessage(): String =

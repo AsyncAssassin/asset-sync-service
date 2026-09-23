@@ -849,7 +849,7 @@ Duplicate no-op response:
 - `415 Unsupported Media Type`: request body content type other than JSON.
 - `429 Too Many Requests`: the soft cap on queued plus running sync runs is reached; `Retry-After` carries the worker claim interval in whole seconds.
 - `500 Internal Server Error`: unexpected failure; the response carries a generic detail and the exception goes to the log.
-- `503 Service Unavailable`: request-time infrastructure failure, such as PostgreSQL unavailable.
+- `503 Service Unavailable`: request-time infrastructure failure, such as PostgreSQL unavailable. In protected profiles this includes a request whose HTTP Basic credentials could not be checked because the user store could not be read; that answer carries no Basic challenge.
 
 Provider timeout or unavailability during async sync worker execution does not change the already-returned `202 Accepted` POST response. The worker records retry or terminal `FAILED` state on the `sync_run`, and clients inspect it through `GET /api/v1/sync-runs/{id}`.
 
@@ -1110,7 +1110,8 @@ Concurrent sync for same address:
 - Optional advisory lock can be added later for stricter global admission control.
 
 PostgreSQL unavailable:
-- API returns `503`.
+- API returns `503` with `database-unavailable`, in protected profiles also for a request that carries credentials: they cannot be checked while the user store is unreadable, so the answer is not a `401`.
+- A request waits for a connection up to the Hikari `connection-timeout` (30 seconds by default). A query whose server stops answering without closing the connection ends after the 40-second JDBC socket timeout, above the 30-second `statement_timeout`.
 - Readiness health check fails.
 - No fake success response is returned.
 

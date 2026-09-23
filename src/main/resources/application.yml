@@ -6,6 +6,13 @@ spring:
   datasource:
     hikari:
       connection-init-sql: "SET statement_timeout TO '30s'; SET lock_timeout TO '5s'"
+      # pgjdbc timeouts in seconds. statement_timeout fires only on a server that still runs; the
+      # socket timeout also ends a read from a server that stopped answering (paused, network
+      # partition), which would otherwise hold the request thread and its connection forever. It
+      # stays above statement_timeout, so a slow query still ends with the server's own error.
+      data-source-properties:
+        socketTimeout: 40
+        connectTimeout: 5
   liquibase:
     enabled: false
   lifecycle:
