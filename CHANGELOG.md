@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Security
+
+- A failure to reach the HTTP bridge no longer quotes the bridge URL. The I/O error text contains the request URL with the userinfo and the path of `base-url`, the only places the bridge credentials can live, and it reached the health details, the WARN log, and the `lastError` of sync runs that the `READ` role sees. The message now names the kind of failure, such as `Provider transport failure: connection refused (ConnectException).`, and the cause chain goes to the DEBUG log with every URL cut out.
+
 ## [0.4.0] - 2026-09-23
 
 ### Added

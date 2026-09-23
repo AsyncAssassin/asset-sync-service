@@ -140,7 +140,7 @@ Expected behavior:
 
 Operational signal:
 
-- Store concise failure detail in `sync_runs.last_error`. Readers of the run see the service's own messages only; a database or unexpected failure is stored as its class, and the full exception is logged as `sync_run_failure_detail`.
+- Store concise failure detail in `sync_runs.last_error`. Readers of the run see the service's own messages only; a database or unexpected failure is stored as its class, and the full exception is logged as `sync_run_failure_detail`. A failure to reach the HTTP bridge is stored by its kind, never with the bridge URL, which may carry the bridge credentials.
 - Log `syncRunId`, target type, target id, and provider operation.
 
 ## 8. Malformed Provider Page
