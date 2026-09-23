@@ -546,7 +546,7 @@ Possible statuses are `QUEUED`, `RUNNING`, `SUCCEEDED`, and `FAILED`. Legacy `ST
 
 ## 14. ProblemDetail Error Mapping
 
-All errors produced by the API layer use `ProblemDetail`, including framework-level routing failures such as unknown paths, unsupported methods, and unsupported content types. The `type` field is a stable service-owned URI. Implementations may add properties for correlation and domain identifiers, but must not expose internal stack traces. Under the protected profiles, `401` and `403` are produced by the Spring Security filter chain before a request reaches Spring MVC; a dedicated authentication entry point and access-denied handler write the same `ProblemDetail` shape, including `requestId`, and `401` responses keep the `WWW-Authenticate: Basic` challenge.
+All errors produced by the API layer use `ProblemDetail`, including framework-level routing failures such as unknown paths, unsupported methods, and unsupported content types. The `type` field is a stable service-owned URI. Implementations may add properties for correlation and domain identifiers, but must not expose internal stack traces. Under the protected profiles, `401` and `403` are produced by the Spring Security filter chain before a request reaches Spring MVC; a dedicated authentication entry point and access-denied handler write the same `ProblemDetail` shape, including `requestId`, and `401` responses keep the `WWW-Authenticate: Basic` challenge. A request with credentials that arrives while PostgreSQL is unavailable gets `503 database-unavailable` from the entry point instead, without a challenge: the user store could not be read, so the credentials were never checked.
 
 A request that Spring Security's `StrictHttpFirewall` rejects before authentication, for example one with `//` or `;` in its path, never reaches the API layer. It gets `400` from the servlet container's error page in every profile, with Spring Boot's default error body instead of a `ProblemDetail` and without a Basic challenge.
 
@@ -572,7 +572,7 @@ Common mappings:
 | Database constraint violation from non-HTTP ingest paths | 400 | `https://asset-sync-service/errors/database-constraint-violation` |
 | Sync queue is full, with `Retry-After` | 429 | `https://asset-sync-service/errors/sync-queue-full` |
 | Provider timeout or unavailable during async execution | Stored on sync run | n/a |
-| PostgreSQL unavailable | 503 | `https://asset-sync-service/errors/database-unavailable` |
+| PostgreSQL unavailable, also while checking HTTP Basic credentials | 503 | `https://asset-sync-service/errors/database-unavailable` |
 | Unexpected server failure | 500 | `https://asset-sync-service/errors/internal-error` |
 | Any other Spring MVC error response, for example `406 Not Acceptable` | native status | `https://asset-sync-service/errors/<status-name>`, for example `not-acceptable` |
 

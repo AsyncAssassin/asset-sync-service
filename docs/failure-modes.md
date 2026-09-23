@@ -102,17 +102,20 @@ Scenario:
 
 - PostgreSQL connection cannot be acquired.
 - Query execution fails due to database outage.
+- PostgreSQL stops answering without closing connections, for example on a paused host or behind a network partition.
 
 Expected behavior:
 
-- API returns `503 Service Unavailable`.
+- API returns `503 Service Unavailable` with the `database-unavailable` problem type. In the protected profiles this includes a request that carries credentials: HTTP Basic cannot read its user store to check them, so the answer is neither a `401` nor a Basic challenge. A request without credentials keeps its `401`.
+- A request waits for a pooled connection up to the Hikari `connection-timeout`, 30 seconds by default.
+- A query already sent to a server that stopped answering ends after the 40-second JDBC socket timeout (`socketTimeout`), which sits above the 30-second `statement_timeout`. A new connection gives up on the TCP connect after 5 seconds (`connectTimeout`).
 - Readiness health check fails.
 - No fake success response is returned.
 - No provider call should be started for a sync request if the initial `sync_run` cannot be created.
 
 Operational signal:
 
-- Log database exception class and operation name.
+- `database_operation_failed` at ERROR with the request path, the exception class, and the class of its root cause, both from the API and from the credential check.
 - Avoid logging credentials or raw connection strings.
 
 ## 7. Provider Timeout Or Backpressure

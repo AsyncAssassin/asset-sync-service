@@ -4,6 +4,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- A request that PostgreSQL cannot serve gets `503 database-unavailable`, as documented. Most endpoints answered `500 internal-error` in `local`, because a transaction that cannot get a connection fails with a `TransactionException`, not a `DataAccessException`. In `demo` and `prod` a request with valid credentials got `401` with a Basic challenge, because the user store behind HTTP Basic could not be read; it now gets the same `503` without a challenge, while a request without credentials keeps its `401`.
+- A query to a PostgreSQL that stops answering without closing the connection, such as a paused container or a network partition, ends after the 40-second JDBC socket timeout instead of holding the request thread and its connection indefinitely. A new connection gives up on the TCP connect after 5 seconds.
+
 ## [0.4.0] - 2026-09-23
 
 ### Added
