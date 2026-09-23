@@ -285,7 +285,7 @@ Key columns:
 | `version` | `bigint` | no | Diagnostic version, default `0` |
 | `created_at` | `timestamptz` | no | Creation timestamp |
 | `updated_at` | `timestamptz` | no | Last update timestamp |
-| `source` | `text` | yes | Source of the last lifecycle change: `rest:<user>` (`rest:anonymous` where nobody authenticates) or `provider:<http\|alchemy\|fake>`, and `demo:seed` for the dataset the `demo` profile seeds; `NULL` for rows written before changeset `016` |
+| `source` | `text` | yes | Source of the last lifecycle change: `rest:<user>` (`rest:anonymous` where nobody authenticates) or `provider:<http\|alchemy\|fake>`, and `demo:seed` for the dataset the `demo` profile seeds; `NULL` for rows written before changeset `016` and for the rows the `demo` profile of 0.4.0 or earlier seeded |
 
 Constraints and indexes:
 

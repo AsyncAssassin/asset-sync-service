@@ -26,9 +26,7 @@ import org.springframework.web.bind.annotation.RestController
  * synthetic, but well formed for every enabled chain, including `eth-sepolia`, whose ingest rules
  * accept only real 32-byte hashes.
  *
- * `DemoSimulatorSyncE2ETests` drives this controller over real HTTP under `demo`. The other e2e
- * tests point the provider at an in-test JDK `HttpServer` via `@DynamicPropertySource` instead,
- * which lets them script provider answers.
+ * Covered over real HTTP by `DemoSimulatorSyncE2ETests`.
  */
 @RestController
 @Profile("demo")
