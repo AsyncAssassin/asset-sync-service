@@ -4,6 +4,7 @@ import com.example.assetsync.TestcontainersConfiguration
 import com.example.assetsync.application.sync.SyncApplicationService
 import com.example.assetsync.application.sync.SyncRunLifecycleService
 import com.example.assetsync.config.ProviderProperties
+import com.example.assetsync.domain.policy.ChainIdentityNormalizer
 import com.fasterxml.jackson.databind.ObjectMapper
 import java.security.SecureRandom
 import java.util.HexFormat
@@ -30,8 +31,9 @@ import org.springframework.test.util.TestSocketUtils
  * sync runs through `HttpChainProvider` into the bundled simulator on the server's own port, the
  * same self-call a demo makes. `server.port` is fixed before the context starts and nothing sets
  * the provider base URL, so the test also proves the demo base URL follows `server.port`. Every
- * seeded chain must sync, `eth-sepolia` included, whose ingest rules accept only real 32-byte
- * transaction hashes. The worker is off; the test claims and executes the runs itself.
+ * chain and asset enabled in the registry must sync, `eth-sepolia` included, whose ingest rules
+ * accept only real 32-byte transaction hashes. The worker is off; the test claims and executes the
+ * runs itself.
  */
 @ActiveProfiles("demo")
 @Import(TestcontainersConfiguration::class)
@@ -58,13 +60,31 @@ class DemoSimulatorSyncE2ETests(
     }
 
     @Test
-    fun `a demo sync succeeds on every seeded chain through the real http bridge`() {
+    fun `a demo sync succeeds on every enabled chain through the real http bridge`() {
+        // Every chain and asset the demo can register, read from the registry, so a chain enabled
+        // later, or a stricter identity rule on one, cannot break the demo sync without a failing test.
+        val enabled = jdbcTemplate.query(
+            """
+            SELECT a.chain_id, a.asset
+            FROM asset_configs a
+            JOIN chain_configs c ON c.chain_id = a.chain_id
+            WHERE a.enabled AND c.enabled
+            ORDER BY a.chain_id, a.asset
+            """.trimIndent(),
+        ) { row, _ -> row.getString("chain_id") to row.getString("asset") }
+        assertTrue(
+            enabled.map { it.first }.containsAll(listOf("local-evm", "eth-sepolia")),
+            "expected the seeded demo chains to be enabled: $enabled",
+        )
+
         val accountId = createAccount()
-        listOf(
-            "local-evm" to "0xdemo-e2e-${UUID.randomUUID().toString().take(8)}",
-            "eth-sepolia" to "0x${randomHex(bytes = 20)}",
-        ).forEach { (chainId, address) ->
-            val addressId = registerAddress(accountId = accountId, chainId = chainId, address = address)
+        enabled.forEach { (chainId, asset) ->
+            val address = if (chainId in ChainIdentityNormalizer.HEX_IDENTITY_CHAIN_IDS) {
+                "0x${randomHex(bytes = 20)}"
+            } else {
+                "0xdemo-e2e-${UUID.randomUUID().toString().take(8)}"
+            }
+            val addressId = registerAddress(accountId = accountId, chainId = chainId, address = address, asset = asset)
             val syncRunId = submitSync(addressId)
 
             syncRunLifecycleService.claimDueRuns(workerId = "demo-e2e-${UUID.randomUUID()}", limit = 10)
@@ -96,10 +116,10 @@ class DemoSimulatorSyncE2ETests(
         return objectMapper.readTree(response.body)["id"].asText()
     }
 
-    private fun registerAddress(accountId: String, chainId: String, address: String): String {
+    private fun registerAddress(accountId: String, chainId: String, address: String, asset: String): String {
         val response = operator().postForEntity(
             "/api/v1/accounts/$accountId/addresses",
-            json("""{"chainId":"$chainId","address":"$address","asset":"USDC"}"""),
+            json("""{"chainId":"$chainId","address":"$address","asset":"$asset"}"""),
             String::class.java,
         )
         assertEquals(HttpStatus.CREATED, response.statusCode, "$chainId registration: ${response.body}")
