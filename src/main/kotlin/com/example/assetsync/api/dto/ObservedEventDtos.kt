@@ -6,6 +6,7 @@ import com.example.assetsync.application.transaction.ObservedEventIngestionResul
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
 import com.example.assetsync.domain.policy.AmountPolicy
+import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import jakarta.validation.constraints.AssertTrue
 import jakarta.validation.constraints.Min
@@ -57,14 +58,17 @@ data class IngestObservedEventRequest(
 ) {
     // A blank or over-long amount is left to @NotBlank and @Size, so it is reported once.
     @get:AssertTrue(message = "amount must be a non-negative decimal string that fits numeric(38,18)")
+    @get:JsonIgnore
     val isAmountValid: Boolean
         get() = amount.failsNotBlank() || amount.length > MAX_AMOUNT_LENGTH || parseAmountOrNull(amount) != null
 
     @get:AssertTrue(message = "direction must be INBOUND or OUTBOUND")
+    @get:JsonIgnore
     val isDirectionValid: Boolean
         get() = direction.failsNotBlank() || Direction.entries.any { it.name == direction.trim() }
 
     @get:AssertTrue(message = "status must be SEEN, CONFIRMED, or REVERTED")
+    @get:JsonIgnore
     val isStatusValid: Boolean
         get() = status.failsNotBlank() || TransactionStatus.entries.any { it.name == status.trim() }
 }

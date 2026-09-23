@@ -6,6 +6,7 @@ import com.example.assetsync.api.dto.toCommand
 import com.example.assetsync.api.dto.toResponse
 import com.example.assetsync.application.transaction.ObservedEventApplicationService
 import com.example.assetsync.domain.model.TransitionOutcome
+import io.swagger.v3.oas.annotations.responses.ApiResponse
 import jakarta.validation.Valid
 import java.security.Principal
 import org.springframework.http.HttpStatus
@@ -27,6 +28,8 @@ class ObservedEventController(
      * nobody and record `rest:anonymous`.
      */
     @PostMapping
+    @ApiResponse(responseCode = "201", description = "A new observed transaction was stored.")
+    @ApiResponse(responseCode = "200", description = "The transaction existed: its state was updated, or the event changed nothing.")
     fun ingestObservedEvent(
         @Valid @RequestBody request: IngestObservedEventRequest,
         principal: Principal?,

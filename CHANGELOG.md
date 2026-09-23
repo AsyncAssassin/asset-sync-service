@@ -20,6 +20,8 @@ All notable changes to this project are documented in this file. The format is b
 - An `amount`, `direction`, or `status` made only of Unicode spaces such as U+00A0 gets `400 validation-failed` naming the field. It passed validation and got `400 invalid-request` without the errors list.
 - A bridge page with a `null` element in `events` is a data error for its address instead of a provider outage, so provider health stays `UP`.
 - A `Retry-After` beyond the representable range is ignored instead of turning a `429` into a failed request without its backoff.
+- The OpenAPI document states the status each operation answers with, where it listed `200` for all of them: `201` for a new account or watched address, `201` or `200` for an ingested event, `202` with `Location` for a sync request. Every operation also lists the `ProblemDetail` errors all of them share, `400`, `401`, `403`, and `503`, under `application/problem+json`.
+- The OpenAPI document covers `/api` only, so under `demo` it no longer lists the chain simulator. Its request schemas no longer name the validation getters `isAmountValid`, `isDirectionValid`, and `isStatusValid` as required fields.
 
 ### Security
 

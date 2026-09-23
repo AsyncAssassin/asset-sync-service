@@ -3,6 +3,7 @@ package com.example.assetsync.api.dto
 import com.example.assetsync.application.account.Account
 import com.example.assetsync.application.account.WatchedAddress
 import com.example.assetsync.application.account.WatchedAddressStatus
+import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import jakarta.validation.constraints.AssertTrue
 import jakarta.validation.constraints.NotBlank
@@ -56,6 +57,7 @@ data class UpdateWatchedAddressRequest(
     val status: String = "",
 ) {
     @get:AssertTrue(message = "status must be ACTIVE or DISABLED")
+    @get:JsonIgnore
     val isStatusValid: Boolean
         get() = status.failsNotBlank() || WatchedAddressStatus.entries.any { it.name == status.trim() }
 
