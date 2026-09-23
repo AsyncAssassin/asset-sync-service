@@ -8,6 +8,7 @@ All notable changes to this project are documented in this file. The format is b
 
 - A request that PostgreSQL cannot serve gets `503 database-unavailable`, as documented. Most endpoints answered `500 internal-error` in `local`, because a transaction that cannot get a connection fails with a `TransactionException`, not a `DataAccessException`. In `demo` and `prod` a request with valid credentials got `401` with a Basic challenge, because the user store behind HTTP Basic could not be read; it now gets the same `503` without a challenge, while a request without credentials keeps its `401`.
 - A query to a PostgreSQL that stops answering without closing the connection, such as a paused container or a network partition, ends after the 40-second JDBC socket timeout instead of holding the request thread and its connection indefinitely. A new connection gives up on the TCP connect after 5 seconds.
+- `docs/api.md` and `docs/architecture.md` show the immutable-conflict `ProblemDetail` as the service writes it and list the `404` for an unsupported asset and the `409` for a duplicate account; `docs/failure-modes.md` names the metrics and log lines that exist instead of promising them.
 
 ## [0.4.0] - 2026-09-23
 
