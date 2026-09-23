@@ -1,17 +1,14 @@
 package com.example.assetsync.unit
 
-import ch.qos.logback.classic.Level
-import ch.qos.logback.classic.Logger
 import com.example.assetsync.application.sync.ChainProviderEventsPageRequest
 import com.example.assetsync.application.sync.ChainProviderUnavailableException
+import com.example.assetsync.config.ProviderConfiguration
+import com.example.assetsync.config.ProviderProperties
 import com.example.assetsync.infrastructure.provider.HttpChainProvider
 import com.example.assetsync.infrastructure.provider.HttpChainProviderHealthIndicator
-import com.sun.net.httpserver.HttpServer
-import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.time.Duration
 import java.util.UUID
-import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -19,92 +16,83 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.assertThrows
 import org.junit.jupiter.api.extension.ExtendWith
-import org.slf4j.LoggerFactory
 import org.springframework.boot.actuate.health.Status
 import org.springframework.boot.test.system.CapturedOutput
 import org.springframework.boot.test.system.OutputCaptureExtension
-import org.springframework.http.client.SimpleClientHttpRequestFactory
 import org.springframework.web.client.RestClient
 
 /**
- * The bridge's credentials can only live in `base-url`, in its userinfo or its path. A transport
- * failure must describe itself without that URL: its text reaches the health details, the WARN
- * log, and the `lastError` that `READ` callers see.
+ * The bridge has no credential setting of its own, so a token can only live in the path or the
+ * query of `base-url`. A transport failure must describe itself without that URL: its text reaches
+ * the health details and the `lastError` that `READ` callers see. The bridge client comes from
+ * ProviderConfiguration, as in production.
  */
 @ExtendWith(OutputCaptureExtension::class)
 class HttpChainProviderTransportFailureTests {
 
-    private val servers = mutableListOf<HttpServer>()
-    private val providerLogger = LoggerFactory.getLogger(HttpChainProvider::class.java) as Logger
-    private val previousLevel = providerLogger.level
-
-    @AfterTest
-    fun tearDown() {
-        servers.forEach { it.stop(0) }
-        providerLogger.level = previousLevel
-    }
-
     @Test
-    fun `a refused connection is reported by its kind, without the url or its credentials`(output: CapturedOutput) {
-        providerLogger.level = Level.DEBUG
+    fun `a refused connection is named by its kind, without the url`(output: CapturedOutput) {
         val closedPort = ServerSocket(0).use { it.localPort }
-        val provider = HttpChainProvider(bridgeClient(secretBaseUrl(closedPort)))
+        val provider = HttpChainProvider(bridgeClient(closedPort))
 
         val failure = assertThrows<ChainProviderUnavailableException> { provider.fetchObservedEventsPage(pageRequest()) }
 
-        assertEquals("Provider transport failure: connection refused (ConnectException).", failure.message)
+        assertEquals("Provider transport failure: cannot connect (ConnectException).", failure.message)
         assertNull(failure.cause, "the cause quotes the url")
         val health = HttpChainProviderHealthIndicator(provider).health()
         assertEquals(Status.DOWN, health.status)
         assertEquals(failure.message, health.details["error"])
         assertNoSecret(health.toString())
-        // The DEBUG line keeps the root cause for diagnosis, without the url either.
-        assertTrue(output.out.contains("http_provider_transport_failure"), output.out)
+        // The WARN line keeps the cause chain for diagnosis, with the url cut out.
+        assertTrue(output.out.contains("""causes=ResourceAccessException: I/O error on GET request for "<url>": Connection refused"""), output.out)
         assertNoSecret(output.out)
     }
 
     @Test
-    fun `the kind is found anywhere in the cause chain`() {
+    fun `a read timeout is named by its kind`(output: CapturedOutput) {
+        // Accepted by the kernel's backlog and never answered.
+        ServerSocket(0).use { silent ->
+            val provider = HttpChainProvider(bridgeClient(silent.localPort, readTimeout = Duration.ofMillis(200)))
+
+            val failure = assertThrows<ChainProviderUnavailableException> { provider.fetchObservedEventsPage(pageRequest()) }
+
+            assertEquals("Provider transport failure: timeout (SocketTimeoutException).", failure.message)
+        }
+        assertNoSecret(output.out)
+    }
+
+    @Test
+    fun `another http client is classified by the same direct cause`() {
         // The JDK HttpClient, RestClient's default, wraps the ConnectException around a
-        // ClosedChannelException, so the deepest cause alone would only say "I/O error".
+        // ClosedChannelException; the kind comes from the exception RestClient wraps.
         val closedPort = ServerSocket(0).use { it.localPort }
         val provider = HttpChainProvider(RestClient.builder().baseUrl(secretBaseUrl(closedPort)).build())
 
         val failure = assertThrows<ChainProviderUnavailableException> { provider.fetchObservedEventsPage(pageRequest()) }
 
-        assertEquals("Provider transport failure: connection refused (ConnectException).", failure.message)
+        assertEquals("Provider transport failure: cannot connect (ConnectException).", failure.message)
     }
 
     @Test
-    fun `a read timeout is reported by its kind`(output: CapturedOutput) {
-        val silent = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
-            createContext("/") { exchange ->
-                Thread.sleep(2_000)
-                exchange.close()
-            }
-            start()
-        }.also(servers::add)
-        val provider = HttpChainProvider(bridgeClient(secretBaseUrl(silent.address.port), readTimeout = Duration.ofMillis(200)))
+    fun `a base url with a user name or password is refused without quoting it`() {
+        val refused = assertThrows<IllegalArgumentException> {
+            ProviderConfiguration().chainProviderRestClient(
+                ProviderProperties(baseUrl = "http://bridge-user:$USERINFO_SECRET@127.0.0.1:1/bridge"),
+            )
+        }
 
-        val failure = assertThrows<ChainProviderUnavailableException> { provider.fetchObservedEventsPage(pageRequest()) }
-
-        assertEquals("Provider transport failure: timeout (SocketTimeoutException).", failure.message)
-        assertNoSecret(output.out)
+        assertEquals(
+            "asset-sync.provider.base-url must not carry a user name or password: the HTTP client never sends them.",
+            refused.message,
+        )
     }
 
-    /** The request factory ProviderConfiguration gives the bridge client in production. */
-    private fun bridgeClient(baseUrl: String, readTimeout: Duration = Duration.ofSeconds(5)): RestClient =
-        RestClient.builder()
-            .requestFactory(
-                SimpleClientHttpRequestFactory().apply {
-                    setConnectTimeout(Duration.ofSeconds(2))
-                    setReadTimeout(readTimeout)
-                },
-            )
-            .baseUrl(baseUrl)
-            .build()
+    private fun bridgeClient(port: Int, readTimeout: Duration = Duration.ofSeconds(5)): RestClient =
+        ProviderConfiguration().chainProviderRestClient(
+            ProviderProperties(baseUrl = secretBaseUrl(port), readTimeout = readTimeout),
+        )
 
-    private fun secretBaseUrl(port: Int) = "http://bridge-user:$USERINFO_SECRET@127.0.0.1:$port/$PATH_SECRET?token=$QUERY_SECRET"
+    private fun secretBaseUrl(port: Int) = "http://127.0.0.1:$port/$PATH_SECRET?token=$QUERY_SECRET"
 
     private fun assertNoSecret(text: String) {
         listOf(USERINFO_SECRET, PATH_SECRET, QUERY_SECRET).forEach { secret ->

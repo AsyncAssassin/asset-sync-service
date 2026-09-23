@@ -1,5 +1,6 @@
 package com.example.assetsync.config
 
+import java.net.URI
 import java.time.Duration
 import org.springframework.boot.context.properties.ConfigurationProperties
 import org.springframework.boot.context.properties.EnableConfigurationProperties
@@ -25,6 +26,11 @@ class ProviderConfiguration {
     fun chainProviderRestClient(properties: ProviderProperties): RestClient {
         require(properties.baseUrl.isNotBlank()) {
             "asset-sync.provider.base-url must be set for the active profile."
+        }
+        // The HTTP client never sends a user name or password from the URL, so credentials there
+        // would only look configured; the message leaves the URL out, because it holds them.
+        require(runCatching { URI(properties.baseUrl).rawUserInfo }.getOrNull() == null) {
+            "asset-sync.provider.base-url must not carry a user name or password: the HTTP client never sends them."
         }
         val requestFactory = SimpleClientHttpRequestFactory().apply {
             setConnectTimeout(properties.connectTimeout)

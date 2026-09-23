@@ -166,6 +166,30 @@ class HttpChainProviderHealthIndicatorTests {
         assertNull(invalidRetryAfter.retryAfter)
     }
 
+    @Test
+    fun `a null event is a data error for the address, not an outage`() {
+        responseStatus.set(200)
+        responseBody.set("""{"events":[null],"hasMore":false,"nextCursor":"null-event"}""")
+
+        val failure = assertThrows<ProviderDataInvalidException> { provider.fetchObservedEventsPage(pageRequest()) }
+
+        assertEquals("Provider response has a null element in its events field.", failure.message)
+        val health = indicator.health()
+        assertEquals(Status.UP, health.status)
+        assertEquals(failure.message, health.details["lastDataError"])
+    }
+
+    @Test
+    fun `a retry after beyond the representable range is ignored, and the 429 stays a rate limit`() {
+        responseStatus.set(429)
+        retryAfterHeader.set("99999999999999999")
+
+        val throttled = assertThrows<ChainProviderUnavailableException> { provider.fetchObservedEventsPage(pageRequest()) }
+
+        assertEquals("Provider rate limited the request with HTTP 429.", throttled.message)
+        assertNull(throttled.retryAfter)
+    }
+
     private fun pageRequest(): ChainProviderEventsPageRequest =
         ChainProviderEventsPageRequest(
             watchedAddressId = UUID.randomUUID(),

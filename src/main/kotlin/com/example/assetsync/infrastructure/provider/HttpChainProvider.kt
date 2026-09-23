@@ -126,15 +126,8 @@ class HttpChainProvider @Autowired constructor(
             recordFailure(request = request, exception = exception)
             throw exception
         } catch (exception: RuntimeException) {
-            val failure = ChainProviderUnavailableException(transportFailureMessage(exception))
-            logger.debug(
-                "http_provider_transport_failure chainId={} address={} asset={} causes={}",
-                request.chainId,
-                request.address,
-                request.asset,
-                exception.causeChainWithoutUrls(),
-            )
-            recordFailure(request = request, exception = failure)
+            val failure = ChainProviderUnavailableException(failureMessage(exception))
+            recordFailure(request = request, exception = failure, causes = exception.causeChainWithoutUrls())
             throw failure
         }
 
@@ -157,8 +150,10 @@ class HttpChainProvider @Autowired constructor(
             throw ProviderDataInvalidException(reason, exception)
         }
 
-        val events = response.events
-            ?: throw ProviderDataInvalidException("Provider response is missing required events field.")
+        val events = response.events?.let { listed ->
+            listed.filterNotNull().takeIf { it.size == listed.size }
+                ?: throw ProviderDataInvalidException("Provider response has a null element in its events field.")
+        } ?: throw ProviderDataInvalidException("Provider response is missing required events field.")
         val hasMore = response.hasMore
             ?: throw ProviderDataInvalidException("Provider response is missing required hasMore field.")
         val nextCursor = normalizeCursor(response)
@@ -187,36 +182,43 @@ class HttpChainProvider @Autowired constructor(
     private fun parseRetryAfter(value: String?): Instant? = ProviderHttpSupport.parseRetryAfter(value)
 
     /**
-     * A fixed description of a failure that happened before the bridge answered with a status,
-     * named by the first known kind in its cause chain. The exception's own text is never used:
-     * Spring's `ResourceAccessException` quotes the request URL, whose userinfo or path may carry
-     * the bridge credentials, and this text reaches the health details, the WARN log, and the
-     * `lastError` of sync runs that `READ` callers see. The cause is not attached for the same reason.
+     * A fixed description of a failure the bridge did not report itself: a transport failure is
+     * named by the kind of the I/O error RestClient wraps, anything else by its class. The
+     * exception's own text is never used: Spring's `ResourceAccessException` quotes the request URL,
+     * whose path or query may carry the bridge credentials, and this text reaches the health
+     * details and the `lastError` of sync runs that `READ` callers see. The cause is not attached
+     * for the same reason; the WARN log gets the cause chain with every URL cut out.
      */
-    private fun transportFailureMessage(exception: RuntimeException): String {
-        val causes = exception.causeChain()
-        TRANSPORT_FAILURE_KINDS.forEach { (type, kind) ->
-            causes.firstOrNull(type::isInstance)?.let { return "Provider transport failure: $kind (${it.javaClass.simpleName})." }
+    private fun failureMessage(exception: RuntimeException): String {
+        val cause = exception.cause as? IOException
+            ?: return "Provider request failed (${exception.javaClass.simpleName})."
+        val kind = when (cause) {
+            is SocketTimeoutException, is HttpTimeoutException -> "timeout"
+            // Refused, unreachable, or an operating-system connect timeout: the text tells them apart.
+            is ConnectException -> "cannot connect"
+            is UnknownHostException -> "unknown host"
+            is SSLException -> "TLS failure"
+            else -> "I/O error"
         }
-        return "Provider request failed (${exception.javaClass.simpleName})."
+        return "Provider transport failure: $kind (${cause.javaClass.simpleName})."
     }
 
-    private fun Throwable.causeChain(): List<Throwable> = generateSequence(this) { it.cause }.take(MAX_CAUSE_DEPTH).toList()
-
-    /** The whole cause chain for the DEBUG log, with every URL in it cut out. */
     private fun Throwable.causeChainWithoutUrls(): String =
-        causeChain().joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message?.replace(URL_PATTERN, "<url>")}" }
+        generateSequence(this) { it.cause }
+            .take(MAX_CAUSE_DEPTH)
+            .joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message?.replace(URL_PATTERN, "<url>")}" }
 
-    private fun recordFailure(request: ChainProviderEventsPageRequest, exception: RuntimeException) {
+    private fun recordFailure(request: ChainProviderEventsPageRequest, exception: RuntimeException, causes: String? = null) {
         lastFetchHealthy = false
         lastError = exception.message?.take(240)
         logger.warn(
-            "http_provider_page_fetch_failed chainId={} address={} asset={} limit={} error={}",
+            "http_provider_page_fetch_failed chainId={} address={} asset={} limit={} error={} causes={}",
             request.chainId,
             request.address,
             request.asset,
             request.limit,
             lastError,
+            causes,
         )
     }
 
@@ -239,17 +241,9 @@ class HttpChainProvider @Autowired constructor(
 
     private companion object {
         const val MAX_CAUSE_DEPTH = 16
-        val URL_PATTERN = Regex("[A-Za-z][A-Za-z0-9+.-]*://\\S+")
 
-        /** In priority order: a specific kind anywhere in the chain wins over a generic I/O error. */
-        val TRANSPORT_FAILURE_KINDS: List<Pair<Class<out Throwable>, String>> = listOf(
-            ConnectException::class.java to "connection refused",
-            SocketTimeoutException::class.java to "timeout",
-            HttpTimeoutException::class.java to "timeout",
-            UnknownHostException::class.java to "unknown host",
-            SSLException::class.java to "TLS failure",
-            IOException::class.java to "I/O error",
-        )
+        /** A URL up to the first whitespace or quote, so the quote Spring puts around it survives. */
+        val URL_PATTERN = Regex("[A-Za-z][A-Za-z0-9+.-]*://[^\\s\"'<>]+")
     }
 }
 
@@ -257,7 +251,7 @@ class HttpChainProvider @Autowired constructor(
 // complete, so extra bridge fields cost neither memory nor the string cap.
 @JsonIgnoreProperties(ignoreUnknown = true)
 data class ProviderEventsPageResponse(
-    val events: List<ProviderEvent>? = null,
+    val events: List<ProviderEvent?>? = null,
     val nextCursor: String? = null,
     val resumeCursor: String? = null,
     val hasMore: Boolean? = null,

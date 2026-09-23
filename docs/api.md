@@ -542,7 +542,7 @@ Response:
 
 Possible statuses are `QUEUED`, `RUNNING`, `SUCCEEDED`, and `FAILED`. Legacy `STARTED` may be visible for pre-async rows until recovery or an operator runbook drains them. `startedAt` is nullable while a run is still `QUEUED`.
 
-`lastError` carries the service's own failure messages, such as `Provider timeout after PT10S.`, bounded to `asset-sync.sync.worker.max-error-length`. A failure to reach the HTTP bridge names its kind, such as `Provider transport failure: connection refused (ConnectException).`, never the bridge URL, whose userinfo or path may carry the bridge credentials. A database failure shows only its class, for example `Database error (DataIntegrityViolationException).`, and any other unexpected failure shows `Unexpected error (<class>).`, because their messages can quote SQL; the full detail is logged as `sync_run_failure_detail`.
+`lastError` carries the service's own failure messages, such as `Provider timeout after PT10S.`, bounded to `asset-sync.sync.worker.max-error-length`. A failure to reach the HTTP bridge names its kind, such as `Provider transport failure: connection refused (ConnectException).`, never the bridge URL, whose path or query may carry a bridge token. A database failure shows only its class, for example `Database error (DataIntegrityViolationException).`, and any other unexpected failure shows `Unexpected error (<class>).`, because their messages can quote SQL; the full detail is logged as `sync_run_failure_detail`.
 
 ## 14. ProblemDetail Error Mapping
 
