@@ -24,7 +24,7 @@ import org.springframework.web.bind.annotation.RestController
  * `@DynamicPropertySource` (see the e2e test), which is deterministic and needs no fixed port.
  */
 @RestController
-@Profile("demo & !prod")
+@Profile("demo")
 @Validated
 class ChainSimulatorController {
 
