@@ -10,7 +10,7 @@ All MVP endpoints are exposed under `/api/v1`. The version is part of the URL be
 
 Conventions:
 
-- Request and response bodies use JSON.
+- Request and response bodies use JSON. A string value longer than 100 000 characters fails the request with `400 invalid-request` while the body is read.
 - Timestamps use UTC ISO-8601 strings.
 - Identifiers use UUID strings.
 - Monetary amounts are encoded as decimal strings and stored with `numeric(38, 18)` precision.
@@ -333,7 +333,7 @@ Validation:
 - `chainId`, `txHash`, `address`, and `asset` are required and must be non-blank.
 - `txHash` follows the address format rules of its chain, with 64 hex digits instead of 40 on `eth-sepolia` and `eth-mainnet`; a malformed hash returns `400` with `invalid-request`.
 - `eventIndex` is required and must be `>= 0`.
-- `amount` is required, must parse as a non-negative decimal, exponent notation such as `1e2` included, and must fit `numeric(38, 18)`: at most 20 integer and 18 fraction digits. It is stored at scale 18.
+- `amount` is required, must parse as a non-negative decimal, exponent notation such as `1e2` included, and must fit `numeric(38, 18)`: at most 20 integer and 18 fraction digits. It is stored at scale 18. A value longer than 80 characters is refused by its length alone, before it is parsed.
 - `blockHeight` is required and must be `>= 0`.
 - `confirmations` is required and must be `>= 0`.
 - `direction` must be `INBOUND` or `OUTBOUND`.
@@ -554,7 +554,7 @@ Common mappings:
 
 | Condition | HTTP status | Problem type |
 | --- | ---: | --- |
-| Malformed JSON or invalid field type | 400 | `https://asset-sync-service/errors/invalid-request` |
+| Malformed JSON, invalid field type, or a string longer than 100 000 characters | 400 | `https://asset-sync-service/errors/invalid-request` |
 | Bean validation failure | 400 | `https://asset-sync-service/errors/validation-failed` |
 | Invalid enum value | 400 | `https://asset-sync-service/errors/validation-failed` |
 | Missing required request parameter | 400 | `https://asset-sync-service/errors/invalid-request` |

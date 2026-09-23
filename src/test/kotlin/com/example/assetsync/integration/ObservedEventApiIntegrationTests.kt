@@ -1,7 +1,9 @@
 package com.example.assetsync.integration
 
 import com.example.assetsync.TestcontainersConfiguration
+import com.example.assetsync.api.dto.MAX_AMOUNT_LENGTH
 import com.example.assetsync.api.dto.MAX_TX_HASH_LENGTH
+import com.example.assetsync.config.JacksonConfiguration.Companion.MAX_JSON_STRING_LENGTH
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import java.sql.Timestamp
@@ -368,6 +370,38 @@ class ObservedEventApiIntegrationTests(
 
         assertEquals(0, tableCount("observed_transactions"))
         assertEquals(0, tableCount("outbox_events"))
+    }
+
+    @Test
+    fun `an oversized amount is refused by its length before it is parsed`() {
+        createWatchedAddress(address = "0xobserved-long-amount")
+
+        mockMvc.perform(
+            post("/api/v1/observed-events")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(
+                    observedEventBody(address = "0xobserved-long-amount", amount = "1".repeat(MAX_JSON_STRING_LENGTH)),
+                ),
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/validation-failed"))
+            .andExpect(jsonPath("$.errors.length()").value(1))
+            .andExpect(jsonPath("$.errors[0]").value("amount: amount must be at most $MAX_AMOUNT_LENGTH characters"))
+
+        assertEquals(0, tableCount("observed_transactions"))
+    }
+
+    @Test
+    fun `a string past the json limit is refused while the body is read`() {
+        mockMvc.perform(
+            post("/api/v1/observed-events")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(observedEventBody(txHash = "x".repeat(MAX_JSON_STRING_LENGTH + 1))),
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/invalid-request"))
+
+        assertEquals(0, tableCount("observed_transactions"))
     }
 
     @Test
