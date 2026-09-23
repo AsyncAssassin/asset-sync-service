@@ -6,10 +6,15 @@ import com.example.assetsync.application.sync.SyncRunLifecycleService
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.AfterAll
@@ -204,6 +209,21 @@ class RealBootE2ETests(
             HttpStatus.NOT_FOUND,
             operator().postForEntity("/api/v1/addresses/$addressId/sync", HttpEntity<Void>(HttpHeaders()), String::class.java).statusCode,
         )
+    }
+
+    @Test
+    fun `a path that tomcat rejects before spring gets a bare error page without the server version`() {
+        // An encoded slash is refused by Tomcat itself, so neither Spring Security nor the API's
+        // ProblemDetail handler sees the request; Tomcat's error report valve answers it.
+        val response = HttpClient.newHttpClient().send(
+            HttpRequest.newBuilder(URI.create("${restTemplate.rootUri}/api/v1/accounts/a%2Fb")).GET().build(),
+            HttpResponse.BodyHandlers.ofString(),
+        )
+
+        assertEquals(400, response.statusCode(), response.body())
+        assertTrue(response.body().contains("HTTP Status 400"), response.body())
+        assertFalse(response.body().contains("Apache Tomcat"), "the page must not name the server release: ${response.body()}")
+        assertFalse(response.body().contains("Description"), "the page must not carry the error report: ${response.body()}")
     }
 
     @Test

@@ -505,6 +505,10 @@ This service does not provide custody, signing, private key storage, wallet func
 
 - `REVERTED` is final. A transaction that a reorg reverted stays `REVERTED` even if the chain includes it again; a later event for it is a duplicate or a conflict. Nothing tracks reorgs automatically: `REVERTED` arrives only through `POST /api/v1/observed-events`, and the Alchemy adapter scans only up to the finality frontier, where reorgs are practically excluded.
 - No tenant isolation. The `READ` and `OPERATOR` roles are global: every `READ` user sees every account, and every `OPERATOR` user can change any account's addresses and report events on any chain.
+- Watched addresses are unique per `(chain_id, address, asset)` across all accounts, so registering an address that another account already watches returns `409` and tells the caller that someone watches it. Without tenant isolation this reveals nothing new; the rule is to be revisited together with isolation.
+- Basic authentication verifies the BCrypt hash on every request (about 70 ms of CPU), and nothing limits failed attempts: expose the service only behind a gateway that rate-limits requests.
+- The Alchemy rate limiter is local to each process. Instances that share one key send up to their number times the configured rate, and every `429` spends a retry attempt of the run, so run one instance per key or split the rate between them.
+- `sync_runs` has no retention: every sync request adds a row. `docs/database.md` has the SQL that deletes old finished runs.
 - The outbox publishes to the structured log only, at least once; there is no external broker, and consumers deduplicate by event id or idempotency key.
 - Self-transfers are not recorded. The Alchemy adapter skips a transfer from the watched address to itself, because it moves no funds, and only counts it: `skippedSelfTransfers` in the cursor checkpoint of that fetch and `asset.sync.provider.alchemy.skipped.rows` with the reason `SELF_TRANSFER`.
 

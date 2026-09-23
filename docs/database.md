@@ -461,6 +461,13 @@ Notes:
 - Requeues caused by a rejected executor submission or by a worker shutdown also carry `last_requeue_reason = FAILURE` but leave `failure_attempts` unchanged; `last_error` names the cause.
 - Retryable provider failures, 429 throttling, capacity failures, and expired `RUNNING` recovery increment `failure_attempts`.
 - The partial unique in-flight index intentionally excludes legacy `STARTED`.
+- No retention job removes finished runs, so every sync request adds a row for good. No other table references `sync_runs`, and a finished run is only read back by `GET /api/v1/sync-runs/{id}`, so old terminal runs can be deleted by hand:
+
+```sql
+DELETE FROM sync_runs
+WHERE status IN ('SUCCEEDED', 'FAILED')
+  AND finished_at < now() - interval '30 days';
+```
 
 ### `sync_cursors`
 

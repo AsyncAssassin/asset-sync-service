@@ -22,7 +22,7 @@ Mainnet is deliberately not mapped and the seeded `eth-mainnet` chain and asset 
 | `ASSET_SYNC_PROVIDER_ALCHEMY_START_MODE` | `registration-safe` (a new address starts at the safe block of its first sync, no backfill) or `configured-block` with `ASSET_SYNC_PROVIDER_ALCHEMY_ETH_SEPOLIA_START_BLOCK` for a bounded historical backfill |
 | `ASSET_SYNC_PROVIDER_BASE_URL` | not needed |
 
-The other Alchemy settings keep their defaults: `safe` finality, `max-window-blocks=5000`, `max-rpc-calls-per-fetch=8`, token bucket 6 burst / 3 per second.
+The other Alchemy settings keep their defaults: `safe` finality, `max-window-blocks=5000`, `max-rpc-calls-per-fetch=8`, token bucket 6 burst / 3 per second. The token bucket lives in each process: instances that share a key multiply the rate, and every `429` spends a retry attempt of the run, so run one instance per key or divide `rate-limit-capacity` and `rate-limit-refill-per-second` between the instances.
 
 The adapter reads every block once, which sets two limits:
 
