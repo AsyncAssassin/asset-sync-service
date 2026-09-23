@@ -19,8 +19,8 @@ class SyncRunRecoveryJob(
     private val logger = LoggerFactory.getLogger(SyncRunRecoveryJob::class.java)
 
     @Scheduled(
-        fixedDelayString = "\${asset-sync.sync.recovery.fixed-delay:5m}",
-        initialDelayString = "\${asset-sync.sync.recovery.initial-delay:5m}",
+        fixedDelayString = "\${asset-sync.sync.recovery.fixed-delay:1m}",
+        initialDelayString = "\${asset-sync.sync.recovery.initial-delay:1m}",
     )
     fun recoverStaleRuns() {
         try {

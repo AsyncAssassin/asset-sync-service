@@ -6,9 +6,11 @@ import com.example.assetsync.application.account.WatchedAddress
 import com.example.assetsync.application.account.WatchedAddressRepository
 import com.example.assetsync.application.account.WatchedAddressStatus
 import com.example.assetsync.infrastructure.persistence.jooq.generated.tables.references.WATCHED_ADDRESSES
+import java.time.Instant
 import java.util.UUID
 import org.jooq.DSLContext
 import org.jooq.Record
+import org.jooq.impl.DSL
 import org.springframework.stereotype.Repository
 
 @Repository
@@ -89,8 +91,35 @@ class JooqWatchedAddressRepository(
             .and(WATCHED_ADDRESSES.STATUS.eq(WatchedAddressStatus.ACTIVE.name))
             .fetchOne { it.toWatchedAddress() }
 
-    override fun findActiveByAccountId(accountId: UUID, limit: Int, offset: Int): List<WatchedAddress> =
+    override fun findById(addressId: UUID): WatchedAddress? =
         dsl
+            .select(
+                WATCHED_ADDRESSES.ID,
+                WATCHED_ADDRESSES.ACCOUNT_ID,
+                WATCHED_ADDRESSES.CHAIN_ID,
+                WATCHED_ADDRESSES.ADDRESS,
+                WATCHED_ADDRESSES.ASSET,
+                WATCHED_ADDRESSES.LABEL,
+                WATCHED_ADDRESSES.STATUS,
+                WATCHED_ADDRESSES.CREATED_AT,
+                WATCHED_ADDRESSES.UPDATED_AT,
+            )
+            .from(WATCHED_ADDRESSES)
+            .where(WATCHED_ADDRESSES.ID.eq(addressId))
+            .fetchOne { it.toWatchedAddress() }
+
+    override fun findActiveByAccountIdAfter(
+        accountId: UUID,
+        afterCreatedAt: Instant?,
+        afterId: UUID?,
+        limit: Int,
+    ): List<WatchedAddress> {
+        val afterKeyset = if (afterCreatedAt != null && afterId != null) {
+            DSL.row(WATCHED_ADDRESSES.CREATED_AT, WATCHED_ADDRESSES.ID).gt(afterCreatedAt.toOffsetDateTime(), afterId)
+        } else {
+            DSL.noCondition()
+        }
+        return dsl
             .select(
                 WATCHED_ADDRESSES.ID,
                 WATCHED_ADDRESSES.ACCOUNT_ID,
@@ -105,10 +134,31 @@ class JooqWatchedAddressRepository(
             .from(WATCHED_ADDRESSES)
             .where(WATCHED_ADDRESSES.ACCOUNT_ID.eq(accountId))
             .and(WATCHED_ADDRESSES.STATUS.eq(WatchedAddressStatus.ACTIVE.name))
+            .and(afterKeyset)
             .orderBy(WATCHED_ADDRESSES.CREATED_AT.asc(), WATCHED_ADDRESSES.ID.asc())
             .limit(limit)
-            .offset(offset)
             .fetch { it.toWatchedAddress() }
+    }
+
+    override fun updateStatus(addressId: UUID, status: WatchedAddressStatus, updatedAt: Instant): WatchedAddress? =
+        dsl
+            .update(WATCHED_ADDRESSES)
+            .set(WATCHED_ADDRESSES.STATUS, status.name)
+            .set(WATCHED_ADDRESSES.UPDATED_AT, updatedAt.toOffsetDateTime())
+            .where(WATCHED_ADDRESSES.ID.eq(addressId))
+            .returningResult(
+                WATCHED_ADDRESSES.ID,
+                WATCHED_ADDRESSES.ACCOUNT_ID,
+                WATCHED_ADDRESSES.CHAIN_ID,
+                WATCHED_ADDRESSES.ADDRESS,
+                WATCHED_ADDRESSES.ASSET,
+                WATCHED_ADDRESSES.LABEL,
+                WATCHED_ADDRESSES.STATUS,
+                WATCHED_ADDRESSES.CREATED_AT,
+                WATCHED_ADDRESSES.UPDATED_AT,
+            )
+            .fetchOne()
+            ?.toWatchedAddress()
 
     override fun countActiveByAccountId(accountId: UUID): Int =
         requireNotNull(

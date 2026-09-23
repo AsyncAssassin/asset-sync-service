@@ -8,6 +8,7 @@ import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -135,6 +136,59 @@ class RealBootE2ETests(
     }
 
     @Test
+    fun `a bridge that returns no cursor resumes from the checkpoint the provider sends`() {
+        val accountId = operator()
+            .postForEntity("/api/v1/accounts", json("""{"externalRef":"e2e-resume"}"""), Map::class.java)
+            .let { assertEquals(HttpStatus.CREATED, it.statusCode); it.body!!["id"] as String }
+        val addressId = operator()
+            .postForEntity(
+                "/api/v1/accounts/$accountId/addresses",
+                json("""{"chainId":"local-evm","address":"$RESUME_ADDRESS","asset":"USDC"}"""),
+                Map::class.java,
+            )
+            .let { assertEquals(HttpStatus.CREATED, it.statusCode); it.body!!["id"] as String }
+
+        val first = operator().postForEntity("/api/v1/addresses/$addressId/sync", HttpEntity<Void>(HttpHeaders()), Map::class.java)
+        runNextClaimedSync()
+        assertEquals("SUCCEEDED", syncRunStatus(first.body!!["id"] as String))
+        assertEquals(2, jdbcTemplate.queryForObject("SELECT count(*) FROM observed_transactions", Int::class.java))
+
+        // The final page carried no cursor. Without the checkpoint the bridge would serve its
+        // history again, and the first event, now behind the checkpoint, would fail the run.
+        val second = operator().postForEntity("/api/v1/addresses/$addressId/sync", HttpEntity<Void>(HttpHeaders()), Map::class.java)
+        runNextClaimedSync()
+        assertEquals("SUCCEEDED", syncRunStatus(second.body!!["id"] as String))
+        assertEquals("asset=USDC&limit=100&fromBlockHeight=101&fromEventIndex=0", resumeQueries.last())
+    }
+
+    @Test
+    fun `only the operator can disable a watched address, and a disabled address cannot be synced`() {
+        val accountId = operator()
+            .postForEntity("/api/v1/accounts", json("""{"externalRef":"e2e-disable"}"""), Map::class.java)
+            .let { assertEquals(HttpStatus.CREATED, it.statusCode); it.body!!["id"] as String }
+        val addressId = operator()
+            .postForEntity(
+                "/api/v1/accounts/$accountId/addresses",
+                json("""{"chainId":"local-evm","address":"0xe2e-disable","asset":"USDC"}"""),
+                Map::class.java,
+            )
+            .let { assertEquals(HttpStatus.CREATED, it.statusCode); it.body!!["id"] as String }
+        val disable = json("""{"status":"DISABLED"}""")
+
+        assertEquals(
+            HttpStatus.FORBIDDEN,
+            reader().exchange("/api/v1/addresses/$addressId", HttpMethod.PATCH, disable, String::class.java).statusCode,
+        )
+        val disabled = operator().exchange("/api/v1/addresses/$addressId", HttpMethod.PATCH, disable, Map::class.java)
+        assertEquals(HttpStatus.OK, disabled.statusCode)
+        assertEquals("DISABLED", disabled.body!!["status"])
+        assertEquals(
+            HttpStatus.NOT_FOUND,
+            operator().postForEntity("/api/v1/addresses/$addressId/sync", HttpEntity<Void>(HttpHeaders()), String::class.java).statusCode,
+        )
+    }
+
+    @Test
     fun `openapi declares http basic so swagger ui offers authorize`() {
         val apiDocs = reader().getForEntity("/v3/api-docs", String::class.java)
         assertEquals(HttpStatus.OK, apiDocs.statusCode, "unexpected api-docs response: ${apiDocs.body}")
@@ -195,20 +249,47 @@ class RealBootE2ETests(
         )
 
     companion object {
+        private const val RESUME_ADDRESS = "0xe2e-resume"
+
+        /** Query strings the resume stub received, in order. */
+        private val resumeQueries = CopyOnWriteArrayList<String>()
+
         private val providerStub: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             createContext("/") { exchange ->
-                val body = """
-                    {"events":[{"txHash":"0xe2e-tx","eventIndex":0,"address":"0xe2eaddr","asset":"USDC",
-                    "amount":1.000000000000000000,"blockHeight":1000,"confirmations":6,
-                    "direction":"INBOUND","status":"CONFIRMED"}],
-                    "nextCursor":"e2e-final","hasMore":false,"latestBlockHeight":1000,"safeBlockHeight":1000}
-                """.trimIndent().replace("\n", "")
+                val body = if (exchange.requestURI.path.contains("/addresses/$RESUME_ADDRESS/")) {
+                    resumeQueries += exchange.requestURI.rawQuery
+                    resumeBridgePage(exchange.requestURI.rawQuery)
+                } else {
+                    """
+                        {"events":[{"txHash":"0xe2e-tx","eventIndex":0,"address":"0xe2eaddr","asset":"USDC",
+                        "amount":1.000000000000000000,"blockHeight":1000,"confirmations":6,
+                        "direction":"INBOUND","status":"CONFIRMED"}],
+                        "nextCursor":"e2e-final","hasMore":false,"latestBlockHeight":1000,"safeBlockHeight":1000}
+                    """.trimIndent().replace("\n", "")
+                }
                 val bytes = body.toByteArray(StandardCharsets.UTF_8)
                 exchange.responseHeaders.add("Content-Type", "application/json")
                 exchange.sendResponseHeaders(200, bytes.size.toLong())
                 exchange.responseBody.use { it.write(bytes) }
             }
             start()
+        }
+
+        /**
+         * A bridge that never returns a cursor: it serves the address's two events at or after
+         * `(fromBlockHeight, fromEventIndex)`, or from the start of its history without them.
+         */
+        private fun resumeBridgePage(query: String?): String {
+            val params = query.orEmpty().split("&").filter { it.contains("=") }.associate { it.substringBefore("=") to it.substringAfter("=") }
+            val fromBlock = params["fromBlockHeight"]?.toLong() ?: Long.MIN_VALUE
+            val fromIndex = params["fromEventIndex"]?.toInt() ?: 0
+            val events = listOf(100L to "0xe2e-resume-1", 101L to "0xe2e-resume-2")
+                .filter { (block, _) -> block > fromBlock || (block == fromBlock && 0 >= fromIndex) }
+                .joinToString(",") { (block, txHash) ->
+                    """{"txHash":"$txHash","eventIndex":0,"address":"$RESUME_ADDRESS","asset":"USDC","amount":1,""" +
+                        """"blockHeight":$block,"confirmations":6,"direction":"INBOUND","status":"CONFIRMED"}"""
+                }
+            return """{"events":[$events],"hasMore":false,"latestBlockHeight":101,"safeBlockHeight":101}"""
         }
 
         @JvmStatic

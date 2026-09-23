@@ -27,7 +27,7 @@
 ## Implemented Features
 
 - Account creation and lookup.
-- Watched address registration with chain-specific address formats, and account-level address listing.
+- Watched address registration with chain-specific address formats, account-level address listing, and enabling or disabling an address.
 - Observed event ingestion for `local-evm`.
 - Asset registry: watched-address registration accepts only assets enabled for the chain in `asset_configs`, seeded with `USDC` on `local-evm` and `eth-sepolia` and a disabled `eth-mainnet` row.
 - Idempotent transaction lifecycle transitions: `SEEN`, `CONFIRMED`, and `REVERTED`.
@@ -100,12 +100,13 @@ Current public endpoints:
 ```text
 POST /api/v1/accounts
 GET  /api/v1/accounts/{accountId}
-POST /api/v1/accounts/{accountId}/addresses
-GET  /api/v1/accounts/{accountId}/addresses
-POST /api/v1/observed-events
-POST /api/v1/addresses/{addressId}/sync
-POST /api/v1/accounts/{accountId}/sync
-GET  /api/v1/sync-runs/{id}
+POST  /api/v1/accounts/{accountId}/addresses
+GET   /api/v1/accounts/{accountId}/addresses
+PATCH /api/v1/addresses/{addressId}
+POST  /api/v1/observed-events
+POST  /api/v1/addresses/{addressId}/sync
+POST  /api/v1/accounts/{accountId}/sync
+GET   /api/v1/sync-runs/{id}
 ```
 
 Transaction read/list endpoints are intentionally deferred and are not exposed by this MVP.
@@ -232,7 +233,7 @@ The `demo` profile is the fastest way to show every lifecycle stage and the real
 - `DemoDataSeeder` seeds an idempotent dataset on startup: one account and watched address, observed transactions in `SEEN`, `CONFIRMED`, and `REVERTED`, outbox rows in `NEW`, `PUBLISHED`, `FAILED`, and `DEAD`, and a stale `STARTED` sync run for the recovery job to abandon. Restarts do not duplicate rows.
 - Schedulers stay on, so the outbox poller, the sync worker, and the recovery job run live.
 
-Start PostgreSQL as in the quickstart, then run the app with the `demo` profile. `SERVER_PORT` must be passed as an environment variable because the simulator base URL is derived from it. The optional recovery delay override makes the stale-run recovery visible within seconds instead of the default five minutes:
+Start PostgreSQL as in the quickstart, then run the app with the `demo` profile. `SERVER_PORT` must be passed as an environment variable because the simulator base URL is derived from it. The optional recovery delay override makes the stale-run recovery visible within seconds instead of after the default one minute:
 
 ```bash
 SPRING_PROFILES_ACTIVE=demo ASSET_SYNC_DB_PORT=55432 SERVER_PORT=18080 \
@@ -388,8 +389,8 @@ Runtime configuration:
 | `ASSET_SYNC_PAGINATION_MAX_CHECKPOINT_JSON_LENGTH` | `16384` | Largest page checkpoint metadata accepted, in bytes |
 | `ASSET_SYNC_RECOVERY_ENABLED` | `true` | Enables the recovery job for expired leases and stale runs |
 | `ASSET_SYNC_RECOVERY_BATCH_SIZE` | `100` | Rows handled per recovery tick |
-| `ASSET_SYNC_RECOVERY_FIXED_DELAY` | `5m` | Delay between recovery ticks |
-| `ASSET_SYNC_RECOVERY_INITIAL_DELAY` | `5m` | Initial delay before the first recovery tick |
+| `ASSET_SYNC_RECOVERY_FIXED_DELAY` | `1m` | Delay between recovery ticks; a run left `RUNNING` by a crashed worker is requeued on the first tick after its lease expires |
+| `ASSET_SYNC_RECOVERY_INITIAL_DELAY` | `1m` | Initial delay before the first recovery tick |
 | `ASSET_SYNC_OUTBOX_PUBLISHED_RETENTION` | `7d` | Age after which published outbox rows are deleted when retention is enabled |
 | `ASSET_SYNC_OUTBOX_RETENTION_BATCH_SIZE` | `1000` | Published rows deleted per retention tick |
 | `ASSET_SYNC_OUTBOX_RETENTION_FIXED_DELAY` | `1h` | Delay between retention ticks |
@@ -402,7 +403,7 @@ Runtime configuration:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ASSET_SYNC_PROVIDER_TYPE` | `http` | `http` for the normalized HTTP bridge (the simulator in `demo`, an indexer in `prod`), `alchemy` for Alchemy JSON-RPC |
-| `ASSET_SYNC_PROVIDER_BASE_URL` | none in `prod` | HTTP bridge endpoint; required when the type is `http`, ignored for `alchemy` |
+| `ASSET_SYNC_PROVIDER_BASE_URL` | none in `prod` | HTTP bridge endpoint; required when the type is `http`, ignored for `alchemy`. The bridge page contract is in `docs/architecture.md` |
 | `ASSET_SYNC_PROVIDER_CONNECT_TIMEOUT` | `2s` | Connect timeout for provider HTTP requests |
 | `ASSET_SYNC_PROVIDER_READ_TIMEOUT` | `5s` | Read timeout for provider HTTP requests |
 | `ASSET_SYNC_PROVIDER_ALCHEMY_API_KEY` | none | Alchemy API key; required for `alchemy`, never logged or shown in health or error details |
@@ -441,6 +442,7 @@ A page fetch under `alchemy` asks for the latest block and the finality frontier
 - Provider sync is page-based. Each watched address has a `sync_cursors` row; the worker acquires a cursor lease, fetches one bounded page, ingests the full page, and only then advances the checkpoint.
 - Healthy page/account continuations increment `continuation_count`, while retryable failures and 429 backpressure increment `failure_attempts`.
 - Duplicate in-flight sync requests for the same address/account return the existing run instead of starting duplicate provider work.
+- Account sync keeps its pass over the addresses in the run checkpoint, a keyset over `(created_at, id)`, so an account larger than one claim completes instead of starting over. A busy address is revisited after the scan, and an address that fails terminally ends only itself: the others still sync and the run finishes `FAILED` with the failed addresses in `lastError`. `PATCH /api/v1/addresses/{addressId}` with `{"status":"DISABLED"}` takes such an address out of account syncs.
 - Graceful shutdown stops claiming, drains in-flight sync runs up to the worker shutdown timeout, and requeues any run interrupted afterwards without consuming its retry budget.
 - Publishing is at-least-once; downstream consumers should deduplicate by event id or idempotency key.
 - Failed publishes store a bounded error message, use bounded retry backoff, and become terminal `DEAD` rows at max attempts.
@@ -452,7 +454,7 @@ A page fetch under `alchemy` asks for the latest block and the finality frontier
 - Readiness includes PostgreSQL connectivity.
 - `/actuator/info` reports the build name and version generated by the Gradle build.
 - Health component details (database, chain provider) are shown to authenticated callers in protected profiles and to everyone in `local`; anonymous probes see only the aggregate status.
-- Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere; the Alchemy indicator shows the auth mode, the probed networks, and the state, never an endpoint or the key.
+- Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere; the Alchemy indicator shows the auth mode, the probed networks, and the state, never an endpoint or the key. Only availability failures (timeouts, transport errors, `5xx`, `429`, and for Alchemy rejected credentials) turn it `DOWN`; invalid data for one address stays `UP` with a `lastDataError` detail.
 - Structured logs include account, watched-address, transaction, sync-run, provider, and outbox identifiers.
 - Micrometer meters cover observed event ingestion, transaction transitions, immutable conflicts, sync runs and continuations, provider fetches, latency and pages, cursor leases and checkpoints, outbox batches, events, backlog, dead-letter count, scheduler tick failures, and the Alchemy adapter's JSON-RPC calls, latency, one-block fallbacks, and skipped rows.
 - `local` and `test` profiles permit all endpoints. Other profiles enable HTTP Basic for API, Swagger, and Actuator endpoints except health probes; their `401` and `403` responses use the same `ProblemDetail` format as API errors, and `401` keeps the `WWW-Authenticate: Basic` challenge. A request that the security firewall rejects before authentication, for example one with `//` or `;` in its path, gets `400` in every profile, not a challenge.

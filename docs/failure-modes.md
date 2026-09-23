@@ -135,6 +135,7 @@ Expected behavior:
 - No long-lived database locks are held while waiting for provider response.
 - Under the Alchemy provider, a repeated `pageKey`, a restarted continuation page, a row outside the requested block window, a safe frontier above the latest block, and an exhausted per-fetch RPC or time budget before the first block was drained are all retryable: the cursor stays on its block boundary and the next attempt rescans from it. A budget exhausted after at least one drained block returns that prefix instead.
 - The local token bucket waits for a token only within the fetch deadline; a wait that cannot be met is a retryable outage rather than a provider 429.
+- These availability failures, and for Alchemy rejected credentials or configuration, turn the provider health indicator `DOWN` until the next successful fetch. A data error for one address (a `4xx`, malformed JSON, an oversized body, an unmappable Alchemy row) keeps the indicator's state and appears as its `lastDataError` detail.
 
 Operational signal:
 
@@ -156,6 +157,7 @@ Expected behavior:
 - Classify the page as terminal provider data invalid.
 - Do not ingest any event from a page that fails validation.
 - An event that passes page validation but fails ingestion deterministically is terminal as well: an immutable-field conflict, an address that is not watched, a rejected ingest rule, or a broken domain invariant. Events of the page ingested before it stay committed, and the retry budget is not spent on attempts that would fail the same way.
+- In an account sync a terminal failure ends only that address. The pass continues with the other addresses and, once complete, marks the run `FAILED` with `<n> of <m> addresses failed terminally: <addressId>: <error>; ...` in `last_error`. An address that keeps failing is taken out of account syncs with `PATCH /api/v1/addresses/{addressId}` and `{"status":"DISABLED"}`.
 - Do not advance `sync_cursors`.
 - Mark the current sync run `FAILED` with bounded `last_error`.
 - Lifecycle updates for events already behind the checkpoint are not delivered through the sync path. They arrive through `POST /api/v1/observed-events`, and provider adapters are expected to emit only finalized events.
@@ -173,7 +175,7 @@ Scenario:
 
 Expected behavior:
 
-- A busy cursor lease does not mark success. Direct address sync requeues as `LEASE_BUSY`; account sync skips that address, processes later addresses, and requeues to revisit skipped work.
+- A busy cursor lease does not mark success. Direct address sync requeues as `LEASE_BUSY`; account sync defers that address, finishes its scan of the other addresses, and revisits the deferred ones once per claim until their leases are free, requeueing as `LEASE_BUSY` while any is still busy.
 - A worker must extend its cursor lease before checkpointing and through the cursor heartbeat while long page work is in progress. If extension fails, checkpoint advancement is skipped and the run is retried as a stale-owner failure.
 - Busy lease continuations increment `continuation_count`, not `failure_attempts`.
 - Stale checkpoint advancement affects zero rows. Already committed page events remain valid and the old checkpoint causes safe idempotent replay.
@@ -296,7 +298,7 @@ Expected behavior:
 - Already committed observed events and outbox rows remain valid.
 - If the crash happens after a page checkpoint advances but before sync-run completion, retry resumes from the advanced cursor.
 - If the crash happens before checkpoint advancement, retry replays the previous page and ingestion idempotency handles duplicates.
-- The `RUNNING` sync run is recovered after lease expiry and may execute again.
+- The `RUNNING` sync run is recovered after lease expiry and may execute again. The worker claims only `QUEUED` runs, so the recovery job requeues it on its first tick after the lease expires: every minute by default (`asset-sync.sync.recovery.fixed-delay`), which spends one retry attempt. Until then, a new sync request for the same target returns that run.
 - Duplicate future provider events are safe because observed-event ingestion is idempotent.
 - This is at-least-once sync execution, not exactly-once provider work.
 

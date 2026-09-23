@@ -42,6 +42,8 @@ class FakeChainProvider : ChainProviderPort {
                 key = key,
                 cursor = request.cursor,
                 limit = request.limit,
+                fromBlockHeight = request.fromBlockHeight,
+                fromEventIndex = request.fromEventIndex,
             ),
         )
         recordTransactionState()
@@ -265,6 +267,8 @@ data class FakeChainProviderPageRequest(
     val key: FakeChainProviderKey,
     val cursor: String?,
     val limit: Int,
+    val fromBlockHeight: Long? = null,
+    val fromEventIndex: Int? = null,
 )
 
 data class FakeChainProviderPage(

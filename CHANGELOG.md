@@ -8,11 +8,16 @@ All notable changes to this project are documented in this file. The format is b
 
 - `429 sync-queue-full` responses carry `Retry-After` with the sync worker claim interval (`asset-sync.sync.worker.fixed-delay`, 5 seconds by default), rounded up to whole seconds.
 - The OpenAPI document declares HTTP Basic as the global security requirement, so Swagger UI offers **Authorize** and can switch between the `READ` and `OPERATOR` users.
+- `PATCH /api/v1/addresses/{addressId}` for `OPERATOR` sets a watched address `ACTIVE` or `DISABLED`. A disabled address is skipped by account sync, refused by address sync and event ingestion, and resumes from its stored cursor once enabled again.
+- HTTP bridge requests carry the address's durable checkpoint as `fromBlockHeight` and `fromEventIndex`, and the bridge page contract is documented in `docs/architecture.md`.
 
 ### Changed
 
 - **Breaking:** watched-address registration checks the address format of its chain: `0x` and 40 hex digits on `eth-sepolia` and `eth-mainnet`, no whitespace, `/`, or `:` on `local-evm`, and no control characters on any chain. A malformed address returns `400 invalid-request`. Observed events apply the same rules to `txHash`, with 64 hex digits on `eth-sepolia` and `eth-mainnet`.
 - **Breaking:** outbox idempotency keys are built from the observed transaction id as `observed-tx:{transactionId}:status:{status}:v:{version}` instead of the natural key. Existing rows keep their keys, and no new key can equal an old one.
+- In an account sync, an address that fails terminally ends only itself: the pass continues with the other addresses, and the run finishes `FAILED` with `<n> of <m> addresses failed terminally: <addressId>: <error>; ...` in `lastError`.
+- Provider health turns `DOWN` only on availability failures. Invalid data for one address, such as a `4xx` answer, malformed JSON, or an unmappable Alchemy row, keeps the state and appears as `lastDataError`, so one bad address no longer turns `/actuator/health` into `503`.
+- The recovery job runs every minute and first a minute after startup instead of every five minutes, so a run left `RUNNING` by a crashed worker is requeued about a minute after its lease expires.
 - A sync run whose event fails ingestion deterministically fails at once instead of spending its retries: an event that breaks a domain invariant or an ingest rule is provider data invalid, and events of a chain disabled after registration are a provider configuration failure.
 
 ### Fixed
@@ -22,6 +27,8 @@ All notable changes to this project are documented in this file. The format is b
 - An amount with an extreme exponent such as `1e2147483647` passed the `numeric(38, 18)` check through an `Int` overflow and was stored as a confirmed zero. Digits are now counted in `Long`, exponent notation within range still works, and amounts are stored at scale 18. REST ingestion and provider pages share this rule.
 - A provider page is checked in full before its first event is written: an amount that is negative or does not fit `numeric(38, 18)`, which PostgreSQL used to round silently, or a malformed transaction hash fails the run terminally and writes nothing.
 - Two transactions whose hash or address contains `:` could share an outbox idempotency key, and the lifecycle event of the second one was dropped.
+- An account sync that did not fit one claim never completed: each claim had to visit every address again, so an account with more addresses than the per-claim budget allows ran until the continuation limit failed it. The pass now keeps its keyset in the run checkpoint and completes over several claims.
+- A final HTTP bridge page without a cursor cleared the stored cursor, so the next sync fetched the bridge's history from the start and failed on the first event behind the checkpoint. The next request now carries the checkpoint, and the stored cursor is kept when the final page had no events.
 - Docker Compose gives the application a 40-second stop grace period, longer than the 30-second graceful-shutdown phase. With Docker's default 10 seconds a sync run still in flight was killed before it could requeue, waited in `RUNNING` for recovery, and lost a retry attempt.
 
 ### Security

@@ -183,6 +183,22 @@ The page contract is append-only. Events inside a page must arrive in non-decrea
 
 On shutdown the worker acts as a Spring `SmartLifecycle` in the web server's graceful-shutdown phase: it stops claiming, waits up to `asset-sync.sync.worker.shutdown-timeout` for in-flight runs, then interrupts the rest. Interrupted runs return to `QUEUED` without consuming their retry budget, and their cursor leases are released first.
 
+### HTTP Bridge Page Contract
+
+`HttpChainProvider` speaks to a normalized HTTP bridge: an indexer in `prod`, the bundled simulator in `demo`.
+
+Request: `GET {base-url}/v1/chains/{chainId}/addresses/{address}/events` with the query parameters `asset`, `limit` (the page size), `cursor` (the stored resume token, absent before the first page), and, once the address has a checkpoint, `fromBlockHeight` and `fromEventIndex` of its last processed event. A bridge resumes from `cursor` when one is sent, otherwise from the first event at or after `(fromBlockHeight, fromEventIndex)`, and from the start of its history when neither is sent. Serving the checkpoint event itself again is harmless; serving anything before it fails the page.
+
+Response body, at most `max-provider-page-bytes`:
+
+- `events` (required): objects with `txHash`, `eventIndex`, `address`, `asset`, `amount` (a JSON number or decimal string), `blockHeight`, `confirmations`, `direction` (`INBOUND` or `OUTBOUND`), and `status` (`SEEN`, `CONFIRMED`, or `REVERTED`), in non-decreasing `(blockHeight, eventIndex, txHash)` order and at most `limit` of them.
+- `hasMore` (required): whether another page follows now; `true` requires a `nextCursor` that differs from the request cursor.
+- `nextCursor` or `resumeCursor`: the opaque token for the next request; when both are sent they must be equal. A final page may omit it only when it carries events or `safeBlockHeight` / `latestBlockHeight` progress. After such a page the stored cursor is kept when the page had no events and cleared when it had some, because replaying from the old cursor would return those events behind the checkpoint.
+- `latestBlockHeight`, `safeBlockHeight`: block high-water, optional; `safeBlockHeight` must not exceed `latestBlockHeight`.
+- `metadata`: an optional JSON object stored as the address checkpoint, at most `max-checkpoint-json-length` bytes.
+
+Status handling: `2xx` is parsed as above; `408`, `429` (honoring `Retry-After`), and `5xx` are retryable and spend the run's retry budget; any other `4xx`, malformed JSON, and an oversized body are terminal provider data invalid for that address. Only the retryable class turns the `httpChainProvider` health indicator `DOWN`.
+
 Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. Retryable provider failures, including 429 throttling, increment `failure_attempts`. Provider configuration failures (`ProviderConfigurationException`: rejected credentials, a chain without a provider network mapping, a fetch the configured provider cannot serve) are terminal like malformed pages, so they never burn the retry budget on attempts that cannot succeed.
 
 ### Alchemy Provider Page Building
@@ -208,22 +224,29 @@ sequenceDiagram
     participant Provider as ActiveChainProvider
     participant DB as PostgreSQL
 
-    Worker->>Repo: count active account addresses
-    Worker->>DB: read run_checkpoint.accountNextOffset
-    loop bounded circular traversal
-        Worker->>Repo: fetch deterministic active address slice
+    Worker->>Repo: count active account addresses (cap check)
+    Worker->>DB: read run_checkpoint.accountPass
+    loop scan after the keyset (created_at, id)
+        Worker->>Repo: fetch next active addresses after the keyset
         alt cursor lease acquired
             Worker->>Cursor: acquire address cursor lease
             Worker->>Provider: fetch bounded page(s)
             Worker->>Cursor: checkpoint after page ingest
         else cursor lease busy
-            Worker->>Worker: count address as visited and skip for this claim
+            Worker->>Worker: defer the address to the revisit list
+        else terminal address failure
+            Worker->>Worker: record the address and its error
         end
-        Worker->>DB: persist next traversal offset on continuation
+        Worker->>Worker: move the keyset past the address
     end
+    loop revisit deferred addresses once per claim
+        Worker->>Cursor: acquire address cursor lease
+        Worker->>Provider: fetch bounded page(s)
+    end
+    Worker->>DB: persist accountPass on continuation, or finish the run
 ```
 
-Account sync does not own a provider cursor. It stores only traversal fairness metadata in `sync_runs.run_checkpoint`; provider resume state remains per watched address in `sync_cursors`.
+Account sync does not own a provider cursor; provider resume state remains per watched address in `sync_cursors`. The run checkpoint holds only the pass: the keyset of the last address the scan finished, whether the scan is complete, the number of addresses visited, the addresses deferred because their lease was busy (at most 100), and the addresses that failed terminally (the count and the first 20 with their errors), well below the 16 KiB limit of `run_checkpoint`. The claim budget (pages, events, duration) ends a claim between addresses; an address with pages left ends the claim without moving the keyset, so the next claim drains it first. The run completes when the scan is complete and no revisit is pending: `SUCCEEDED`, or `FAILED` with the failed addresses in `last_error`. A run queued by an earlier version carries no pass and starts a fresh one, which only replays idempotent cursors.
 
 ### Observed Event Ingestion
 
@@ -686,6 +709,7 @@ All endpoints are under `/api/v1`.
 - `GET /api/v1/accounts/{accountId}`
 - `POST /api/v1/accounts/{accountId}/addresses`
 - `GET /api/v1/accounts/{accountId}/addresses`
+- `PATCH /api/v1/addresses/{addressId}`
 - `POST /api/v1/addresses/{addressId}/sync`
 - `POST /api/v1/accounts/{accountId}/sync`
 - `POST /api/v1/observed-events`
@@ -1171,7 +1195,7 @@ Health checks:
 - Spring Actuator liveness.
 - Spring Actuator readiness.
 - PostgreSQL connectivity.
-- Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere. The Alchemy indicator reports the provider, the auth mode, the probed networks, and the state, plus the scrubbed error after a failed fetch; never an endpoint, a header, or the API key.
+- Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere. It turns `DOWN` only on availability failures: a timeout, a transport error, `5xx`, `429`, and for Alchemy also rejected credentials or configuration. Invalid data for one address, such as a `4xx` answer or malformed JSON, keeps its state and appears as the `lastDataError` detail, so one bad address cannot turn the aggregate health into `503`; `asset.sync.provider.pages` counts those pages as `MALFORMED`. The Alchemy indicator reports the provider, the auth mode, the probed networks, and the state, plus the scrubbed error after a failed fetch; never an endpoint, a header, or the API key.
 - Component details are shown to authenticated callers (`management.endpoint.health.show-details: when-authorized`) and to everyone in `local`; anonymous probes see only the aggregate status.
 
 Build information:

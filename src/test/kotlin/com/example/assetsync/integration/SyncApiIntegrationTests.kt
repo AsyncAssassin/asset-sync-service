@@ -213,7 +213,7 @@ class SyncApiIntegrationTests(
     }
 
     @Test
-    fun `empty final high water page preserves event checkpoint and updates finalized high water`() {
+    fun `empty final high water page preserves event checkpoint, cursor, and updates finalized high water`() {
         val accountId = createAccount()
         val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-high-water-after-cursor")
         val addressId = watchedAddress["id"].asText()
@@ -257,10 +257,80 @@ class SyncApiIntegrationTests(
         runNextClaimedSyncs()
 
         assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
-        assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        // The empty final page omitted its cursor; the stored one still points right after the
+        // last processed event, so a bridge that resumes only by cursor keeps working.
+        assertEquals(
+            "page-2",
+            singleString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)),
+        )
         assertEquals(100L, singleLong("SELECT last_processed_block_height FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
         assertEquals(5, singleInt("SELECT last_processed_event_index FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
         assertEquals(120L, singleLong("SELECT last_finalized_block_height FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+    }
+
+    @Test
+    fun `final page with events and no cursor clears the cursor and the next fetch resumes from the checkpoint`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-final-events-no-cursor")
+        val addressId = watchedAddress["id"].asText()
+
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-final-events-no-cursor",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = listOf(
+                            providerEvent(txHash = "0xsync-final-events-1", address = "0xsync-final-events-no-cursor", blockHeight = 100),
+                        ),
+                        nextCursor = "page-2",
+                        hasMore = true,
+                        latestBlockHeight = 100,
+                        safeBlockHeight = 100,
+                    ),
+                ),
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = "page-2",
+                        events = listOf(
+                            providerEvent(txHash = "0xsync-final-events-2", address = "0xsync-final-events-no-cursor", blockHeight = 101),
+                            providerEvent(txHash = "0xsync-final-events-3", address = "0xsync-final-events-no-cursor", eventIndex = 4, blockHeight = 102),
+                        ),
+                        nextCursor = null,
+                        hasMore = false,
+                        latestBlockHeight = 102,
+                        safeBlockHeight = 102,
+                    ),
+                ),
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = emptyList(),
+                        nextCursor = null,
+                        hasMore = false,
+                        latestBlockHeight = 110,
+                        safeBlockHeight = 110,
+                    ),
+                ),
+            ),
+        )
+
+        val firstRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+        // Replaying from "page-2" would return both events of the final page, now behind the checkpoint.
+        assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", firstRunId))
+        assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+
+        val secondRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", secondRunId))
+        val resumed = fakeChainProvider.requestedPageRequests().last()
+        assertNull(resumed.cursor)
+        assertEquals(102L, resumed.fromBlockHeight)
+        assertEquals(4, resumed.fromEventIndex)
     }
 
     @Test

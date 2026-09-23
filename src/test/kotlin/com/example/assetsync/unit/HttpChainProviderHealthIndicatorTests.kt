@@ -67,6 +67,29 @@ class HttpChainProviderHealthIndicatorTests {
     }
 
     @Test
+    fun `a data error for one address keeps health up with a detail while a 5xx turns it down`() {
+        responseStatus.set(200)
+        provider.fetchObservedEventsPage(pageRequest())
+
+        responseStatus.set(404)
+        assertThrows<ProviderDataInvalidException> { provider.fetchObservedEventsPage(pageRequest()) }
+        val afterDataError = indicator.health()
+        assertEquals(Status.UP, afterDataError.status, "a 4xx for one address is not a provider outage")
+        assertEquals("Provider returned HTTP 404 for a watched address.", afterDataError.details["lastDataError"])
+
+        responseStatus.set(200)
+        responseBody.set("""{"events":"not-a-list","hasMore":false}""")
+        assertThrows<ProviderDataInvalidException> { provider.fetchObservedEventsPage(pageRequest()) }
+        assertEquals(Status.UP, indicator.health().status, "malformed JSON is a data error too")
+
+        responseStatus.set(503)
+        assertThrows<ChainProviderUnavailableException> { provider.fetchObservedEventsPage(pageRequest()) }
+        val down = indicator.health()
+        assertEquals(Status.DOWN, down.status)
+        assertEquals("Provider returned HTTP 503.", down.details["error"])
+    }
+
+    @Test
     fun `missing events is malformed but explicit empty events page is valid`() {
         responseStatus.set(200)
         responseBody.set("""{"hasMore":false,"nextCursor":"missing-events"}""")

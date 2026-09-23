@@ -7,6 +7,7 @@ import com.example.assetsync.application.account.AssetConfigRepository
 import com.example.assetsync.application.sync.ChainProviderEventsPageRequest
 import com.example.assetsync.application.sync.ChainProviderUnavailableException
 import com.example.assetsync.application.sync.ProviderConfigurationException
+import com.example.assetsync.application.sync.ProviderDataInvalidException
 import com.example.assetsync.config.AlchemyNetworkProperties
 import com.example.assetsync.config.AlchemyProviderProperties
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProvider
@@ -82,6 +83,24 @@ class AlchemyChainProviderHealthIndicatorTests {
         stub.responder = chain.responder()
         provider.fetchObservedEventsPage(pageRequest("eth-sepolia"))
         assertEquals(Status.UP, indicator.health().status, "a later successful fetch recovers")
+    }
+
+    @Test
+    fun `invalid data for one address keeps health up with a scrubbed detail`() {
+        val provider = provider(probedNetworks = mapOf("eth-sepolia" to 100L))
+        val indicator = AlchemyChainProviderHealthIndicator(provider)
+        provider.fetchObservedEventsPage(pageRequest("eth-sepolia"))
+
+        stub.responder = null
+        stub.responseStatus = 400
+        assertThrows<ProviderDataInvalidException> { provider.fetchObservedEventsPage(pageRequest("eth-sepolia")) }
+
+        val health = indicator.health()
+        assertEquals(Status.UP, health.status, "a rejected request for one address is not an Alchemy outage")
+        assertEquals("fetch-succeeded", health.details["state"])
+        assertEquals("Alchemy returned HTTP 400 for eth_blockNumber on network eth-sepolia.", health.details["lastDataError"])
+        assertNull(health.details["error"])
+        assertFalse(health.details.toString().contains(apiKey), health.details.toString())
     }
 
     @Test

@@ -2,6 +2,8 @@ package com.example.assetsync.api.dto
 
 import com.example.assetsync.application.account.Account
 import com.example.assetsync.application.account.WatchedAddress
+import com.example.assetsync.application.account.WatchedAddressStatus
+import jakarta.validation.constraints.AssertTrue
 import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.Pattern
 import jakarta.validation.constraints.Size
@@ -39,6 +41,17 @@ data class RegisterWatchedAddressRequest(
     @field:Size(max = MAX_LABEL_LENGTH, message = "label must be at most $MAX_LABEL_LENGTH characters")
     val label: String? = null,
 )
+
+data class UpdateWatchedAddressRequest(
+    @field:NotBlank(message = "status is required")
+    val status: String = "",
+) {
+    @get:AssertTrue(message = "status must be ACTIVE or DISABLED")
+    val isStatusValid: Boolean
+        get() = status.isBlank() || WatchedAddressStatus.entries.any { it.name == status.trim() }
+
+    fun toStatus(): WatchedAddressStatus = WatchedAddressStatus.valueOf(status.trim())
+}
 
 data class WatchedAddressResponse(
     val id: UUID,

@@ -118,8 +118,10 @@ asset-sync:
     recovery:
       enabled: ${ASSET_SYNC_RECOVERY_ENABLED:true}
       batch-size: ${ASSET_SYNC_RECOVERY_BATCH_SIZE:100}
-      fixed-delay: ${ASSET_SYNC_RECOVERY_FIXED_DELAY:5m}
-      initial-delay: ${ASSET_SYNC_RECOVERY_INITIAL_DELAY:5m}
+      # One worker lease: a run left RUNNING by a crashed worker is requeued about a minute
+      # after its lease expires.
+      fixed-delay: ${ASSET_SYNC_RECOVERY_FIXED_DELAY:1m}
+      initial-delay: ${ASSET_SYNC_RECOVERY_INITIAL_DELAY:1m}
     worker:
       enabled: ${ASSET_SYNC_WORKER_ENABLED:true}
       fixed-delay: ${ASSET_SYNC_WORKER_FIXED_DELAY:5s}

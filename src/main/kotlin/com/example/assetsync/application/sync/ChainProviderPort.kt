@@ -22,7 +22,9 @@ data class ChainProviderEventsPageRequest(
     val asset: String,
     val cursor: String?,
     val limit: Int,
+    /** The durable checkpoint (last processed event); a provider without a cursor resumes from it. */
     val fromBlockHeight: Long? = null,
+    val fromEventIndex: Int? = null,
     val toBlockHeight: Long? = null,
     val safeBlockHeight: Long? = null,
     val checkpoint: JsonNode? = null,

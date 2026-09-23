@@ -57,6 +57,22 @@ class WatchedAddressApplicationService(
         )
     }
 
+    /**
+     * Enables or disables a watched address. A disabled address is skipped by account sync and
+     * refused by address sync and event ingestion; enabling it again resumes from its stored cursor.
+     * Setting the current status again changes nothing.
+     */
+    @Transactional
+    fun updateStatus(addressId: UUID, status: WatchedAddressStatus): WatchedAddress {
+        val current = watchedAddressRepository.findById(addressId)
+            ?: throw UnknownWatchedAddressException(addressId)
+        if (current.status == status) {
+            return current
+        }
+        return watchedAddressRepository.updateStatus(addressId = addressId, status = status, updatedAt = Instant.now(clock))
+            ?: throw UnknownWatchedAddressException(addressId)
+    }
+
     @Transactional(readOnly = true)
     fun listWatchedAddresses(accountId: UUID, page: Int, size: Int): WatchedAddressPage {
         if (!accountRepository.existsById(accountId)) {

@@ -5,6 +5,7 @@ import com.example.assetsync.application.account.DuplicateAccountExternalRefExce
 import com.example.assetsync.application.account.DuplicateWatchedAddressException
 import com.example.assetsync.application.account.InvalidWatchedAddressException
 import com.example.assetsync.application.account.InvalidWatchedAddressPageException
+import com.example.assetsync.application.account.UnknownWatchedAddressException
 import com.example.assetsync.application.account.UnsupportedAssetException
 import com.example.assetsync.application.account.UnsupportedChainException
 import com.example.assetsync.application.sync.SyncQueueFullException
@@ -212,6 +213,19 @@ class ApiExceptionHandler {
             type = "not-found",
             title = "Watched address not found",
             detail = "Active watched address ${exception.addressId} was not found.",
+            request = request,
+        )
+
+    @ExceptionHandler(UnknownWatchedAddressException::class)
+    fun handleUnknownWatchedAddress(
+        exception: UnknownWatchedAddressException,
+        request: HttpServletRequest,
+    ): ResponseEntity<ProblemDetail> =
+        problem(
+            status = HttpStatus.NOT_FOUND,
+            type = "not-found",
+            title = "Watched address not found",
+            detail = "Watched address ${exception.addressId} was not found.",
             request = request,
         )
 

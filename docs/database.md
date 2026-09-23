@@ -418,7 +418,7 @@ Key columns:
 | `attempts` | `integer` | no | Worker claim attempts |
 | `failure_attempts` | `integer` | no | Retryable failure budget counter |
 | `continuation_count` | `integer` | no | Healthy continuation requeue counter |
-| `run_checkpoint` | `jsonb` | no | Run-local metadata, currently account traversal offset |
+| `run_checkpoint` | `jsonb` | no | Run-local metadata: the account-sync pass (`accountPass`: scan keyset, scan completion, visited count, deferred busy addresses, failed addresses) |
 | `last_requeue_reason` | `text` | yes | `FAILURE`, `CONTINUATION`, or `LEASE_BUSY` |
 | `next_attempt_at` | `timestamptz` | no | Earliest claim/retry time |
 | `locked_by` | `varchar(200)` | yes | Current worker owner for `RUNNING` |
@@ -467,7 +467,7 @@ Key columns:
 | Column | Type | Nullable | Notes |
 | --- | --- | --- | --- |
 | `watched_address_id` | `uuid` | no | Primary key and FK to `watched_addresses(id)` |
-| `provider_cursor` | `text` | yes | Opaque provider resume token |
+| `provider_cursor` | `text` | yes | Opaque provider resume token; kept after an empty final page without a cursor, cleared after a final page with events and without one |
 | `checkpoint` | `jsonb` | no | Provider metadata object |
 | `last_processed_block_height` | `bigint` | yes | Durable high-water block |
 | `last_processed_event_index` | `integer` | yes | Durable high-water event index |

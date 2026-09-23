@@ -30,6 +30,7 @@ Target areas:
 - Application command validation helpers where not covered by API tests.
 - Alchemy provider configuration and adapter: static validation rules, rollout rules, JSON-RPC error classification, secret scrubbing in header and path auth modes, health details, the cursor codec, transfer mapping from a captured-shape fixture, amount conversion, the range scan with its one-block fallback, `pageKey` hazards, budget exhaustion, finality and start modes, and the rate limiter.
 - Documentation drift guards: every changeset file, meter name, `ProblemDetail` type, and environment placeholder in the code and configuration must appear in the docs.
+- Provider health indicators: a data error for one address keeps the indicator `UP` with `lastDataError`, while an availability failure turns it `DOWN`.
 
 Required cases:
 
@@ -77,12 +78,12 @@ Required cases:
 | Outbox poller | `FOR UPDATE SKIP LOCKED` prevents duplicate claims across pollers |
 | Publisher retry | failed publish increments attempts and schedules `next_attempt_at` |
 | Sync cursors | lease acquire/release/reclaim, expired lease fencing, stale token rejection, heartbeat extension, high-water preservation |
-| Provider pages | missing required fields, explicit empty page, high-water-only final page, byte cap, cursor progress, multi-page success, an invalid amount or transaction hash failing the whole page before any write, a chain disabled after registration failing the run terminally |
+| Provider pages | missing required fields, explicit empty page, high-water-only final page, byte cap, cursor progress, multi-page success, an invalid amount or transaction hash failing the whole page before any write, a chain disabled after registration failing the run terminally, a final page without a cursor keeping the stored cursor only when it had no events, and the next fetch carrying the checkpoint as `fromBlockHeight` and `fromEventIndex` |
 | Sync continuation | page failure retry from checkpoint, continuation count separate from failure attempts |
-| Account traversal | busy early address is skipped while later addresses are processed |
+| Account traversal | busy early address is skipped while later addresses are processed; a pass larger than one claim resumes from its keyset and completes; an address registered between claims joins the pass; an address with pages left is drained before the scan moves on; a busy address is revisited after the scan; a terminally failing address is reported in `last_error` while the others sync, and disabling it lets the account sync pass |
 | Sync shutdown | draining finishes an in-flight run, interruption requeues without failure budget, a stopped worker refuses claims |
 | Asset registry | changeset 015 seeds and constraints, unknown and disabled asset rejection, disabled chain precedence, Sepolia casing normalization, rollout preflight query |
-| Protected security chain | a path the firewall rejects keeps its `400` without a Basic challenge, with or without credentials; `/simulator` requires authentication in `prod` and stays open under `demo`, where a non-positive `limit` is a `400` ProblemDetail; the OpenAPI document declares HTTP Basic as the global requirement |
+| Protected security chain | a path the firewall rejects keeps its `400` without a Basic challenge, with or without credentials; `/simulator` requires authentication in `prod` and stays open under `demo`, where a non-positive `limit` is a `400` ProblemDetail; the OpenAPI document declares HTTP Basic as the global requirement; an HTTP bridge that returns no cursor resumes from the checkpoint the provider sends |
 | Provider selection | `prod` boots with the HTTP bridge by default and rejects a blank `base-url`; `type=alchemy` boots without `base-url`, wires only Alchemy beans, probes `eth-sepolia` with a bearer token, exposes health without the key, and fails fast on a missing key, HTTP 401, an enabled chain without a network mapping, and legacy watched addresses; `local` keeps the fake provider |
 | Alchemy sync | the real worker against the Alchemy adapter and a scripted JSON-RPC stub in path auth mode: `registration-safe` idle start without backfill, ingestion and confirmation of whole pages below the finality frontier with outbox events, cursor and high-water advancement, retry from the durable cursor after HTTP 500 and after a transport failure with a scrubbed `last_error`, `Retry-After` on 429, and continuation across claims without failure attempts |
 
@@ -110,6 +111,7 @@ Required cases:
 | `GET /api/v1/accounts/{accountId}` | found, not found, invalid UUID |
 | `POST /api/v1/accounts/{accountId}/addresses` | create success, account not found, chain disabled/not found, duplicate address, validation failures, per-chain address format |
 | `GET /api/v1/accounts/{accountId}/addresses` | list success, account not found |
+| `PATCH /api/v1/addresses/{addressId}` | disable and enable again, unchanged status keeps `updated_at`, disabled address refused by sync, unknown address, invalid status, operator-only in protected profiles |
 | `POST /api/v1/observed-events` | created, updated, no-change duplicate, immutable conflict, validation failures, per-chain transaction-hash format, extreme exponent amounts, identities that differ only around `:` keeping separate outbox events |
 | `POST /api/v1/addresses/{addressId}/sync` | success, address not found, provider timeout, multi-page checkpointing, retry from page cursor, full queue with `Retry-After` |
 | `POST /api/v1/accounts/{accountId}/sync` | success, account not found, provider failure, busy cursor fairness |

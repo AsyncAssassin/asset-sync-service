@@ -38,8 +38,9 @@ GET  /api/v1/accounts/{accountId}
 ### Watched Addresses
 
 ```text
-POST /api/v1/accounts/{accountId}/addresses
-GET  /api/v1/accounts/{accountId}/addresses
+POST  /api/v1/accounts/{accountId}/addresses
+GET   /api/v1/accounts/{accountId}/addresses
+PATCH /api/v1/addresses/{addressId}
 ```
 
 ### Observed Events
@@ -214,7 +215,41 @@ Response:
 
 `page` must be between `0` and `10000`. `size` must be between `1` and `100`. Values outside those bounds return `400 Bad Request` with `invalid-pagination`.
 
-## 7. Ingest Observed Event
+## 7. Update Watched Address Status
+
+Enables or disables a watched address. Requires the `OPERATOR` role in the protected profiles.
+
+Request:
+
+```http
+PATCH /api/v1/addresses/6df29db1-96d2-4665-8945-266c7f90138e
+Content-Type: application/json
+```
+
+```json
+{
+  "status": "DISABLED"
+}
+```
+
+Response:
+
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+```
+
+The body is the watched address in its new status, in the same shape as the registration response.
+
+Behavior:
+
+- `status` is required and must be `ACTIVE` or `DISABLED`; any other value returns `400` with `validation-failed`.
+- An unknown address id returns `404` with `not-found`.
+- Setting the current status again returns the address unchanged.
+- A disabled address is skipped by account sync, refused by `POST /api/v1/addresses/{addressId}/sync` with `404`, and does not accept observed events. Enabling it again resumes sync from its stored cursor.
+- This is the way to take an address that keeps failing terminally out of account syncs; see Start Account Sync.
+
+## 8. Ingest Observed Event
 
 Ingests one observed transaction event. This endpoint is idempotent by natural key and state-machine semantics.
 
@@ -309,7 +344,7 @@ Idempotency behavior:
 - Immutable field conflicts return `409 Conflict`.
 - `REVERTED` is terminal in the MVP.
 
-## 8. Deferred Transaction List Endpoint
+## 9. Deferred Transaction List Endpoint
 
 The current implementation does not expose transaction listing/read endpoints. The response shape below is retained as a deferred design target.
 
@@ -356,7 +391,7 @@ Response:
 }
 ```
 
-## 9. Deferred Get Transaction Endpoint
+## 10. Deferred Get Transaction Endpoint
 
 The current implementation does not expose this endpoint.
 
@@ -368,7 +403,7 @@ GET /api/v1/transactions/5e1c9c94-6e36-4fb9-bb27-67800e88ac51
 
 Response shape is the same transaction object used by the list endpoint.
 
-## 10. Start Address Sync
+## 11. Start Address Sync
 
 Enqueues a durable sync run for one watched address. The POST request validates that the address exists, creates or reuses an in-flight `sync_runs` row, and returns before provider work starts. Local/test profiles use the fake provider; non-local/test profiles use the HTTP provider from the background worker. Provider pagination and cursor checkpoints are internal; the public API exposes the durable run state only.
 
@@ -419,14 +454,15 @@ Failure behavior:
 - Provider timeout or provider unavailability no longer bubbles to POST. The worker stores concise failure detail in `lastError` and either requeues the run with backoff or marks it `FAILED` after max attempts.
 - Healthy page limits and account traversal limits requeue the same run as a continuation without consuming retry budget.
 - HTTP 429 throttling is retryable provider backpressure. A valid `Retry-After` value influences the next attempt delay.
+- Every HTTP bridge request carries the address's durable checkpoint as `fromBlockHeight` and `fromEventIndex`, so a bridge that returned a final page without a cursor resumes from there instead of from the start of its history. See the HTTP bridge page contract in `docs/architecture.md`.
 - Events committed before a provider failure remain valid.
 - The API must not report provider completion from POST; clients poll `GET /api/v1/sync-runs/{id}`.
 
-## 11. Start Account Sync
+## 12. Start Account Sync
 
 Enqueues sync for all active watched addresses under one account. The POST behavior is the same as address sync: validate account existence, create or reuse an in-flight run, and return `202 Accepted` with a pollable location.
 
-Account sync uses per-address cursors and a run-local traversal offset. If one address cursor is busy because a direct address sync owns it, the account run skips that address for the current claim, processes later active addresses, and requeues a healthy continuation to revisit skipped work. This prevents an early busy or very large address from starving later addresses.
+Account sync uses per-address cursors and a pass over the account's active addresses in `(created_at, id)` order. The pass keeps its keyset in the run checkpoint, so a run whose addresses do not fit one claim resumes where the previous claim stopped and completes once every address has been synced; addresses registered or disabled between claims neither shift it nor get visited twice. An address whose cursor is busy because a direct address sync owns it is deferred and revisited after the scan, and an address with provider pages left keeps the pass on it until it is drained.
 
 Request:
 
@@ -464,9 +500,10 @@ Behavior:
 - For each address, acquire the per-address cursor lease and fetch bounded provider pages until the page stream is done or a configured continuation limit is reached.
 - Ingest each provider event independently and checkpoint only after the full provider page is ingested.
 - A retryable provider failure requeues the overall sync run unless max attempts has been reached.
+- A terminal failure of one address (provider data invalid, provider configuration, a database constraint) ends only that address; the pass goes on with the others. When the pass completes, a run with such failures is `FAILED` and its `lastError` reads `<n> of <m> addresses failed terminally: <addressId>: <error>; ...`, capped at the stored error length. Disable an address that keeps failing with `PATCH /api/v1/addresses/{addressId}`.
 - Accounts over the configured address cap are terminal `FAILED` during worker execution.
 
-## 12. Get Sync Run
+## 13. Get Sync Run
 
 Request:
 
@@ -495,7 +532,7 @@ Response:
 
 Possible statuses are `QUEUED`, `RUNNING`, `SUCCEEDED`, and `FAILED`. Legacy `STARTED` may be visible for pre-async rows until recovery or an operator runbook drains them. `startedAt` is nullable while a run is still `QUEUED`.
 
-## 13. ProblemDetail Error Mapping
+## 14. ProblemDetail Error Mapping
 
 All errors produced by the API layer use `ProblemDetail`, including framework-level routing failures such as unknown paths, unsupported methods, and unsupported content types. The `type` field is a stable service-owned URI. Implementations may add properties for correlation and domain identifiers, but must not expose internal stack traces. Under the protected profiles, `401` and `403` are produced by the Spring Security filter chain before a request reaches Spring MVC; a dedicated authentication entry point and access-denied handler write the same `ProblemDetail` shape, including `requestId`, and `401` responses keep the `WWW-Authenticate: Basic` challenge.
 
@@ -545,7 +582,7 @@ Example:
 
 Responses echo `X-Request-Id` when supplied, or generate and return one when absent. The request id is stored in logging MDC for the servlet request. Background sync worker logs use sync-run and worker identifiers because provider work no longer runs inside the original HTTP request.
 
-## 14. Future Extensions
+## 15. Future Extensions
 
 Deferred API capabilities:
 

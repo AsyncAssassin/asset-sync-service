@@ -73,12 +73,22 @@ class AlchemyChainProvider(
     @Volatile
     private var lastError: String? = null
 
+    @Volatile
+    private var lastDataError: String? = null
+
     override fun fetchObservedEventsPage(request: ChainProviderEventsPageRequest): ChainProviderEventsPage =
         try {
             val page = Fetch(request).run()
             state = AlchemyProviderState.FETCH_SUCCEEDED
             lastError = null
+            lastDataError = null
             page
+        } catch (exception: ProviderDataInvalidException) {
+            // Invalid data for one address (a rejected parameter, an unmappable row) says nothing
+            // about Alchemy's availability, so the state stays and health keeps it as a detail.
+            lastDataError = scrubber.scrub(exception.message).take(MAX_ERROR_LENGTH)
+            logFailure(request, lastDataError)
+            throw exception
         } catch (exception: RuntimeException) {
             recordFailure(request, exception)
             throw exception
@@ -88,10 +98,16 @@ class AlchemyChainProvider(
 
     fun lastError(): String? = lastError
 
+    fun lastDataError(): String? = lastDataError
+
     private fun recordFailure(request: ChainProviderEventsPageRequest, exception: RuntimeException) {
         val error = scrubber.scrub(exception.message).take(MAX_ERROR_LENGTH)
         state = AlchemyProviderState.FETCH_FAILED
         lastError = error
+        logFailure(request, error)
+    }
+
+    private fun logFailure(request: ChainProviderEventsPageRequest, error: String?) {
         logger.warn(
             "alchemy_provider_page_fetch_failed chainId={} address={} asset={} limit={} error={}",
             request.chainId,

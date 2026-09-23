@@ -54,6 +54,9 @@ class HttpChainProvider @Autowired constructor(
     @Volatile
     private var lastError: String? = null
 
+    @Volatile
+    private var lastDataError: String? = null
+
     override fun fetchObservedEventsPage(request: ChainProviderEventsPageRequest): ChainProviderEventsPage =
         try {
             val page = requireNotNull(
@@ -67,6 +70,9 @@ class HttpChainProvider @Autowired constructor(
                         if (request.cursor != null) {
                             builder.queryParam("cursor", request.cursor)
                         }
+                        // The durable checkpoint, so a bridge resumes from it when no cursor is sent.
+                        request.fromBlockHeight?.let { builder.queryParam("fromBlockHeight", it) }
+                        request.fromEventIndex?.let { builder.queryParam("fromEventIndex", it) }
                         builder.build(request.chainId, request.address)
                     }
                     .exchange { _, response ->
@@ -91,6 +97,7 @@ class HttpChainProvider @Autowired constructor(
             ) { "Provider exchange returned no page." }
             lastFetchHealthy = true
             lastError = null
+            lastDataError = null
             logger.info(
                 "http_provider_page_fetch_succeeded chainId={} address={} asset={} limit={} events={} hasMore={}",
                 request.chainId,
@@ -102,7 +109,7 @@ class HttpChainProvider @Autowired constructor(
             )
             page
         } catch (exception: ProviderDataInvalidException) {
-            recordFailure(request = request, exception = exception)
+            recordDataError(request = request, exception = exception)
             throw exception
         } catch (exception: ChainProviderUnavailableException) {
             recordFailure(request = request, exception = exception)
@@ -115,6 +122,8 @@ class HttpChainProvider @Autowired constructor(
     fun lastFetchHealthy(): Boolean? = lastFetchHealthy
 
     fun lastError(): String? = lastError
+
+    fun lastDataError(): String? = lastDataError
 
     private fun parseSuccessfulResponse(request: ChainProviderEventsPageRequest, body: InputStream): ChainProviderEventsPage {
         val bytes = readBounded(body, syncProperties.pagination.maxProviderPageBytes)
@@ -163,6 +172,23 @@ class HttpChainProvider @Autowired constructor(
             request.asset,
             request.limit,
             lastError,
+        )
+    }
+
+    /**
+     * The bridge answered, but not with a usable page for this address (a 4xx, malformed JSON, an
+     * oversized body). That says nothing about the provider's availability for other addresses,
+     * so it leaves the connectivity state alone and is only reported as a health detail.
+     */
+    private fun recordDataError(request: ChainProviderEventsPageRequest, exception: ProviderDataInvalidException) {
+        lastDataError = exception.message?.take(240)
+        logger.warn(
+            "http_provider_page_fetch_failed chainId={} address={} asset={} limit={} error={}",
+            request.chainId,
+            request.address,
+            request.asset,
+            request.limit,
+            lastDataError,
         )
     }
 }
