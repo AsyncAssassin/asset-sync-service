@@ -11,6 +11,8 @@ import kotlin.test.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.ExtendWith
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.logging.LogLevel
+import org.springframework.boot.logging.LoggingSystem
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.system.CapturedOutput
 import org.springframework.boot.test.system.OutputCaptureExtension
@@ -28,10 +30,10 @@ import org.springframework.test.context.DynamicPropertyRegistry
 import org.springframework.test.context.DynamicPropertySource
 
 /**
- * The HTTP bridge has no credential setting of its own, so they can only live in `base-url`, in
- * its userinfo or its path. With the bridge unreachable, a `READ` caller sees the failure on the
- * sync run and in the health details, and neither shows the url or its credentials; no log line
- * of the run does either.
+ * The HTTP bridge has no credential setting of its own, so a token can only live in the path or
+ * the query of `base-url`. With the bridge unreachable, a `READ` caller sees the failure on the
+ * sync run and in the health details, and neither shows the url or its token. No log line of the
+ * run does either, even at TRACE, where the JDK's HTTP client would print the url.
  */
 @ActiveProfiles("e2e")
 @Import(TestcontainersConfiguration::class)
@@ -67,13 +69,19 @@ class BridgeCredentialsE2ETests(
 
         val claimed = syncRunLifecycleService.claimDueRuns(workerId = "bridge-credentials-test", limit = 1)
         assertEquals(1, claimed.size)
-        syncApplicationService.executeClaimedSyncRun(claimed.single())
+        val loggingSystem = LoggingSystem.get(javaClass.classLoader)
+        loggingSystem.setLogLevel(LoggingSystem.ROOT_LOGGER_NAME, LogLevel.TRACE)
+        try {
+            syncApplicationService.executeClaimedSyncRun(claimed.single())
+        } finally {
+            loggingSystem.setLogLevel(LoggingSystem.ROOT_LOGGER_NAME, LogLevel.INFO)
+        }
 
         val run = reader.getForEntity("/api/v1/sync-runs/$syncRunId", Map::class.java)
         assertEquals(HttpStatus.OK, run.statusCode)
-        assertEquals("Provider transport failure: connection refused (ConnectException).", run.body!!["lastError"])
+        assertEquals("Provider transport failure: cannot connect (ConnectException).", run.body!!["lastError"])
         val health = reader.getForEntity("/actuator/health", String::class.java).body.orEmpty()
-        assertTrue(health.contains("Provider transport failure: connection refused"), health)
+        assertTrue(health.contains("Provider transport failure: cannot connect"), health)
         listOf(health, output.out).forEach { text ->
             SECRETS.forEach { secret -> assertFalse(text.contains(secret), "$secret leaked") }
         }
@@ -90,7 +98,9 @@ class BridgeCredentialsE2ETests(
     }
 
     companion object {
-        private val SECRETS = listOf("USERINFO_SECRET", "PATH_SECRET", "QUERY_SECRET")
+        private const val PATH_SECRET = "PATH_SECRET"
+        private const val QUERY_SECRET = "QUERY_SECRET"
+        private val SECRETS = listOf(PATH_SECRET, QUERY_SECRET)
 
         /** A port nothing listens on, so every fetch is refused. */
         private val closedPort = ServerSocket(0).use { it.localPort }
@@ -98,9 +108,7 @@ class BridgeCredentialsE2ETests(
         @JvmStatic
         @DynamicPropertySource
         fun providerProperties(registry: DynamicPropertyRegistry) {
-            registry.add("asset-sync.provider.base-url") {
-                "http://bridge-user:USERINFO_SECRET@127.0.0.1:$closedPort/PATH_SECRET?token=QUERY_SECRET"
-            }
+            registry.add("asset-sync.provider.base-url") { "http://127.0.0.1:$closedPort/$PATH_SECRET?token=$QUERY_SECRET" }
         }
     }
 }

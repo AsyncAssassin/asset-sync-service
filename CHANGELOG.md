@@ -6,7 +6,17 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Security
 
-- A failure to reach the HTTP bridge no longer quotes the bridge URL. The I/O error text contains the request URL with the userinfo and the path of `base-url`, the only places the bridge credentials can live, and it reached the health details, the WARN log, and the `lastError` of sync runs that the `READ` role sees. The message now names the kind of failure, such as `Provider transport failure: connection refused (ConnectException).`, and the cause chain goes to the DEBUG log with every URL cut out.
+- A failure to reach the HTTP bridge no longer quotes the bridge URL. The I/O error text contains the request URL with the path and the query of `base-url`, where a bridge token has to live, and it reached the health details, the WARN log, and the `lastError` of sync runs that the `READ` role sees. The message now names the kind of failure, such as `Provider transport failure: cannot connect (ConnectException).`, and the WARN line adds the cause chain with every URL cut out.
+- The JDK's HTTP client and Spring's URI parser log at INFO whatever the root level is: at DEBUG and TRACE they printed the bridge URL with its token.
+
+### Changed
+
+- **Breaking:** a `base-url` with a user name or password stops startup, with a message that leaves the URL out. The HTTP client never sent them, so a bridge that needs them could only answer `401`.
+
+### Fixed
+
+- A bridge page with a `null` element in `events` is a data error for its address instead of a provider outage, so provider health stays `UP`.
+- A `Retry-After` beyond the representable range is ignored instead of turning a `429` into a failed request without its backoff.
 
 ## [0.4.0] - 2026-09-23
 

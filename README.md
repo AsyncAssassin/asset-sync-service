@@ -405,7 +405,7 @@ Runtime configuration:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ASSET_SYNC_PROVIDER_TYPE` | `http` | `http` for the normalized HTTP bridge (the simulator in `demo`, an indexer in `prod`), `alchemy` for Alchemy JSON-RPC |
-| `ASSET_SYNC_PROVIDER_BASE_URL` | none in `prod` | HTTP bridge endpoint; required when the type is `http`, ignored for `alchemy`. The bridge page contract is in `docs/architecture.md` |
+| `ASSET_SYNC_PROVIDER_BASE_URL` | none in `prod` | HTTP bridge endpoint; required when the type is `http`, ignored for `alchemy`. A token for the bridge goes in its path or query; a user name or password in the URL stops startup, because the HTTP client never sends them. The bridge page contract is in `docs/architecture.md` |
 | `ASSET_SYNC_PROVIDER_CONNECT_TIMEOUT` | `2s` | Connect timeout for provider HTTP requests |
 | `ASSET_SYNC_PROVIDER_READ_TIMEOUT` | `5s` | Read timeout for provider HTTP requests |
 | `ASSET_SYNC_PROVIDER_ALCHEMY_API_KEY` | none | Alchemy API key; required for `alchemy`, never logged or shown in health or error details |
