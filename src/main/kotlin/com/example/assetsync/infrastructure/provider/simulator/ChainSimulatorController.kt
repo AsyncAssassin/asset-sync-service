@@ -6,6 +6,8 @@ import com.example.assetsync.infrastructure.provider.ProviderEvent
 import com.example.assetsync.infrastructure.provider.ProviderEventsPageResponse
 import jakarta.validation.constraints.Min
 import java.math.BigDecimal
+import java.security.MessageDigest
+import java.util.HexFormat
 import org.springframework.context.annotation.Profile
 import org.springframework.validation.annotation.Validated
 import org.springframework.web.bind.annotation.GetMapping
@@ -20,8 +22,13 @@ import org.springframework.web.bind.annotation.RestController
  * sync always produces an observed transaction and a lifecycle outbox event. Request parameters are
  * bean-validated, so a non-positive `limit` is a 400 ProblemDetail like any API validation failure.
  *
- * The e2e tests do NOT use this controller — they point the provider at a WireMock stub via
- * `@DynamicPropertySource` (see the e2e test), which is deterministic and needs no fixed port.
+ * The transaction hash is `0x` and the 64 hex digits of the SHA-256 of `chainId:address:asset`:
+ * synthetic, but well formed for every enabled chain, including `eth-sepolia`, whose ingest rules
+ * accept only real 32-byte hashes.
+ *
+ * `DemoSimulatorSyncE2ETests` drives this controller over real HTTP under `demo`. The other e2e
+ * tests point the provider at an in-test JDK `HttpServer` via `@DynamicPropertySource` instead,
+ * which lets them script provider answers.
  */
 @RestController
 @Profile("demo")
@@ -36,12 +43,12 @@ class ChainSimulatorController {
         @RequestParam @Min(1) limit: Int,
         @RequestParam(required = false) cursor: String?,
     ): ProviderEventsPageResponse {
-        val finalCursor = cursor ?: "sim:" + Integer.toHexString(("$chainId:$address:$asset").hashCode())
+        val digest = sha256Hex("$chainId:$address:$asset")
         return ProviderEventsPageResponse(
             events = if (cursor == null) {
                 listOf(
                     ProviderEvent(
-                        txHash = "0xsim-" + Integer.toHexString(("$chainId:$address:$asset").hashCode()),
+                        txHash = "0x$digest",
                         eventIndex = 0,
                         address = address,
                         asset = asset,
@@ -55,10 +62,17 @@ class ChainSimulatorController {
             } else {
                 emptyList()
             },
-            nextCursor = finalCursor,
+            nextCursor = cursor ?: "sim:${digest.take(CURSOR_DIGEST_LENGTH)}",
             hasMore = false,
             latestBlockHeight = 1_000,
             safeBlockHeight = 1_000,
         )
+    }
+
+    private fun sha256Hex(value: String): String =
+        HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8)))
+
+    private companion object {
+        const val CURSOR_DIGEST_LENGTH = 16
     }
 }

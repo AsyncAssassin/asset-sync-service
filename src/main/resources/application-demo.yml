@@ -14,6 +14,8 @@ spring:
 asset-sync:
   provider:
     # The demo provider is the HTTP bridge (type http, the default) calling the bundled in-process
-    # simulator over real HTTP (self-call on the fixed server port). Schedulers stay ON so demo
-    # shows the outbox publisher and recovery live.
-    base-url: http://localhost:${SERVER_PORT:8080}/simulator
+    # simulator over real HTTP (self-call on the server port). Resolving `server.port` rather than
+    # the SERVER_PORT variable keeps the self-call right however the port is set (environment,
+    # `--server.port`, an IDE run configuration). Schedulers stay ON so demo shows the outbox
+    # publisher and recovery live.
+    base-url: http://localhost:${server.port:8080}/simulator
