@@ -19,7 +19,14 @@ All notable changes to this project are documented in this file. The format is b
 - `demo`, `local`, and `test` refuse to run together with any other profile. With `prod,demo` on a fresh database, the demo seeder wrote its users with public passwords after the demo-user guard had already looked, so `demo-operator` could change data until the next restart; `staging,demo` and `staging,local` had the same gap without any guard. An environment post-processor now stops such a start before the application context exists, before any placeholder of the other profiles is resolved, and names the profiles.
 - The demo-user guard runs in every profile except `demo`, `local`, and `test`: `prod`, `e2e`, a custom profile such as `staging`, and a start without any profile refuse a database that holds the demo users. It is never lazy, it skips a database without the `users` table instead of failing on its own query, and its message names the default profile when none is active and recommends an empty database, because a database the demo ran on also holds the demo dataset. The prod operator account cannot take a `demo` user name.
 - `POST /api/v1/observed-events` checks the length of `amount` before it parses the value. The parse takes time quadratic in the length, and validation ran it on a string of any size: a million-digit `amount` held a request thread for about ten seconds before the `400`. A value longer than 80 characters is now refused by its length alone.
-- The application's JSON reader accepts strings of at most 100 000 characters instead of Jackson's 20 million, in request bodies and HTTP bridge pages alike. A longer string fails a request with `400 invalid-request` and a bridge page as malformed JSON.
+- The non-blank check of `externalRef` and `label` runs in linear time. A 100 000-character value that ended in a line break held a request thread for about ten seconds, because validation ran the pattern after the length check had already failed. A value with a line break is no longer reported as blank.
+- The application's JSON reader accepts strings of at most 100 000 characters instead of Jackson's 20 million, in request bodies and HTTP bridge pages alike. A longer string in a request field fails the request with `400 invalid-request`, and in a page field the page. Every such field already had a lower limit, so no valid request or page is refused.
+- Request and bridge page DTOs skip unknown fields as they read them. Jackson kept them in memory until the known fields were complete, at many times their size: a 20 MB body of small unknown values ran a 256 MiB heap out of memory.
+- A request body in YAML gets `415`. Spring MVC read it, because springdoc brings the YAML data format, with none of the JSON limits, although the API speaks JSON only.
+
+### Fixed
+
+- An `amount`, `direction`, or `status` made only of Unicode spaces such as U+00A0 gets `400 validation-failed` naming the field. It passed validation and got `400 invalid-request` without the errors list.
 
 ## [0.4.0] - 2026-09-23
 

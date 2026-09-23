@@ -111,12 +111,12 @@ Required cases:
 
 | Endpoint | Cases |
 | --- | --- |
-| `POST /api/v1/accounts` | create success, duplicate `externalRef`, blank `externalRef` |
+| `POST /api/v1/accounts` | create success, duplicate `externalRef`, blank `externalRef`, an oversized `externalRef` ending in a line break reported by its length alone, a YAML body refused with `415` |
 | `GET /api/v1/accounts/{accountId}` | found, not found, invalid UUID |
 | `POST /api/v1/accounts/{accountId}/addresses` | create success, account not found, chain disabled/not found, duplicate address, validation failures, per-chain address format |
 | `GET /api/v1/accounts/{accountId}/addresses` | list success, account not found |
 | `PATCH /api/v1/addresses/{addressId}` | disable and enable again, unchanged status keeps `updated_at`, disabled address refused by sync, unknown address, invalid status, operator-only in protected profiles |
-| `POST /api/v1/observed-events` | created, updated, no-change duplicate, immutable conflict, validation failures, per-chain transaction-hash format, extreme exponent amounts, an oversized amount refused by its length without being parsed, a string past the 100 000-character JSON limit, identities that differ only around `:` keeping separate outbox events |
+| `POST /api/v1/observed-events` | created, updated, no-change duplicate, immutable conflict, validation failures, per-chain transaction-hash format, extreme exponent amounts, an oversized amount refused by its length without being parsed, a string past the 100 000-character JSON limit, an unknown field ignored at any length and position, identities that differ only around `:` keeping separate outbox events |
 | `POST /api/v1/addresses/{addressId}/sync` | success, address not found, provider timeout, multi-page checkpointing, retry from page cursor, full queue with `Retry-After` |
 | `POST /api/v1/accounts/{accountId}/sync` | success, account not found, provider failure, busy cursor fairness |
 | `GET /api/v1/sync-runs/{syncRunId}` | found, not found |

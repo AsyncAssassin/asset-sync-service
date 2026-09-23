@@ -191,7 +191,7 @@ On shutdown the worker acts as a Spring `SmartLifecycle` in the web server's gra
 
 Request: `GET {base-url}/v1/chains/{chainId}/addresses/{address}/events` with the query parameters `asset`, `limit` (the page size), `cursor` (the stored resume token, absent before the first page), and, once the address has a checkpoint, `fromBlockHeight` and `fromEventIndex` of its last processed event. A bridge resumes from `cursor` when one is sent, otherwise from the first event at or after `(fromBlockHeight, fromEventIndex)`, and from the start of its history when neither is sent. Serving the checkpoint event itself again is harmless; serving anything before it fails the page.
 
-Response body, at most `max-provider-page-bytes`, with no string longer than 100 000 characters:
+Response body, at most `max-provider-page-bytes`, with no string longer than 100 000 characters in the fields below; other fields are ignored:
 
 - `events` (required): objects with `txHash`, `eventIndex`, `address`, `asset`, `amount` (a JSON number or decimal string), `blockHeight`, `confirmations`, `direction` (`INBOUND` or `OUTBOUND`), and `status` (`SEEN`, `CONFIRMED`, or `REVERTED`), in non-decreasing `(blockHeight, eventIndex, txHash)` order and at most `limit` of them.
 - `hasMore` (required): whether another page follows now; `true` requires a `nextCursor` that differs from the request cursor.

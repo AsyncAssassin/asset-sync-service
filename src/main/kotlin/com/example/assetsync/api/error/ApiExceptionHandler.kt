@@ -15,6 +15,8 @@ import com.example.assetsync.application.sync.WatchedAddressByIdNotFoundExceptio
 import com.example.assetsync.application.transaction.InvalidObservedEventRequestException
 import com.example.assetsync.application.transaction.ObservedTransactionConflictException
 import com.example.assetsync.application.transaction.WatchedAddressNotFoundException
+import com.example.assetsync.config.JacksonConfiguration.Companion.MAX_JSON_STRING_LENGTH
+import com.example.assetsync.config.exceedsJsonReadLimit
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import java.time.Duration
@@ -76,7 +78,11 @@ class ApiExceptionHandler {
             is MethodArgumentTypeMismatchException ->
                 "${exception.name} must be a valid ${exception.requiredType?.simpleName ?: "value"}."
             is HttpMessageNotReadableException ->
-                "Request body is malformed or contains invalid field types."
+                if (exception.exceedsJsonReadLimit()) {
+                    "Request body exceeds a JSON size limit, such as a string over $MAX_JSON_STRING_LENGTH characters or a number over 1000 digits."
+                } else {
+                    "Request body is malformed or contains invalid field types."
+                }
             is MissingServletRequestParameterException ->
                 "${exception.parameterName} request parameter is required."
             else ->

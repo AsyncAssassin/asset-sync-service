@@ -119,6 +119,34 @@ class AccountAndAddressApiIntegrationTests(
     }
 
     @Test
+    fun `an oversized externalRef that ends in a line break gets only its length error`() {
+        mockMvc.perform(
+            post("/api/v1/accounts")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(mapOf("externalRef" to "a".repeat(99_999) + "\n"))),
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/validation-failed"))
+            .andExpect(jsonPath("$.errors.length()").value(1))
+            .andExpect(
+                jsonPath("$.errors[0]").value("externalRef: externalRef must be at most $MAX_EXTERNAL_REF_LENGTH characters"),
+            )
+    }
+
+    @Test
+    fun `a yaml body is refused like any other content type that is not json`() {
+        mockMvc.perform(
+            post("/api/v1/accounts")
+                .contentType("application/yaml")
+                .content("externalRef: yaml-account\n"),
+        )
+            .andExpect(status().isUnsupportedMediaType)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/unsupported-media-type"))
+
+        assertEquals(0, tableCount("accounts"))
+    }
+
+    @Test
     fun `problem responses echo request id`() {
         mockMvc.perform(
             post("/api/v1/accounts")

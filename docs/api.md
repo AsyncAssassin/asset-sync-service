@@ -10,7 +10,7 @@ All MVP endpoints are exposed under `/api/v1`. The version is part of the URL be
 
 Conventions:
 
-- Request and response bodies use JSON. A string value longer than 100 000 characters fails the request with `400 invalid-request` while the body is read.
+- Request and response bodies use JSON; a body of any other content type, YAML included, gets `415`. A string longer than 100 000 characters in a request field fails the request with `400 invalid-request` while the body is read, before any field rule runs. Unknown fields are ignored, whatever their size.
 - Timestamps use UTC ISO-8601 strings.
 - Identifiers use UUID strings.
 - Monetary amounts are encoded as decimal strings and stored with `numeric(38, 18)` precision.
@@ -554,7 +554,7 @@ Common mappings:
 
 | Condition | HTTP status | Problem type |
 | --- | ---: | --- |
-| Malformed JSON, invalid field type, or a string longer than 100 000 characters | 400 | `https://asset-sync-service/errors/invalid-request` |
+| Malformed JSON, invalid field type, or a field string longer than 100 000 characters | 400 | `https://asset-sync-service/errors/invalid-request` |
 | Bean validation failure | 400 | `https://asset-sync-service/errors/validation-failed` |
 | Invalid enum value | 400 | `https://asset-sync-service/errors/validation-failed` |
 | Missing required request parameter | 400 | `https://asset-sync-service/errors/invalid-request` |
