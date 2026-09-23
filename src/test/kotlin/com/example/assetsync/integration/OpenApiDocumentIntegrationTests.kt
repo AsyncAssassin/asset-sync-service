@@ -3,7 +3,6 @@ package com.example.assetsync.integration
 import com.example.assetsync.TestcontainersConfiguration
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
-import java.util.Base64
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Test
@@ -45,7 +44,6 @@ class OpenApiDocumentIntegrationTests(
         val document = apiDocs()
         val paths = document.path("paths")
 
-        assertTrue(paths.fieldNames().asSequence().all { it.startsWith("/api/") }, "paths: ${paths.fieldNames().asSequence().toList()}")
         assertEquals(
             mapOf(
                 "POST /api/v1/accounts" to listOf("201"),
@@ -63,22 +61,37 @@ class OpenApiDocumentIntegrationTests(
             },
         )
         val createAccount = paths.path("/api/v1/accounts").path("post").path("responses").path("201")
-        assertTrue(createAccount.path("headers").has("Location"), createAccount.toString())
-        assertTrue(createAccount.path("content").path("application/json").path("schema").path("\$ref").asText().endsWith("/AccountResponse"), createAccount.toString())
-        val syncAddress = paths.path("/api/v1/addresses/{addressId}/sync").path("post").path("responses").path("202")
-        assertTrue(syncAddress.path("headers").has("Location"), syncAddress.toString())
+        assertEquals("#/components/schemas/AccountResponse", createAccount.path("content").path("application/json").path("schema").path("\$ref").asText())
+        listOf(
+            createAccount,
+            paths.path("/api/v1/addresses/{addressId}/sync").path("post").path("responses").path("202"),
+            paths.path("/api/v1/accounts/{accountId}/sync").path("post").path("responses").path("202"),
+        ).forEach { response ->
+            // A relative reference, as the controllers send it.
+            assertEquals("uri-reference", response.path("headers").path(HttpHeaders.LOCATION).path("schema").path("format").asText(), response.toString())
+        }
     }
 
     @Test
-    fun `every operation shares the problem detail errors`() {
+    fun `every operation refers to the shared problem detail errors, and only mutations to the 403`() {
         val document = apiDocs()
+        val components = document.path("components")
 
-        assertEquals("object", document.path("components").path("schemas").path("ProblemDetail").path("type").asText())
+        val problemDetail = components.path("schemas").path("ProblemDetail")
+        assertEquals("uri-reference", problemDetail.path("properties").path("instance").path("format").asText())
+        assertEquals("array", problemDetail.path("properties").path("errors").path("type").asText())
+        val shared = mapOf("400" to "BadRequest", "401" to "Unauthorized", "403" to "Forbidden", "500" to "InternalError", "503" to "DatabaseUnavailable")
+        shared.values.forEach { name ->
+            val schema = components.path("responses").path(name).path("content").path("application/problem+json").path("schema")
+            assertEquals("#/components/schemas/ProblemDetail", schema.path("\$ref").asText(), name)
+        }
         operations(document.path("paths")).forEach { (name, operation) ->
-            listOf("400", "401", "403", "503").forEach { status ->
-                val schema = operation.path("responses").path(status).path("content").path("application/problem+json").path("schema")
-                assertEquals("#/components/schemas/ProblemDetail", schema.path("\$ref").asText(), "$name $status")
+            val responses = operation.path("responses")
+            shared.filterKeys { it != "403" }.forEach { (status, component) ->
+                assertEquals("#/components/responses/$component", responses.path(status).path("\$ref").asText(), "$name $status")
             }
+            // READ may call every GET; only a change of state needs OPERATOR.
+            assertEquals(!name.startsWith("GET "), responses.has("403"), "$name 403")
         }
     }
 
@@ -94,15 +107,14 @@ class OpenApiDocumentIntegrationTests(
     }
 
     private fun apiDocs(): JsonNode {
-        val credentials = Base64.getEncoder().encodeToString("demo-reader:demo-reader-pw".toByteArray())
-        val body = mockMvc.perform(get("/v3/api-docs").header(HttpHeaders.AUTHORIZATION, "Basic $credentials"))
+        val body = mockMvc.perform(get("/v3/api-docs").headers(HttpHeaders().apply { setBasicAuth("demo-reader", "demo-reader-pw") }))
             .andExpect(status().isOk)
             .andReturn().response.contentAsString
         return objectMapper.readTree(body)
     }
 
     private fun operations(paths: JsonNode): Map<String, JsonNode> =
-        paths.fields().asSequence().flatMap { (path, item) ->
-            item.fields().asSequence().map { (method, operation) -> "${method.uppercase()} $path" to operation }
+        paths.properties().flatMap { (path, item) ->
+            item.properties().map { (method, operation) -> "${method.uppercase()} $path" to operation }
         }.toMap()
 }

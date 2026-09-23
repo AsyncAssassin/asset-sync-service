@@ -95,7 +95,7 @@ When the app is running:
 - Swagger UI: [http://localhost:18080/swagger-ui.html](http://localhost:18080/swagger-ui.html)
 - OpenAPI JSON: [http://localhost:18080/v3/api-docs](http://localhost:18080/v3/api-docs)
 
-The OpenAPI document declares HTTP Basic, so **Authorize** in Swagger UI takes a username and password and sends them with every call. Outside `local` and `test` both pages and every API call require them. The document covers the `/api` operations only, with the status each one answers with and the `ProblemDetail` errors all of them share (`400`, `401`, `403`, `503`); `docs/api.md` section 14 lists the rest.
+The OpenAPI document declares HTTP Basic, so **Authorize** in Swagger UI takes a username and password and sends them with every call. Outside `local` and `test` both pages and every API call require them. The document covers the `/api` operations only, with the status each one answers with and the `ProblemDetail` errors they share: `400`, `401`, `500`, and `503` on every operation, and `403` on those that change state; `docs/api.md` section 14 lists the rest.
 
 Current public endpoints:
 

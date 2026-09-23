@@ -8,6 +8,7 @@ import io.swagger.v3.oas.annotations.media.Schema
 import io.swagger.v3.oas.annotations.responses.ApiResponse
 import java.net.URI
 import java.util.UUID
+import org.springframework.http.HttpHeaders
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PathVariable
@@ -25,7 +26,7 @@ class SyncController(
     @ApiResponse(
         responseCode = "202",
         description = "The sync run is queued or already in flight; poll it at Location.",
-        headers = [Header(name = "Location", description = "The URL of the sync run.", schema = Schema(type = "string", format = "uri"))],
+        headers = [Header(name = HttpHeaders.LOCATION, description = "The URL of the sync run.", schema = Schema(type = "string", format = "uri-reference"))],
     )
     fun syncAddress(
         @PathVariable addressId: UUID,
@@ -41,7 +42,7 @@ class SyncController(
     @ApiResponse(
         responseCode = "202",
         description = "The sync run is queued or already in flight; poll it at Location.",
-        headers = [Header(name = "Location", description = "The URL of the sync run.", schema = Schema(type = "string", format = "uri"))],
+        headers = [Header(name = HttpHeaders.LOCATION, description = "The URL of the sync run.", schema = Schema(type = "string", format = "uri-reference"))],
     )
     fun syncAccount(
         @PathVariable accountId: UUID,
@@ -62,4 +63,3 @@ class SyncController(
     private fun syncRunLocation(syncRunId: UUID): URI =
         URI.create("/api/v1/sync-runs/$syncRunId")
 }
-

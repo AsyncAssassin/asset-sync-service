@@ -16,6 +16,7 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse
 import jakarta.validation.Valid
 import java.net.URI
 import java.util.UUID
+import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.GetMapping
@@ -37,7 +38,7 @@ class AccountController(
     @ApiResponse(
         responseCode = "201",
         description = "The account was created.",
-        headers = [Header(name = "Location", description = "The URL of the new account.", schema = Schema(type = "string", format = "uri"))],
+        headers = [Header(name = HttpHeaders.LOCATION, description = "The URL of the new account.", schema = Schema(type = "string", format = "uri-reference"))],
     )
     fun createAccount(
         @Valid @RequestBody request: CreateAccountRequest,
