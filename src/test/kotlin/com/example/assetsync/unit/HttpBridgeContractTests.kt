@@ -149,6 +149,22 @@ class HttpBridgeContractTests {
         assertEquals("asset-sync.provider.auth-header-value must not contain a line break.", injected.message)
     }
 
+    @Test
+    fun `a page that is not json text is that address's error, not a transport failure`() {
+        // Jackson reads these bytes as UTF-32 and throws CharConversionException, an IOException.
+        val notText = byteArrayOf(0, 0, 0, '{'.code.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte(), 0xFF.toByte())
+        handler.set { exchange ->
+            exchange.sendResponseHeaders(200, notText.size.toLong())
+            exchange.responseBody.use { it.write(notText) }
+        }
+        val provider = provider()
+
+        val failure = assertThrows<ProviderDataInvalidException> { provider.fetchObservedEventsPage(pageRequest()) }
+
+        assertEquals("Provider returned a body that is not JSON text.", failure.message)
+        assertEquals(Status.UP, HttpChainProviderHealthIndicator(provider).health().status)
+    }
+
     private fun baseUrl(): String = "http://127.0.0.1:${server.address.port}"
 
     private fun provider(properties: ProviderProperties = ProviderProperties(baseUrl = "http://127.0.0.1:${server.address.port}")): HttpChainProvider =

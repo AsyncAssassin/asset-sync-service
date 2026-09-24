@@ -1,11 +1,17 @@
 package com.example.assetsync.infrastructure.provider
 
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.InputStream
+import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.net.http.HttpTimeoutException
 import java.time.Duration
 import java.time.Instant
 import java.time.format.DateTimeFormatter
+import javax.net.ssl.SSLException
 import org.springframework.http.client.ClientHttpRequestFactory
 import org.springframework.http.client.SimpleClientHttpRequestFactory
 
@@ -33,6 +39,36 @@ internal object ProviderHttpSupport {
             setConnectTimeout(connectTimeout)
             setReadTimeout(readTimeout)
         }
+
+    /**
+     * The kind of a transport failure, such as `timeout (SocketTimeoutException)`, from the I/O
+     * error RestClient wraps, or null when the failure is not one. The exception's own text is never
+     * used: Spring's `ResourceAccessException` quotes the request URL, where a bridge token or the
+     * secrets of a custom Alchemy endpoint can live.
+     */
+    fun transportKind(exception: RuntimeException): String? {
+        val cause = exception.cause as? IOException ?: return null
+        val kind = when (cause) {
+            is SocketTimeoutException, is HttpTimeoutException -> "timeout"
+            // Refused, unreachable, or an operating-system connect timeout: the text tells them apart.
+            is ConnectException -> "cannot connect"
+            is UnknownHostException -> "unknown host"
+            is SSLException -> "TLS failure"
+            else -> "I/O error"
+        }
+        return "$kind (${cause.javaClass.simpleName})"
+    }
+
+    /** A cause chain for a WARN line, with every URL cut out; see [transportKind]. */
+    fun causeChainWithoutUrls(exception: Throwable): String =
+        generateSequence(exception) { it.cause }
+            .take(MAX_CAUSE_DEPTH)
+            .joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message?.replace(URL_PATTERN, "<url>")}" }
+
+    private const val MAX_CAUSE_DEPTH = 16
+
+    /** A URL up to the first whitespace or quote, so the quote Spring puts around it survives. */
+    private val URL_PATTERN = Regex("[A-Za-z][A-Za-z0-9+.-]*://[^\\s\"'<>]+")
 
     /** Accepts delta-seconds and RFC 1123 dates; non-positive, past, or unparseable values are ignored. */
     fun parseRetryAfter(value: String?, now: Instant = Instant.now()): Instant? {

@@ -343,7 +343,7 @@ Expected behavior:
 - A probe that meets an outage (`5xx`, `429`, a timeout, a transport error) does not fail startup: the provider starts in the `probe-failed` state with health `DOWN` and the scrubbed error, and the first successful fetch clears it (section 7). An enabled chain without a mapping and without active watched addresses, such as the seeded `local-evm` on a fresh database, is only logged; registering an address there, or enabling one again, answers `404 Unsupported chain`.
 - During a sync run, `ProviderConfigurationException` is terminal: the run is marked `FAILED` at once, `failure_attempts` is not spent on retries that cannot succeed, and the checkpoint does not move.
 - A configuration gap of one address (its chain without a mapping or, under `configured-block`, without a start block, its asset without an enabled config, a block with more events than a page) fails only that address's runs: provider health stays `UP` with the gap as `lastDataError`, while rejected credentials turn it `DOWN`. The startup preflight still refuses the first three at the next start, so disable such an address or fix its configuration before restarting.
-- `sync_runs.last_error`, log lines, health details, and exception messages are scrubbed of the API key; transport failures that embed a request URL are rethrown with a bounded scrubbed message and without their cause.
+- `sync_runs.last_error`, log lines, health details, and exception messages are scrubbed of the API key; a transport failure is named by its kind, such as `Alchemy transport failure for network eth-sepolia: timeout (SocketTimeoutException).`, without the request URL and without its cause, and the WARN line carries the cause chain with every URL cut out.
 
 Operational signal:
 

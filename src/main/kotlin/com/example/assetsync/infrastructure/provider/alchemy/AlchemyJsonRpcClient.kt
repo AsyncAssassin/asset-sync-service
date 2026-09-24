@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import io.micrometer.core.instrument.Timer
+import java.io.IOException
 import java.io.InputStream
 import java.net.URI
 import java.time.Instant
@@ -133,11 +134,13 @@ class AlchemyJsonRpcClient(
             throw failed(network, method, exception, sample, RESULT_INVALID)
         } catch (exception: RuntimeException) {
             // Transport failures from RestClient embed the request URL, which carries the key in path
-            // mode: rethrow a scrubbed, bounded message and deliberately drop the original cause.
-            val message = scrubber
-                .scrub("Alchemy request failed for network $network: ${exception.javaClass.simpleName}: ${exception.message}")
-                .take(MAX_MESSAGE_LENGTH)
-            throw failed(network, method, ChainProviderUnavailableException(message), sample, RESULT_UNAVAILABLE)
+            // mode and whatever a custom endpoint template holds: name the failure by its kind, drop
+            // the cause, and log the cause chain with every URL cut out.
+            val message = ProviderHttpSupport.transportKind(exception)
+                ?.let { "Alchemy transport failure for network $network: $it." }
+                ?: "Alchemy request failed for network $network (${exception.javaClass.simpleName})."
+            val causes = scrubber.scrub(ProviderHttpSupport.causeChainWithoutUrls(exception))
+            throw failed(network, method, ChainProviderUnavailableException(message), sample, RESULT_UNAVAILABLE, causes)
         }
     }
 
@@ -204,6 +207,9 @@ class AlchemyJsonRpcClient(
             objectMapper.readTree(bytes)
         } catch (exception: JsonProcessingException) {
             throw ProviderDataInvalidException("Alchemy returned malformed JSON for $method on network $network.")
+        } catch (exception: IOException) {
+            // Bytes already in memory that Jackson cannot decode as text (CharConversionException).
+            throw ProviderDataInvalidException("Alchemy returned a body that is not JSON text for $method on network $network.")
         }
         if (node == null || node.isMissingNode || !node.isObject) {
             throw ProviderDataInvalidException("Alchemy returned a non-object JSON-RPC response for $method on network $network.")
@@ -253,8 +259,9 @@ class AlchemyJsonRpcClient(
         exception: T,
         sample: Timer.Sample?,
         result: String,
+        causes: String? = null,
     ): T {
-        logger.warn("alchemy_rpc_failed network={} method={} error={}", network, method, scrubber.scrub(exception.message))
+        logger.warn("alchemy_rpc_failed network={} method={} error={} causes={}", network, method, scrubber.scrub(exception.message), causes)
         sample?.let { metrics?.recordAlchemyRpc(network, method, result, it) }
         return exception
     }
@@ -272,7 +279,6 @@ class AlchemyJsonRpcClient(
         const val RESULT_UNAVAILABLE = "UNAVAILABLE"
         const val RESULT_INVALID = "INVALID"
         const val RESULT_CONFIGURATION = "CONFIGURATION"
-        private const val MAX_MESSAGE_LENGTH = 240
         private const val JSON_RPC_PARSE_ERROR = -32700
         private const val JSON_RPC_INVALID_REQUEST = -32600
         private const val JSON_RPC_METHOD_NOT_FOUND = -32601

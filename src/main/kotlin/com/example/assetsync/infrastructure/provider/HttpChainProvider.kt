@@ -21,12 +21,7 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import java.io.IOException
 import java.io.InputStream
 import java.math.BigDecimal
-import java.net.ConnectException
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
-import java.net.http.HttpTimeoutException
 import java.time.Instant
-import javax.net.ssl.SSLException
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.context.annotation.Profile
@@ -164,7 +159,7 @@ class HttpChainProvider @Autowired constructor(
             throw exception
         } catch (exception: RuntimeException) {
             val failure = ChainProviderUnavailableException(failureMessage(exception))
-            recordFailure(request = request, exception = failure, causes = exception.causeChainWithoutUrls())
+            recordFailure(request = request, exception = failure, causes = ProviderHttpSupport.causeChainWithoutUrls(exception))
             throw failure
         }
 
@@ -185,6 +180,10 @@ class HttpChainProvider @Autowired constructor(
                 "Provider returned malformed JSON."
             }
             throw ProviderDataInvalidException(reason, exception)
+        } catch (exception: IOException) {
+            // The bytes are already in memory, so this is no I/O failure: Jackson could not decode
+            // them as text (CharConversionException), which RestClient would report as transport.
+            throw ProviderDataInvalidException("Provider returned a body that is not JSON text.", exception)
         }
 
         val events = response.events?.let { listed ->
@@ -222,31 +221,14 @@ class HttpChainProvider @Autowired constructor(
     private fun parseRetryAfter(value: String?): Instant? = ProviderHttpSupport.parseRetryAfter(value)
 
     /**
-     * A fixed description of a failure the bridge did not report itself: a transport failure is
-     * named by the kind of the I/O error RestClient wraps, anything else by its class. The
-     * exception's own text is never used: Spring's `ResourceAccessException` quotes the request URL,
-     * whose path or query may carry the bridge credentials, and this text reaches the health
+     * A fixed description of a failure the bridge did not report itself, by its transport kind or
+     * its class, never its text (see ProviderHttpSupport.transportKind): it reaches the health
      * details and the `lastError` of sync runs that `READ` callers see. The cause is not attached
      * for the same reason; the WARN log gets the cause chain with every URL cut out.
      */
-    private fun failureMessage(exception: RuntimeException): String {
-        val cause = exception.cause as? IOException
-            ?: return "Provider request failed (${exception.javaClass.simpleName})."
-        val kind = when (cause) {
-            is SocketTimeoutException, is HttpTimeoutException -> "timeout"
-            // Refused, unreachable, or an operating-system connect timeout: the text tells them apart.
-            is ConnectException -> "cannot connect"
-            is UnknownHostException -> "unknown host"
-            is SSLException -> "TLS failure"
-            else -> "I/O error"
-        }
-        return "Provider transport failure: $kind (${cause.javaClass.simpleName})."
-    }
-
-    private fun Throwable.causeChainWithoutUrls(): String =
-        generateSequence(this) { it.cause }
-            .take(MAX_CAUSE_DEPTH)
-            .joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message?.replace(URL_PATTERN, "<url>")}" }
+    private fun failureMessage(exception: RuntimeException): String =
+        ProviderHttpSupport.transportKind(exception)?.let { "Provider transport failure: $it." }
+            ?: "Provider request failed (${exception.javaClass.simpleName})."
 
     private fun recordFailure(request: ChainProviderEventsPageRequest, exception: RuntimeException, causes: String? = null) {
         lastFetchHealthy = false
@@ -279,12 +261,6 @@ class HttpChainProvider @Autowired constructor(
         )
     }
 
-    private companion object {
-        const val MAX_CAUSE_DEPTH = 16
-
-        /** A URL up to the first whitespace or quote, so the quote Spring puts around it survives. */
-        val URL_PATTERN = Regex("[A-Za-z][A-Za-z0-9+.-]*://[^\\s\"'<>]+")
-    }
 }
 
 // Unknown properties are skipped as they are read instead of buffered until the known ones are

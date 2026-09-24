@@ -158,7 +158,7 @@ class AlchemyJsonRpcClientTests {
     }
 
     @Test
-    fun `transport failures are retryable and scrubbed even when the url carries the key`() {
+    fun `transport failures are retryable and named by their kind, without the url that carries the key`() {
         val closedPort = ServerSocket(0).use { it.localPort }
         val client = client(
             authMode = AlchemyAuthMode.PATH,
@@ -167,12 +167,22 @@ class AlchemyJsonRpcClientTests {
 
         val exception = assertThrows<ChainProviderUnavailableException> { client.blockNumber("eth-sepolia") }
 
-        assertTrue(exception.message!!.startsWith("Alchemy request failed for network eth-sepolia: "), exception.message)
-        assertTrue(exception.message!!.contains("***"), "the request url must be scrubbed: ${exception.message}")
+        // The URL is left out altogether: a custom endpoint template can hold more than the key.
+        assertEquals("Alchemy transport failure for network eth-sepolia: cannot connect (ConnectException).", exception.message)
         assertNoSecret(exception.message)
-        assertNull(exception.cause, "the original cause embeds the unscrubbed url and must be dropped")
-        assertTrue(exception.message!!.length <= 240)
+        assertNull(exception.cause, "the original cause embeds the url and must be dropped")
         assertEquals(1.0, rpcCount("UNAVAILABLE"))
+    }
+
+    @Test
+    fun `a body that is not json text is a provider data failure, not a transport one`() {
+        // Jackson reads these bytes as UTF-32 and throws CharConversionException, an IOException.
+        stub.responseBody = "\u0000\u0000\u0000{\u0000\u0011\u0000\u0000"
+
+        val exception = assertThrows<ProviderDataInvalidException> { client().blockNumber("eth-sepolia") }
+
+        assertEquals("Alchemy returned a body that is not JSON text for eth_blockNumber on network eth-sepolia.", exception.message)
+        assertEquals(1.0, rpcCount("INVALID"))
     }
 
     @Test
