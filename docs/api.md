@@ -473,7 +473,7 @@ Failure behavior:
 
 Enqueues sync for all active watched addresses under one account. The POST behavior is the same as address sync: validate account existence, create or reuse an in-flight run, and return `202 Accepted` with a pollable location.
 
-Account sync uses per-address cursors and a pass over the account's active addresses in `(created_at, id)` order. The pass keeps its keyset in the run checkpoint, so a run whose addresses do not fit one claim resumes where the previous claim stopped and completes once every address has been synced; addresses registered or disabled between claims neither shift it nor get visited twice. An address whose cursor is busy because a direct address sync owns it is deferred and revisited after the scan, and an address with provider pages left keeps the pass on it until it is drained.
+Account sync uses per-address cursors and a pass over the account's active addresses in `(created_at, id)` order. The pass keeps its keyset in the run checkpoint, so a run whose addresses do not fit one claim resumes where the previous claim stopped and completes once every address has been synced; addresses registered or disabled between claims neither shift it nor get visited twice. An address whose cursor is busy because a direct address sync owns it is deferred and revisited after the scan, an address whose provider fetch fails retryably is retried in later claims, and an address with provider pages left keeps the pass on it until it is drained.
 
 Request:
 
@@ -510,8 +510,10 @@ Behavior:
 - Resolve active watched addresses on enabled chains in bounded pages. An address on a disabled chain is skipped, like a disabled address.
 - For each address, acquire the per-address cursor lease and fetch bounded provider pages until the page stream is done or a configured continuation limit is reached.
 - Ingest each provider event independently and checkpoint only after the full provider page is ingested.
-- A retryable provider failure requeues the overall sync run unless max attempts has been reached.
-- A terminal failure of one address (provider data invalid, provider configuration, a database constraint) ends only that address; the pass goes on with the others. When the pass completes, a run with such failures is `FAILED` and its `lastError` reads `<n> of <m> addresses failed terminally: <addressId>: <error>; ...`, capped at the stored error length. Disable an address that keeps failing with `PATCH /api/v1/addresses/{addressId}`.
+- A retryable provider failure of one address without `Retry-After`, such as a timeout or a `5xx`, defers that address, and the pass goes on with the others. Each later claim retries it once; the run waits `asset-sync.sync.worker.retry-backoff-base-delay` for such a retry (`last_requeue_reason = ADDRESS_RETRY`) and spends no `failure_attempts`. An address whose third retry fails as well is recorded as failed with `still failing after 3 retries: <error>`.
+- Retryable failures of three addresses in a row without a page between them, of two in a claim in which the provider served no page, or of one more address while 50 already wait for a retry, are a provider outage: the claim fails, and the run is retried with backoff and spends one `failure_attempts` unless max attempts has been reached. So do a `429` with `Retry-After`, a database failure, and a lost claim or cursor lease. Retries that fail in an outage do not count against their addresses, and the retried run resumes the pass where the failed claim stopped.
+- A configuration failure of the whole provider, such as rejected credentials or a redirect, fails the run at once.
+- A terminal failure of one address (provider data invalid, a configuration gap of that address, a database constraint) ends only that address; the pass goes on with the others. When the pass completes, a run with such failures is `FAILED` and its `lastError` reads `<n> of <m> addresses failed terminally: <addressId>: <error>; ...`, capped at the stored error length. Disable an address that keeps failing with `PATCH /api/v1/addresses/{addressId}`.
 - Accounts over the configured address cap are terminal `FAILED` during worker execution.
 
 ## 13. Get Sync Run

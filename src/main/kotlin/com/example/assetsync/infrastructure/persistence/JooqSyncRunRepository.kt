@@ -190,8 +190,9 @@ class JooqSyncRunRepository(
         lastError: String,
         nextAttemptAt: Instant,
         updatedAt: Instant,
-    ): Boolean =
-        dsl
+        runCheckpoint: ObjectNode?,
+    ): Boolean {
+        var update = dsl
             .update(SYNC_RUNS)
             .set(SYNC_RUNS.STATUS, SyncRunStatus.QUEUED.name)
             .set(SYNC_RUNS.EVENTS_SEEN, eventsSeen)
@@ -202,8 +203,13 @@ class JooqSyncRunRepository(
             .setNull(SYNC_RUNS.FINISHED_AT)
             .clearLockFields()
             .set(SYNC_RUNS.UPDATED_AT, updatedAt.toOffsetDateTime())
+        if (runCheckpoint != null) {
+            update = update.set(SYNC_RUNS.RUN_CHECKPOINT, JSONB.valueOf(runCheckpoint.toString()))
+        }
+        return update
             .whereCurrentClaim(id = id, lockedBy = lockedBy, lockToken = lockToken, attempts = attempts)
             .execute() == 1
+    }
 
     override fun requeueContinuationFenced(
         id: UUID,
@@ -282,8 +288,9 @@ class JooqSyncRunRepository(
         lastError: String,
         nextAttemptAt: Instant,
         updatedAt: Instant,
-    ): Boolean =
-        dsl
+        runCheckpoint: ObjectNode?,
+    ): Boolean {
+        var update = dsl
             .update(SYNC_RUNS)
             .set(SYNC_RUNS.STATUS, SyncRunStatus.QUEUED.name)
             .set(SYNC_RUNS.EVENTS_SEEN, eventsSeen)
@@ -295,9 +302,14 @@ class JooqSyncRunRepository(
             .setNull(SYNC_RUNS.FINISHED_AT)
             .clearLockFields()
             .set(SYNC_RUNS.UPDATED_AT, updatedAt.toOffsetDateTime())
+        if (runCheckpoint != null) {
+            update = update.set(SYNC_RUNS.RUN_CHECKPOINT, JSONB.valueOf(runCheckpoint.toString()))
+        }
+        return update
             .whereCurrentClaim(id = id, lockedBy = lockedBy, lockToken = lockToken, attempts = attempts)
             .and(SYNC_RUNS.FAILURE_ATTEMPTS.eq(expectedFailureAttempts))
             .execute() == 1
+    }
 
     override fun heartbeatFenced(
         id: UUID,

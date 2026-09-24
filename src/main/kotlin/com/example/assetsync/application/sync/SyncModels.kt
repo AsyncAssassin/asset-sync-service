@@ -60,6 +60,12 @@ enum class SyncRunRequeueReason {
 
     /** The provider pool had no free thread for the next page; retried like a busy cursor lease. */
     PROVIDER_BUSY,
+
+    /**
+     * An account pass has addresses waiting to retry a retryable provider failure; retried after
+     * `asset-sync.sync.worker.retry-backoff-base-delay`.
+     */
+    ADDRESS_RETRY,
 }
 
 enum class SyncRunContinuationRequeueResult {
@@ -147,6 +153,7 @@ interface SyncRunRepository {
         failureAttempts: Int? = null,
     ): Boolean
 
+    /** Requeues without spending the retry budget; a non-null [runCheckpoint] replaces the stored one. */
     fun requeueFenced(
         id: UUID,
         lockedBy: String,
@@ -157,6 +164,7 @@ interface SyncRunRepository {
         lastError: String,
         nextAttemptAt: Instant,
         updatedAt: Instant,
+        runCheckpoint: ObjectNode? = null,
     ): Boolean
 
     fun requeueContinuationFenced(
@@ -174,6 +182,7 @@ interface SyncRunRepository {
         updatedAt: Instant,
     ): SyncRunContinuationRequeueResult
 
+    /** Requeues a retryable failure; a non-null [runCheckpoint] replaces the stored one. */
     fun requeueFailureFenced(
         id: UUID,
         lockedBy: String,
@@ -186,6 +195,7 @@ interface SyncRunRepository {
         lastError: String,
         nextAttemptAt: Instant,
         updatedAt: Instant,
+        runCheckpoint: ObjectNode? = null,
     ): Boolean
 
     fun heartbeatFenced(

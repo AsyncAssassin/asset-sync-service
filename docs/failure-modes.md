@@ -135,6 +135,7 @@ Expected behavior:
 - HTTP provider responses are bounded by `asset-sync.sync.pagination.max-provider-page-bytes` before JSON parsing.
 - A response that is still arriving when the deadline cancels the fetch stops being read within one `asset-sync.provider.read-timeout`, and a body over the limit or behind an error status is closed unread, so the provider thread returns to the pool; a trickling response cannot hold it for the length of its body.
 - Retryable provider failures requeue the current `sync_run` as `QUEUED` with bounded backoff.
+- In an account sync, a retryable failure of one address without `Retry-After` defers that address instead: the pass goes on with the others, retries it once in each later claim, `retry-backoff-base-delay` apart, as a continuation (`ADDRESS_RETRY`) that spends no `failure_attempts`, and records it as failed after three failed retries. Three addresses failing in a row without a page between them, two in a claim in which the provider served no page, or one more address while 50 already wait for a retry, fail the claim as an outage, which spends `failure_attempts`; retries that fail in it do not count against their addresses, and the retried run resumes the pass.
 - HTTP 429 is retryable provider backpressure, increments `failure_attempts`, and uses valid `Retry-After` values capped by the configured max backoff.
 - A fetch the full provider pool (`asset-sync.sync.provider-max-threads`) cannot take requeues the run as a continuation (`PROVIDER_BUSY`) after `cursor-lease-retry-delay`, like a busy cursor lease: the service's own capacity says nothing about the provider, so `failure_attempts` stays, and `max-continuations-per-run` bounds the retries.
 - At max attempts, the current `sync_run` is marked `FAILED` in a short fenced transaction.
@@ -324,7 +325,7 @@ Expected behavior:
 - Runs that finish inside the window complete normally.
 - Runs still in flight afterwards are interrupted. An interrupted run is requeued as `QUEUED` with `last_requeue_reason = FAILURE` and a `last_error` naming the shutdown; `failure_attempts` is not incremented, so restarts never consume retry budget, and the run is due again at once, so the next instance takes it right after the deploy.
 - The cursor lease of an interrupted run is released before the run is requeued; if the release fails, the lease expires and recovery clears it.
-- Already committed page events remain valid; the next claim resumes from the durable checkpoint.
+- Already committed page events remain valid; the next claim resumes from the durable checkpoint. An account run keeps its pass as well, so the next claim goes on after the addresses the interrupted one finished.
 - The container stop timeout must outlast the shutdown phase. Docker Compose gives the application 40 seconds (`stop_grace_period`); with Docker's default of 10 seconds a run still in flight would be killed before it is requeued, stay `RUNNING` until recovery finds its expired lease, and lose one retry attempt.
 
 Operational signal:

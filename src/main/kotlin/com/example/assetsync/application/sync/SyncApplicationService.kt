@@ -167,8 +167,11 @@ class SyncApplicationService(
      * keyset stored in the run checkpoint, so a run whose addresses do not fit one claim completes
      * over several claims instead of starting over each time. An address whose cursor lease is
      * busy is deferred to a revisit after the scan, an address with pages left keeps the scan in
-     * place until it is drained, and an address that fails terminally is recorded and skipped, so
-     * one broken address neither blocks the others nor the account.
+     * place until it is drained, an address that fails terminally is recorded and skipped, and an
+     * address whose sync fails retryably is deferred to a retry in a later claim, so one broken
+     * address neither blocks the others nor the account. Retryable failures of several addresses
+     * in a row are the provider's rather than theirs ([OutageWatch]): the claim fails and the run
+     * is retried with backoff, keeping the pass.
      */
     private fun executeAccount(
         claim: ClaimedSyncRun,
@@ -189,6 +192,9 @@ class SyncApplicationService(
         }
 
         val pass = AccountSyncPass.from(claim.run.runCheckpoint)
+        // From here on, a claim that fails or is interrupted saves the pass as well.
+        progress.accountPass = pass
+        val outages = OutageWatch(pass)
         while (!pass.scanComplete) {
             val batch = watchedAddressRepository.findSyncableByAccountIdAfter(
                 accountId = accountId,
@@ -202,25 +208,37 @@ class SyncApplicationService(
             }
             for (watchedAddress in batch) {
                 if (claimBudgetExceeded(progress, runBudget)) {
-                    return accountContinuation(pass, SyncRunRequeueReason.CONTINUATION)
+                    return accountContinuation(pass, outages, SyncRunRequeueReason.CONTINUATION)
                 }
                 when (val outcome = processAccountAddress(claim, watchedAddress, progress, runBudget)) {
-                    AccountAddressOutcome.Done -> pass.advancePast(watchedAddress)
+                    AccountAddressOutcome.Done -> {
+                        outages.pageServed()
+                        pass.advancePast(watchedAddress)
+                    }
                     AccountAddressOutcome.LeaseBusy -> {
                         if (!pass.deferBusy(watchedAddress.id)) {
                             // The revisit list is full: wait for this lease instead of skipping it.
-                            return accountContinuation(pass, SyncRunRequeueReason.LEASE_BUSY)
+                            return accountContinuation(pass, outages, SyncRunRequeueReason.LEASE_BUSY)
                         }
                         pass.advancePast(watchedAddress)
                     }
-                    AccountAddressOutcome.Continuation ->
-                        return accountContinuation(pass, SyncRunRequeueReason.CONTINUATION)
+                    AccountAddressOutcome.Continuation -> {
+                        outages.pageServed()
+                        return accountContinuation(pass, outages, SyncRunRequeueReason.CONTINUATION)
+                    }
                     // The pass resumes at this address once the pool has a free thread.
                     AccountAddressOutcome.ProviderBusy ->
-                        return accountContinuation(pass, SyncRunRequeueReason.PROVIDER_BUSY)
+                        return accountContinuation(pass, outages, SyncRunRequeueReason.PROVIDER_BUSY)
                     is AccountAddressOutcome.Failed -> {
                         pass.recordFailure(watchedAddress.id, outcome.error)
                         pass.advancePast(watchedAddress)
+                    }
+                    is AccountAddressOutcome.RetryLater -> {
+                        if (!pass.deferRetry(watchedAddress.id)) {
+                            throw retryListFull(outcome)
+                        }
+                        pass.advancePast(watchedAddress)
+                        outages.failed(outcome)
                     }
                 }
             }
@@ -229,75 +247,156 @@ class SyncApplicationService(
         // Each deferred address gets one attempt per claim; the ones still busy wait for the next.
         for (watchedAddressId in pass.pendingRevisits()) {
             if (claimBudgetExceeded(progress, runBudget)) {
-                return accountContinuation(pass, SyncRunRequeueReason.CONTINUATION)
+                return accountContinuation(pass, outages, SyncRunRequeueReason.CONTINUATION)
             }
-            val watchedAddress = watchedAddressRepository.findSyncableById(watchedAddressId)
-                ?.takeIf { it.accountId == accountId }
+            val watchedAddress = deferredPassAddress(accountId, watchedAddressId)
             if (watchedAddress == null) {
-                // Disabled, on a chain disabled, or moved since it was deferred: no longer part of this pass.
                 pass.revisitDone(watchedAddressId)
                 continue
             }
             when (val outcome = processAccountAddress(claim, watchedAddress, progress, runBudget)) {
-                AccountAddressOutcome.Done -> pass.revisitDone(watchedAddressId)
+                AccountAddressOutcome.Done -> {
+                    outages.pageServed()
+                    pass.revisitDone(watchedAddressId)
+                }
                 AccountAddressOutcome.LeaseBusy -> Unit
-                AccountAddressOutcome.Continuation ->
-                    return accountContinuation(pass, SyncRunRequeueReason.CONTINUATION)
+                AccountAddressOutcome.Continuation -> {
+                    outages.pageServed()
+                    return accountContinuation(pass, outages, SyncRunRequeueReason.CONTINUATION)
+                }
                 AccountAddressOutcome.ProviderBusy ->
-                    return accountContinuation(pass, SyncRunRequeueReason.PROVIDER_BUSY)
+                    return accountContinuation(pass, outages, SyncRunRequeueReason.PROVIDER_BUSY)
                 is AccountAddressOutcome.Failed -> {
                     pass.revisitDone(watchedAddressId)
                     pass.recordFailure(watchedAddressId, outcome.error)
                 }
+                is AccountAddressOutcome.RetryLater -> {
+                    if (!pass.deferRetry(watchedAddressId)) {
+                        throw retryListFull(outcome)
+                    }
+                    pass.revisitDone(watchedAddressId)
+                    outages.failed(outcome)
+                }
             }
         }
-        if (pass.pendingRevisits().isNotEmpty()) {
-            return accountContinuation(pass, SyncRunRequeueReason.LEASE_BUSY)
+
+        // Each address deferred to a retry by an earlier claim gets one retry per claim.
+        for (watchedAddressId in pass.dueRetries()) {
+            if (claimBudgetExceeded(progress, runBudget)) {
+                return accountContinuation(pass, outages, SyncRunRequeueReason.CONTINUATION)
+            }
+            val watchedAddress = deferredPassAddress(accountId, watchedAddressId)
+            if (watchedAddress == null) {
+                pass.retryDone(watchedAddressId)
+                continue
+            }
+            when (val outcome = processAccountAddress(claim, watchedAddress, progress, runBudget)) {
+                AccountAddressOutcome.Done -> {
+                    outages.pageServed()
+                    pass.retryDone(watchedAddressId)
+                }
+                AccountAddressOutcome.LeaseBusy -> Unit
+                AccountAddressOutcome.Continuation -> {
+                    outages.pageServed()
+                    pass.retryProgressed(watchedAddressId)
+                    return accountContinuation(pass, outages, SyncRunRequeueReason.CONTINUATION)
+                }
+                AccountAddressOutcome.ProviderBusy ->
+                    return accountContinuation(pass, outages, SyncRunRequeueReason.PROVIDER_BUSY)
+                is AccountAddressOutcome.Failed -> {
+                    pass.retryDone(watchedAddressId)
+                    pass.recordFailure(watchedAddressId, outcome.error)
+                }
+                is AccountAddressOutcome.RetryLater -> outages.retryFailed(watchedAddressId, outcome)
+            }
         }
 
-        return if (pass.hasFailures) SyncClaimOutcome.Failed(pass.failureSummary()) else SyncClaimOutcome.Done
+        outages.settle()
+        return when {
+            pass.hasPendingRetries -> accountContinuation(pass, outages, SyncRunRequeueReason.ADDRESS_RETRY)
+            pass.pendingRevisits().isNotEmpty() -> accountContinuation(pass, outages, SyncRunRequeueReason.LEASE_BUSY)
+            pass.hasFailures -> SyncClaimOutcome.Failed(pass.failureSummary())
+            else -> SyncClaimOutcome.Done
+        }
     }
+
+    /** An address deferred earlier, as long as it still belongs to the pass: syncable and of this account. */
+    private fun deferredPassAddress(accountId: UUID, watchedAddressId: UUID): WatchedAddress? =
+        // Disabled, on a chain disabled, or moved since it was deferred: no longer part of this pass.
+        watchedAddressRepository.findSyncableById(watchedAddressId)?.takeIf { it.accountId == accountId }
 
     private fun claimBudgetExceeded(progress: SyncProgress, runBudget: RunBudget): Boolean =
         runBudget.accountBudgetExceeded(progress) || runBudget.durationExceeded(Instant.now(clock))
 
-    private fun accountContinuation(pass: AccountSyncPass, reason: SyncRunRequeueReason): SyncClaimOutcome =
-        SyncClaimOutcome.Continuation(
+    private fun accountContinuation(
+        pass: AccountSyncPass,
+        outages: OutageWatch,
+        reason: SyncRunRequeueReason,
+    ): SyncClaimOutcome {
+        outages.settle()
+        return SyncClaimOutcome.Continuation(
             reason = reason,
             runCheckpoint = pass.toCheckpoint(),
-            delay = if (reason == SyncRunRequeueReason.LEASE_BUSY || reason == SyncRunRequeueReason.PROVIDER_BUSY) {
-                syncProperties.pagination.cursorLeaseRetryDelay
-            } else {
-                syncProperties.pagination.continuationRequeueDelay
+            delay = when (reason) {
+                SyncRunRequeueReason.LEASE_BUSY, SyncRunRequeueReason.PROVIDER_BUSY ->
+                    syncProperties.pagination.cursorLeaseRetryDelay
+                SyncRunRequeueReason.ADDRESS_RETRY -> syncProperties.worker.retryBackoffBaseDelay
+                else -> syncProperties.pagination.continuationRequeueDelay
             },
+        )
+    }
+
+    /** A full retry list says the provider fails too many addresses of the pass to be their fault. */
+    private fun retryListFull(outcome: AccountAddressOutcome.RetryLater): ChainProviderUnavailableException =
+        ChainProviderUnavailableException(
+            "Provider unavailable: ${AccountSyncPass.MAX_RETRIES} addresses of the pass already wait for a retry, " +
+                "and the next one failed with: ${outcome.error}",
+            outcome.exception,
         )
 
     /**
      * Syncs one address of an account run. Failures that would fail the same way on every attempt
      * for this address only (malformed or rejected provider data, a configuration gap of the
-     * address, a database constraint) end that address. A configuration failure of the whole
+     * address, a database constraint) end that address. A retryable provider failure without
+     * `Retry-After`, such as a timeout on a heavy address or a `5xx`, may concern this address
+     * only, so the address is retried in a later claim. A configuration failure of the whole
      * provider, such as a rejected credential or a redirect, would fail every address the same way,
-     * so it fails the run at once, like anything retryable, a lost claim or lease, and shutdown
-     * interrupts, which keep failing the whole claim.
+     * so it fails the run at once. `Retry-After`, a database failure, a lost claim or lease, and
+     * shutdown interrupts fail the whole claim.
      */
     private fun processAccountAddress(
         claim: ClaimedSyncRun,
         watchedAddress: WatchedAddress,
         progress: SyncProgress,
         runBudget: RunBudget,
-    ): AccountAddressOutcome =
+    ): AccountAddressOutcome {
         try {
-            when (processAddressWithinClaim(claim = claim, watchedAddress = watchedAddress, progress = progress, runBudget = runBudget)) {
+            return when (processAddressWithinClaim(claim = claim, watchedAddress = watchedAddress, progress = progress, runBudget = runBudget)) {
                 AddressSyncOutcome.Done -> AccountAddressOutcome.Done
                 AddressSyncOutcome.LeaseBusy -> AccountAddressOutcome.LeaseBusy
                 AddressSyncOutcome.Continuation -> AccountAddressOutcome.Continuation
                 AddressSyncOutcome.ProviderBusy -> AccountAddressOutcome.ProviderBusy
             }
         } catch (exception: RuntimeException) {
+            // A shutdown, even one that reached only the provider thread, requeues the claim as interrupted.
+            if (Thread.currentThread().isInterrupted || exception.causedByInterruption()) {
+                throw exception
+            }
+            if (exception is ChainProviderUnavailableException && exception.retryAfter == null) {
+                val error = exception.runError()
+                logger.warn(
+                    "account_sync_address_retry_later syncRunId={} accountId={} watchedAddressId={} error={}",
+                    claim.run.id,
+                    watchedAddress.accountId,
+                    watchedAddress.id,
+                    error,
+                )
+                return AccountAddressOutcome.RetryLater(error = error, exception = exception)
+            }
             val addressTerminal = exception is ProviderDataInvalidException ||
                 exception is AddressConfigurationException ||
                 exception is DataIntegrityViolationException
-            if (!addressTerminal || Thread.currentThread().isInterrupted) {
+            if (!addressTerminal) {
                 throw exception
             }
             val error = exception.runError()
@@ -309,8 +408,9 @@ class SyncApplicationService(
                 error,
             )
             logFailureDetail(claim, error, exception)
-            AccountAddressOutcome.Failed(error)
+            return AccountAddressOutcome.Failed(error)
         }
+    }
 
     private fun processAddressWithinClaim(
         claim: ClaimedSyncRun,
@@ -889,6 +989,7 @@ class SyncApplicationService(
                 eventsSeen = progress.eventsSeen,
                 eventsChanged = progress.eventsChanged,
                 lastError = INTERRUPTED_REQUEUE_ERROR,
+                runCheckpoint = progress.accountPass?.toCheckpoint(),
             )
         } catch (markException: Throwable) {
             throwable.addSuppressed(markException)
@@ -936,6 +1037,7 @@ class SyncApplicationService(
                     eventsChanged = progress.eventsChanged,
                     lastError = error,
                     retryAfter = (throwable as? ChainProviderUnavailableException)?.retryAfter,
+                    runCheckpoint = progress.accountPass?.toCheckpoint(),
                 )
             }
         } catch (markException: Throwable) {
@@ -1043,7 +1145,61 @@ class SyncApplicationService(
         var claimEventsSeen: Int = 0,
         var claimEventsChanged: Int = 0,
         var accountPagesThisClaim: Int = 0,
+        /** The pass of an account run, saved by whichever way the claim ends. */
+        var accountPass: AccountSyncPass? = null,
     )
+
+    /**
+     * Tells, within one claim of an account pass, an address the provider fails from a provider
+     * that is down. Retryable failures since the last page the provider served form a streak:
+     * [OUTAGE_STREAK] in a row, or [OUTAGE_STREAK_WITHOUT_PAGES] in a claim in which the provider
+     * served no page at all, mean the provider is unavailable, and the claim fails as a whole. A failed retry counts against
+     * its address only once the provider has served a later page or the claim ends without an
+     * outage, so an outage costs the waiting addresses none of their retries.
+     */
+    private class OutageWatch(private val pass: AccountSyncPass) {
+        private var anyPageServed = false
+        private var streak = 0
+        private var lastFailure: AccountAddressOutcome.RetryLater? = null
+        private val unsettledRetries = mutableListOf<Pair<UUID, String>>()
+
+        fun pageServed() {
+            anyPageServed = true
+            streak = 0
+            settleRetries()
+        }
+
+        /** Counts a retryable failure; throws once the streak makes it an outage. */
+        fun failed(outcome: AccountAddressOutcome.RetryLater) {
+            streak += 1
+            lastFailure = outcome
+            if (streak >= OUTAGE_STREAK) {
+                throw outage(outcome)
+            }
+        }
+
+        fun retryFailed(watchedAddressId: UUID, outcome: AccountAddressOutcome.RetryLater) {
+            unsettledRetries += watchedAddressId to outcome.error
+            failed(outcome)
+        }
+
+        /** Ends the claim without an outage, or throws one; settling twice changes nothing. */
+        fun settle() {
+            val last = lastFailure
+            if (!anyPageServed && streak >= OUTAGE_STREAK_WITHOUT_PAGES && last != null) {
+                throw outage(last)
+            }
+            settleRetries()
+        }
+
+        private fun settleRetries() {
+            unsettledRetries.forEach { (watchedAddressId, error) -> pass.retryFailed(watchedAddressId, error) }
+            unsettledRetries.clear()
+        }
+
+        private fun outage(last: AccountAddressOutcome.RetryLater): ChainProviderUnavailableException =
+            ChainProviderUnavailableException("Provider unavailable: $streak addresses in a row failed, the last with: ${last.error}", last.exception)
+    }
 
     private data class RunBudget(
         val startedAt: Instant,
@@ -1110,10 +1266,19 @@ class SyncApplicationService(
         data object ProviderBusy : AccountAddressOutcome
 
         data class Failed(val error: String) : AccountAddressOutcome
+
+        /** A retryable provider failure: the address is retried in a later claim. */
+        data class RetryLater(val error: String, val exception: ChainProviderUnavailableException) : AccountAddressOutcome
     }
 
     private companion object {
         const val INTERRUPTED_REQUEUE_ERROR = "worker interrupted during shutdown; requeued without consuming retry budget"
+
+        /** Retryable failures of this many addresses in a row, without a page between them, are a provider outage. */
+        const val OUTAGE_STREAK = 3
+
+        /** As many are enough in a claim in which the provider served no page at all. */
+        const val OUTAGE_STREAK_WITHOUT_PAGES = 2
     }
 }
 

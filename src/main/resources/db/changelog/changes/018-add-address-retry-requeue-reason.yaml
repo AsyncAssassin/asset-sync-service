@@ -1,0 +1,21 @@
+databaseChangeLog:
+  - changeSet:
+      id: 018-add-address-retry-requeue-reason
+      author: AsyncAssassin
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            # An account run whose pass has addresses waiting to retry a retryable provider
+            # failure is requeued as a continuation with its own reason instead of failing its claim.
+            sql: |
+              ALTER TABLE sync_runs
+                  DROP CONSTRAINT ck_sync_runs_last_requeue_reason;
+
+              ALTER TABLE sync_runs
+                  ADD CONSTRAINT ck_sync_runs_last_requeue_reason
+                      CHECK (
+                          last_requeue_reason IS NULL
+                          OR last_requeue_reason IN ('FAILURE', 'CONTINUATION', 'LEASE_BUSY', 'PROVIDER_BUSY', 'ADDRESS_RETRY')
+                      );

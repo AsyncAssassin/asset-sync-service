@@ -2,6 +2,7 @@ package com.example.assetsync.integration
 
 import com.example.assetsync.TestcontainersConfiguration
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
+import com.example.assetsync.application.sync.ChainProviderUnavailableException
 import com.example.assetsync.application.sync.SyncApplicationService
 import com.example.assetsync.application.sync.SyncCursorRepository
 import com.example.assetsync.application.sync.SyncRunLifecycleService
@@ -11,6 +12,7 @@ import com.example.assetsync.infrastructure.provider.FakeChainProvider
 import com.example.assetsync.infrastructure.provider.FakeChainProviderKey
 import com.example.assetsync.infrastructure.provider.FakeChainProviderPage
 import com.example.assetsync.infrastructure.provider.FakeChainProviderStep
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import java.math.BigDecimal
 import java.sql.Timestamp
@@ -38,7 +40,8 @@ import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 /**
  * Account sync passes that do not fit one claim. The claim budget is two provider pages and the
  * per-address budget one page, so a three-address account needs two claims and an address with a
- * second page needs a claim of its own. Requeue delays are zero so the next claim is due at once.
+ * second page needs a claim of its own. Continuation delays are zero so the next claim is due at
+ * once; the retry backoff is not, and the tests make such a run due themselves.
  */
 @ActiveProfiles("test")
 @Import(TestcontainersConfiguration::class)
@@ -227,12 +230,169 @@ class AccountSyncIntegrationTests(
         assertEquals(2, tableCount("observed_transactions"))
     }
 
+    @Test
+    fun `an address that keeps failing retryably is recorded after three retries while the others sync`() {
+        val accountId = createAccount()
+        registerAddress(accountId, "0xretry-one")
+        val stuckAddressId = registerAddress(accountId, "0xretry-stuck")
+        registerAddress(accountId, "0xretry-three")
+        scriptOneEvent("0xretry-one")
+        scriptTimeout("0xretry-stuck")
+        scriptOneEvent("0xretry-three")
+
+        val syncRunId = submitAccountSync(accountId)
+        runNextClaim()
+
+        // The scan went past the address instead of failing the claim, and the retry waits.
+        assertEquals("QUEUED", runStatus(syncRunId))
+        assertEquals("ADDRESS_RETRY", lastRequeueReason(syncRunId))
+        assertEquals(2, tableCount("observed_transactions"))
+        assertTrue(
+            singleInt("SELECT extract(epoch FROM next_attempt_at - now())::int FROM sync_runs WHERE id = ?", syncRunId) > 20,
+            "a retry waits retry-backoff-base-delay",
+        )
+
+        repeat(3) {
+            makeDue(syncRunId)
+            runNextClaim()
+        }
+
+        assertEquals("FAILED", runStatus(syncRunId))
+        assertEquals(
+            "1 of 3 addresses failed terminally: $stuckAddressId: still failing after 3 retries: $TIMEOUT",
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId),
+        )
+        assertEquals(0, singleInt("SELECT failure_attempts FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(3, singleInt("SELECT continuation_count FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(
+            listOf("0xretry-one", "0xretry-stuck", "0xretry-three", "0xretry-stuck", "0xretry-stuck", "0xretry-stuck").map { key(it) },
+            fakeChainProvider.requestedKeys(),
+        )
+    }
+
+    @Test
+    fun `three addresses failing in a row are a provider outage, and the retried run keeps its pass`() {
+        val accountId = createAccount()
+        val addresses = listOf("0xoutage-one", "0xoutage-two", "0xoutage-three", "0xoutage-four", "0xoutage-five")
+        val addressIds = addresses.map { registerAddress(accountId, it) }
+        val failing = addresses.subList(1, 4)
+        scriptOneEvent("0xoutage-one")
+        failing.forEach { scriptTimeout(it) }
+        scriptOneEvent("0xoutage-five")
+
+        val syncRunId = submitAccountSync(accountId)
+        runNextClaim()
+
+        assertEquals("QUEUED", runStatus(syncRunId))
+        assertEquals("FAILURE", lastRequeueReason(syncRunId))
+        assertEquals(1, singleInt("SELECT failure_attempts FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(
+            "Provider unavailable: 3 addresses in a row failed, the last with: $TIMEOUT",
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId),
+        )
+        val pass = accountPass(syncRunId)
+        assertEquals(addressIds[3], pass["afterId"].asText())
+        assertEquals(addressIds.subList(1, 4), pass["retries"].map { it["watchedAddressId"].asText() })
+        assertEquals(listOf(0, 0, 0), pass["retries"].map { it["failedRetries"].asInt() })
+
+        failing.forEach { scriptOneEvent(it) }
+        makeDue(syncRunId)
+        runNextClaim()
+        runNextClaim()
+
+        assertEquals("SUCCEEDED", runStatus(syncRunId))
+        assertEquals(5, tableCount("observed_transactions"))
+        assertEquals(1, singleInt("SELECT failure_attempts FROM sync_runs WHERE id = ?", syncRunId))
+        // The retry resumed the scan after the outage: the first address was fetched only once.
+        assertEquals((addresses + failing).map { key(it) }, fakeChainProvider.requestedKeys())
+    }
+
+    @Test
+    fun `retries that all fail are a provider outage and cost the addresses none of their retries`() {
+        val accountId = createAccount()
+        registerAddress(accountId, "0xflaky-one")
+        registerAddress(accountId, "0xflaky-two")
+        registerAddress(accountId, "0xflaky-three")
+        scriptTimeout("0xflaky-one")
+        scriptOneEvent("0xflaky-two")
+        scriptTimeout("0xflaky-three")
+
+        val syncRunId = submitAccountSync(accountId)
+        runNextClaim()
+        assertEquals("ADDRESS_RETRY", lastRequeueReason(syncRunId))
+
+        makeDue(syncRunId)
+        runNextClaim()
+
+        assertEquals("QUEUED", runStatus(syncRunId))
+        assertEquals("FAILURE", lastRequeueReason(syncRunId))
+        assertEquals(1, singleInt("SELECT failure_attempts FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(
+            "Provider unavailable: 2 addresses in a row failed, the last with: $TIMEOUT",
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId),
+        )
+        assertEquals(listOf(0, 0), accountPass(syncRunId)["retries"].map { it["failedRetries"].asInt() })
+
+        scriptOneEvent("0xflaky-one")
+        scriptOneEvent("0xflaky-three")
+        makeDue(syncRunId)
+        runNextClaim()
+
+        assertEquals("SUCCEEDED", runStatus(syncRunId))
+        assertEquals(3, tableCount("observed_transactions"))
+    }
+
+    @Test
+    fun `a claim interrupted by shutdown saves the pass, so the next claim resumes after the synced addresses`() {
+        val accountId = createAccount()
+        val firstAddressId = registerAddress(accountId, "0xshutdown-one")
+        registerAddress(accountId, "0xshutdown-two")
+        scriptOneEvent("0xshutdown-one")
+        // The provider thread is interrupted by a shutdown before the worker thread is.
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xshutdown-two",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.ThrowableFailure(
+                    ChainProviderUnavailableException("Provider fetch interrupted.", InterruptedException()),
+                ),
+            ),
+        )
+
+        val syncRunId = submitAccountSync(accountId)
+        runNextClaim()
+        // The claim puts the interrupt back for its worker thread, which here is the test thread.
+        assertTrue(Thread.interrupted())
+
+        assertEquals("QUEUED", runStatus(syncRunId))
+        assertEquals(0, singleInt("SELECT failure_attempts FROM sync_runs WHERE id = ?", syncRunId))
+        assertTrue(singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId).startsWith("worker interrupted during shutdown"))
+        assertEquals(firstAddressId, accountPass(syncRunId)["afterId"].asText())
+
+        scriptOneEvent("0xshutdown-two")
+        runNextClaim()
+
+        assertEquals("SUCCEEDED", runStatus(syncRunId))
+        assertEquals(listOf("0xshutdown-one", "0xshutdown-two", "0xshutdown-two").map { key(it) }, fakeChainProvider.requestedKeys())
+    }
+
     private fun scriptOneEvent(address: String) {
         fakeChainProvider.setEvents(
             chainId = "local-evm",
             address = address,
             asset = "USDC",
             events = listOf(providerEvent(txHash = "$address-1", address = address)),
+        )
+    }
+
+    /** An address the provider fails on every fetch, as with a timeout that no retry fixes. */
+    private fun scriptTimeout(address: String) {
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = address,
+            asset = "USDC",
+            steps = listOf(FakeChainProviderStep.Failure(TIMEOUT)),
         )
     }
 
@@ -302,6 +462,21 @@ class AccountSyncIntegrationTests(
     private fun runStatus(syncRunId: UUID): String =
         singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId)
 
+    private fun lastRequeueReason(syncRunId: UUID): String =
+        singleString("SELECT last_requeue_reason FROM sync_runs WHERE id = ?", syncRunId)
+
+    private fun accountPass(syncRunId: UUID): JsonNode =
+        objectMapper.readTree(singleString("SELECT run_checkpoint::text FROM sync_runs WHERE id = ?", syncRunId))["accountPass"]
+
+    /** Makes a run that waits for a retry backoff due now. */
+    private fun makeDue(syncRunId: UUID) {
+        jdbcTemplate.update(
+            "UPDATE sync_runs SET next_attempt_at = ? WHERE id = ?",
+            Timestamp.from(Instant.now().minusSeconds(1)),
+            syncRunId,
+        )
+    }
+
     private fun tableCount(table: String): Int =
         singleInt("SELECT count(*) FROM $table")
 
@@ -322,5 +497,9 @@ class AccountSyncIntegrationTests(
             "UPDATE chain_configs SET enabled = true, required_confirmations = 3, updated_at = ? WHERE chain_id = 'local-evm'",
             Timestamp.from(Instant.now()),
         )
+    }
+
+    private companion object {
+        const val TIMEOUT = "Provider timeout after PT10S."
     }
 }
