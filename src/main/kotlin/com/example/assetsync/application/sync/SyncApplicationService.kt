@@ -830,7 +830,8 @@ class SyncApplicationService(
                 throw ProviderDataInvalidException("Provider returned an event with negative block metadata.")
             }
             // Checked for every event before the first one is written, so a bad event later in
-            // the page cannot leave the events before it committed behind a terminal failure.
+            // the page cannot leave the events before it committed behind a terminal failure. A
+            // conflict with a row stored before this page shows only when its event is written.
             val txHash = ChainIdentityNormalizer.normalizeTxHash(expected.chainId, event.txHash)
             ChainIdentityNormalizer.txHashViolation(chainId = expected.chainId, txHash = txHash)?.let { violation ->
                 throw ProviderDataInvalidException("Provider returned an event with a malformed transaction hash: $violation")

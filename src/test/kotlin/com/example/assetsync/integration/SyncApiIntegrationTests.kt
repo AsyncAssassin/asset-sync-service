@@ -1,7 +1,6 @@
 package com.example.assetsync.integration
 
 import com.example.assetsync.TestcontainersConfiguration
-import com.example.assetsync.api.dto.MAX_TX_HASH_LENGTH
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
 import com.example.assetsync.application.sync.ProviderConfigurationException
 import com.example.assetsync.application.sync.SyncCursorRepository
@@ -1063,7 +1062,7 @@ class SyncApiIntegrationTests(
                         events = listOf(
                             firstEvent,
                             providerEvent(
-                                txHash = "x".repeat(MAX_TX_HASH_LENGTH + 1),
+                                txHash = REFUSED_TX_HASH,
                                 address = "0xsync-partial-page-retry",
                                 blockHeight = 100,
                                 eventIndex = 1,
@@ -1079,7 +1078,7 @@ class SyncApiIntegrationTests(
         )
 
         val failedRunId = submitAddressSync(addressId)
-        runNextClaimedSyncs()
+        withRefusedTxHash { runNextClaimedSyncs() }
 
         assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", failedRunId))
         assertEquals(1, tableCount("observed_transactions"))
@@ -1163,6 +1162,9 @@ class SyncApiIntegrationTests(
                 to "txHash must not be blank",
             providerEvent(txHash = "0xsync:invalid-page", address = "0xsync-invalid-page", eventIndex = 1)
                 to "txHash must not contain whitespace, '/', or ':' on local-evm",
+            // The database refuses it too, but only after the events before it were written.
+            providerEvent(txHash = "0x" + "a".repeat(127), address = "0xsync-invalid-page", eventIndex = 1)
+                to "txHash must be at most 128 characters",
         )
 
         invalidEvents.forEach { (invalidEvent, expectedError) ->
@@ -1296,14 +1298,14 @@ class SyncApiIntegrationTests(
             asset = "USDC",
             events = listOf(
                 providerEvent(
-                    txHash = "x".repeat(MAX_TX_HASH_LENGTH + 1),
+                    txHash = REFUSED_TX_HASH,
                     address = "0xsync-db-constraint",
                 ),
             ),
         )
 
         val syncRunId = submitAddressSync(addressId)
-        runNextClaimedSyncs()
+        withRefusedTxHash { runNextClaimedSyncs() }
 
         assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
         // The constraint violation's message quotes SQL; readers of the run see only its class.
@@ -1430,6 +1432,19 @@ class SyncApiIntegrationTests(
         assertEquals(emptyList(), fakeChainProvider.requestedKeys())
     }
 
+
+    /**
+     * Runs [block] while PostgreSQL refuses [REFUSED_TX_HASH], like a constraint the service does
+     * not check itself: page validation passes, and the event fails only as it is written.
+     */
+    private fun withRefusedTxHash(block: () -> Unit) {
+        jdbcTemplate.execute("ALTER TABLE observed_transactions ADD CONSTRAINT ck_test_refused_tx_hash CHECK (tx_hash <> '$REFUSED_TX_HASH')")
+        try {
+            block()
+        } finally {
+            jdbcTemplate.execute("ALTER TABLE observed_transactions DROP CONSTRAINT IF EXISTS ck_test_refused_tx_hash")
+        }
+    }
     private fun submitAddressSync(addressId: String): UUID =
         submitSync("/api/v1/addresses/$addressId/sync", expectedTargetId = addressId, expectedTargetType = "ADDRESS")
 
@@ -1569,5 +1584,9 @@ class SyncApiIntegrationTests(
             """.trimIndent(),
             Timestamp.from(Instant.now()),
         )
+    }
+
+    private companion object {
+        const val REFUSED_TX_HASH = "0xsync-refused-by-the-database"
     }
 }
