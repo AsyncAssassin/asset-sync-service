@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-24
+
 ### Changed
 
 - **Breaking:** a `base-url` with a user name or password stops startup, with a message that leaves the URL out. The HTTP client never sent them, so a bridge that needs them could only answer `401`.
@@ -157,7 +159,8 @@ All notable changes to this project are documented in this file. The format is b
 
 - Initial MVP: accounts, watched addresses, observed event ingestion through an idempotent lifecycle state machine, transactional outbox with a structured-log publisher, synchronous sync through a fake chain provider, Liquibase schema (changesets 001 to 005), jOOQ persistence, Testcontainers-backed tests, and Actuator health, metrics, and OpenAPI.
 
-[Unreleased]: https://github.com/AsyncAssassin/asset-sync-service/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/AsyncAssassin/asset-sync-service/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/AsyncAssassin/asset-sync-service/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/AsyncAssassin/asset-sync-service/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/AsyncAssassin/asset-sync-service/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/AsyncAssassin/asset-sync-service/compare/v0.1.1...v0.2.0
