@@ -51,7 +51,7 @@ Changelog rules:
 - `db.changelog-master.yaml` includes files in deterministic order.
 - Each changeset has a stable author and id.
 - Migrations are forward-only during MVP development.
-- Seed data is limited to local chain configuration required for fake-provider tests and local runs.
+- Seed data is configuration only: the `local-evm` chain for fake-provider tests and local runs (changeset 005), and the `eth-sepolia` and `eth-mainnet` chains with their `USDC` asset configs (changeset 015). No business rows are seeded outside the `demo` profile.
 - No PostgreSQL enum types in the MVP; use text plus `CHECK` constraints to keep status evolution simple.
 - Data-normalization changesets must fail fast when existing rows would collide after normalization. Operators must manually clean up or backfill those rows before rerunning the migration; changesets must not silently merge or delete business rows.
 - Changeset `006` adds input-length constraints as `NOT VALID`, so new writes are protected immediately while pre-existing oversized rows are not scanned during that upgrade step. Changeset `011` validates those constraints; operators with legacy oversized rows must clean them before applying `011`.
@@ -402,13 +402,13 @@ Notes:
 - Publish completion runs per event in its own short transaction and is fenced with `WHERE id = ? AND status IN ('NEW', 'FAILED') AND next_attempt_at = :claimedLeaseUntil`.
 - A completion update that affects zero rows is stale and must not overwrite the newer owner state.
 - `FAILED` rows retry with bounded backoff until max attempts; after that they become terminal `DEAD` rows and are excluded from the due/backlog set.
-- Published-row retention deletes old `PUBLISHED` rows in batches when enabled.
+- Published-row retention deletes old `PUBLISHED` rows in batches when enabled. `DEAD` rows are kept for good, as the deliveries to look into; delete them by hand once handled, for example `DELETE FROM outbox_events WHERE status = 'DEAD' AND updated_at < now() - interval '30 days';`.
 - Delivery is at-least-once. Consumers must deduplicate by `id` or `idempotency_key`.
 - A process crash after publish but before marking `PUBLISHED` may produce duplicate delivery.
 
 ### `sync_runs`
 
-Purpose: durable queue and diagnostic record for manual or scheduled sync execution.
+Purpose: durable queue and diagnostic record for sync execution. Runs are created only by `POST /api/v1/addresses/{addressId}/sync` and `POST /api/v1/accounts/{accountId}/sync`; nothing schedules a sync.
 
 Key columns:
 

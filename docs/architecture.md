@@ -121,6 +121,7 @@ sequenceDiagram
     participant Client
     participant API as AccountController
     participant App as AccountApplicationService
+    participant Addresses as WatchedAddressApplicationService
     participant Repo as jOOQ Repositories
     participant DB as PostgreSQL
 
@@ -130,16 +131,16 @@ sequenceDiagram
     Repo->>DB: INSERT accounts
     DB-->>Repo: account row
     Repo-->>App: Account
-    App-->>API: AccountResponse
+    App-->>API: Account
     API-->>Client: 201 Created
 
     Client->>API: POST /api/v1/accounts/{id}/addresses
-    API->>App: registerWatchedAddress(command)
-    App->>Repo: insert watched address
+    API->>Addresses: registerWatchedAddress(command)
+    Addresses->>Repo: insert watched address
     Repo->>DB: INSERT watched_addresses
     DB-->>Repo: watched address row
-    Repo-->>App: WatchedAddress
-    App-->>API: WatchedAddressResponse
+    Repo-->>Addresses: WatchedAddress
+    Addresses-->>API: WatchedAddress
     API-->>Client: 201 Created
 ```
 
@@ -153,7 +154,7 @@ sequenceDiagram
     participant Worker as SyncRunWorkerJob
     participant Cursor as SyncCursorRepository
     participant Provider as ActiveChainProvider
-    participant Ingest as ObservedTransactionIngestionService
+    participant Ingest as ObservedEventApplicationService
     participant DB as PostgreSQL
 
     Client->>API: POST /api/v1/addresses/{addressId}/sync
@@ -279,7 +280,7 @@ Account sync does not own a provider cursor; provider resume state remains per w
 sequenceDiagram
     participant Client
     participant API as ObservedEventController
-    participant Ingest as ObservedTransactionIngestionService
+    participant Ingest as ObservedEventApplicationService
     participant Domain as TransactionStateMachine
     participant Repo as jOOQ Repositories
     participant DB as PostgreSQL
@@ -296,7 +297,7 @@ sequenceDiagram
     Repo->>DB: INSERT/UPDATE observed_transactions
     Ingest->>Repo: insert outbox event if state changed
     Repo->>DB: INSERT outbox_events ON CONFLICT DO NOTHING
-    Ingest-->>API: IngestionResponse
+    Ingest-->>API: ObservedEventIngestionResult
     API-->>Client: 200 OK or 201 Created
 ```
 
@@ -305,7 +306,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Provider
-    participant Ingest as ObservedTransactionIngestionService
+    participant Ingest as ObservedEventApplicationService
     participant Domain as TransactionStateMachine
     participant DB as PostgreSQL
 
@@ -323,7 +324,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Provider
-    participant Ingest as ObservedTransactionIngestionService
+    participant Ingest as ObservedEventApplicationService
     participant Domain as TransactionStateMachine
     participant DB as PostgreSQL
 
@@ -341,7 +342,7 @@ sequenceDiagram
 sequenceDiagram
     participant Poller as OutboxPublisherJob
     participant DB as PostgreSQL
-    participant Publisher as LocalPublisherAdapter
+    participant Publisher as LocalStructuredLogOutboxEventPublisher
 
     Poller->>DB: SELECT due NEW/FAILED rows FOR UPDATE SKIP LOCKED
     Poller->>DB: set next_attempt_at = leaseUntil and commit
@@ -363,7 +364,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Provider
-    participant Ingest as ObservedTransactionIngestionService
+    participant Ingest as ObservedEventApplicationService
     participant Domain as TransactionStateMachine
     participant DB as PostgreSQL
 
@@ -386,18 +387,21 @@ com.example.assetsync
     error
   application
     account
+    observability
+    outbox
     sync
     transaction
-    outbox
   domain
     model
     policy
     state
   infrastructure
+    outbox
     persistence
     provider
-    outbox
-    observability
+      alchemy
+      simulator
+    sync
   config
 ```
 
@@ -439,7 +443,7 @@ OutboxEvent:
 - Durable integration event created inside the same database transaction as the observed transaction change.
 
 SyncRun:
-- Durable queue and diagnostic record for manual or scheduled sync execution.
+- Durable queue and diagnostic record for sync execution. Runs are created only by the two sync endpoints; nothing schedules a sync.
 - Not a source of truth for transaction state.
 
 ### Enums
@@ -519,7 +523,7 @@ Constraints and indexes:
 
 Rationale:
 - Confirmation thresholds are configuration, not code constants.
-- The table is seeded by Liquibase for local chains supported by the MVP.
+- Liquibase seeds `local-evm` (changeset 005) and `eth-sepolia`, enabled, and `eth-mainnet`, disabled (changeset 015).
 
 ### `asset_configs`
 
@@ -1188,7 +1192,7 @@ API tests:
 
 Logs:
 - Use structured log messages in production-like configuration.
-- `X-Request-Id` is echoed to clients, attached to `ProblemDetail`, stored in MDC for request logs, and copied into sync provider executor tasks. Executor threads restore their previous MDC state after each task to avoid leaking request ids between syncs.
+- `X-Request-Id` is echoed to clients, attached to `ProblemDetail`, and stored in MDC for request logs. A sync runs later on a worker thread, outside the request that queued it, so its log lines carry the sync run and worker ids instead of a request id; the worker's MDC is copied into each provider fetch task, and executor threads restore their previous MDC state after each task.
 - Include correlation and domain fields where available:
   - `syncRunId`
   - `accountId`
