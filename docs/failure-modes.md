@@ -111,7 +111,7 @@ Expected behavior:
 - A query already sent to a server that stopped answering ends after the 40-second JDBC socket timeout (`socketTimeout`), which sits above the 30-second `statement_timeout`; raise both together. A new connection gives up on the TCP connect after 5 seconds (`connectTimeout`).
 - A `COMMIT` is not bound by `statement_timeout`. One that waits longer than the socket timeout, behind a stalled synchronous standby or disk, answers `503` although PostgreSQL may still commit it, so a client that retries can repeat the change: a retried `POST /api/v1/accounts` with the same `externalRef` gets `409`, one without an `externalRef` creates a second account.
 - Every request with credentials reads the user store, so during the outage it waits for the connection timeout too, including authenticated `/actuator/metrics` and `/actuator/prometheus` requests; anonymous health probes do not.
-- A sync run that meets the outage records `Database error (<class>).` and is retried with backoff.
+- A sync run that meets the outage records `Database error (<class>).` and is retried with backoff. That includes a failure inside an Alchemy fetch, whose asset-config lookup reads the database: it leaves the `alchemyChainProvider` health state alone instead of reporting an Alchemy outage.
 - Readiness health check fails.
 - No fake success response is returned.
 - No provider call should be started for a sync request if the initial `sync_run` cannot be created.

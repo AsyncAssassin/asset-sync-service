@@ -10,6 +10,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- A database failure inside an Alchemy fetch no longer counts as an Alchemy outage. It turned provider health `DOWN` and put the raw exception text, which can quote SQL, into the health `error`; the run now records `Database error (<class>).` and health keeps its state.
 - A run interrupted by a worker shutdown, or one the full worker pool could not take, is due again at once. It waited for a backoff that grew with every claim of the run, so after a deploy a long account sync waited up to 15 minutes.
 - A bridge cursor reaches the bridge byte for byte. It went into the request URL unencoded: a `+`, as in base64, arrived as a space, and a cursor in JSON failed before the request was sent, as a retryable provider outage.
 - A bridge page that ends a sync without a cursor, without new events, and at an unchanged safe block succeeds. It failed terminally with `Provider returned a final page without a durable resume cursor or high-water checkpoint`, even when the address had a stored cursor, so two syncs of one address within a finality epoch were enough. The stored cursor or the checkpoint resumes the next sync, as it did before the rule existed.

@@ -38,10 +38,12 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.assertThrows
 import org.mockito.Mockito
 import org.springframework.boot.actuate.health.Status
+import org.springframework.dao.DataAccessResourceFailureException
 import org.springframework.web.client.RestClient
 
 /**
@@ -468,6 +470,21 @@ class AlchemyChainProviderTests {
     }
 
     @Test
+    fun `a database failure in the asset lookup is not an alchemy outage`() {
+        val failure = DataAccessResourceFailureException("Connection to 127.0.0.1:5432 refused")
+        val provider = provider(lookupFailure = failure)
+
+        val thrown = assertThrows<DataAccessResourceFailureException> { provider.fetchObservedEventsPage(request(cursor = cursor(100))) }
+
+        assertSame(failure, thrown)
+        assertEquals(AlchemyProviderState.PROBE_SUCCEEDED, provider.state())
+        assertNull(provider.lastError())
+        assertNull(provider.lastDataError())
+        assertEquals(Status.UP, AlchemyChainProviderHealthIndicator(provider).health().status)
+        assertEquals(emptyList(), stub.requests, "the lookup fails before any RPC call")
+    }
+
+    @Test
     fun `only chains mapped to an alchemy network are served`() {
         assertTrue(provider().supportsChain("eth-sepolia"))
         assertFalse(provider().supportsChain("local-evm"))
@@ -550,6 +567,7 @@ class AlchemyChainProviderTests {
         assetConfig: AssetConfig? = usdc,
         clock: Clock = Clock.systemUTC(),
         providerTimeout: Duration = Duration.ofSeconds(10),
+        lookupFailure: RuntimeException? = null,
     ): AlchemyChainProvider =
         AlchemyChainProvider(
             properties = properties,
@@ -559,8 +577,10 @@ class AlchemyChainProviderTests {
             ),
             client = AlchemyJsonRpcClient(restClient = RestClient.builder().build(), properties = properties, objectMapper = objectMapper, metrics = metrics),
             assetConfigRepository = object : AssetConfigRepository {
-                override fun findEnabledByChainIdAndAsset(chainId: String, asset: String): AssetConfig? =
-                    assetConfig?.takeIf { it.chainId == chainId && it.asset == asset }
+                override fun findEnabledByChainIdAndAsset(chainId: String, asset: String): AssetConfig? {
+                    lookupFailure?.let { throw it }
+                    return assetConfig?.takeIf { it.chainId == chainId && it.asset == asset }
+                }
             },
             objectMapper = objectMapper,
             providerTimeout = providerTimeout,
