@@ -5,6 +5,7 @@ import com.example.assetsync.application.observability.AssetSyncMetrics
 import com.example.assetsync.application.outbox.OutboxProcessingService
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
 import com.example.assetsync.application.sync.SyncApplicationService
+import com.example.assetsync.application.sync.SyncCursorRepository
 import com.example.assetsync.application.sync.SyncRunLifecycleService
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
@@ -65,6 +66,7 @@ class ObservabilityIntegrationTests(
     @Autowired private val syncRunLifecycleService: SyncRunLifecycleService,
     @Autowired private val syncApplicationService: SyncApplicationService,
     @Autowired private val assetSyncMetrics: AssetSyncMetrics,
+    @Autowired private val syncCursorRepository: SyncCursorRepository,
 ) {
 
     @BeforeEach
@@ -272,6 +274,23 @@ class ObservabilityIntegrationTests(
             providerFailureTimerBefore + 1,
             timerCount("asset.sync.provider.fetch.duration", "targetType", "ADDRESS", "status", "FAILED"),
         )
+    }
+
+    @Test
+    fun `a run that reaches the continuation limit counts as failed`() {
+        val failedBefore = counterCount("asset.sync.sync.runs", "targetType", "ADDRESS", "status", "FAILED")
+        val addressId = UUID.fromString(createWatchedAddress(address = "0xmetrics-continuation-limit")["id"].asText())
+        // A cursor lease held elsewhere makes the claim end as a continuation, the one past the limit.
+        val now = Instant.now()
+        syncCursorRepository.ensureCursor(watchedAddressId = addressId, now = now)
+        syncCursorRepository.tryAcquireCursorLease(addressId, lockedBy = "other-worker", lockToken = UUID.randomUUID(), now = now, leaseUntil = now.plusSeconds(60))
+        mockMvc.perform(post("/api/v1/addresses/$addressId/sync")).andExpect(status().isAccepted)
+        jdbcTemplate.update("UPDATE sync_runs SET continuation_count = ?", 1000)
+
+        runNextClaimedSync()
+
+        assertEquals("continuation limit exceeded", jdbcTemplate.queryForObject("SELECT last_error FROM sync_runs", String::class.java))
+        assertEquals(failedBefore + 1.0, counterCount("asset.sync.sync.runs", "targetType", "ADDRESS", "status", "FAILED"))
     }
 
     @Test

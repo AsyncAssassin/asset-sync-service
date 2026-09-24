@@ -1203,7 +1203,7 @@ Metrics, as registered by `AssetSyncMetrics`:
 - `asset.sync.observed.events.ingested{result,status}`: counter per ingestion outcome (`CREATED`, `UPDATED`, `NO_CHANGE`, `CONFLICT`) and resulting status.
 - `asset.sync.observed.transaction.transitions{eventType,status}`: counter of lifecycle transitions that emitted an outbox event.
 - `asset.sync.observed.transaction.immutable.conflicts`: counter of rejected immutable-field conflicts.
-- `asset.sync.sync.runs{targetType,status}`: counter of sync run state changes (`QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`).
+- `asset.sync.sync.runs{targetType,status}`: counter of runs created (`QUEUED`), claimed (`RUNNING`), and finished (`SUCCEEDED`, `FAILED`), a run failed at max attempts, by recovery, or by the continuation limit included. A requeue back to `QUEUED` is not counted again; continuations are in `asset.sync.sync.continuations`.
 - `asset.sync.sync.continuations{reason,targetType}`: counter of healthy requeues (`CONTINUATION`, `LEASE_BUSY`, `PROVIDER_BUSY`, `ADDRESS_RETRY`) that do not consume retry budget.
 - `asset.sync.provider.fetches{targetType,status}`: counter of provider page fetches (`ATTEMPTED`, `SUCCEEDED`, `FAILED`).
 - `asset.sync.provider.fetch.duration{targetType,status}`: timer around one provider page fetch.

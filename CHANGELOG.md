@@ -15,6 +15,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- A run that fails on `max-continuations-per-run` counts in `asset.sync.sync.runs{status=FAILED}`. It was only logged, so an alert on failed runs missed it.
 - `demo` with `asset-sync.provider.type=alchemy` stops at startup with a message that points to `prod`. The first start used to seed an active `local-evm` address for the simulator, and every later start failed the Alchemy preflight on it.
 - An address disabled through the API while it syncs, or whose chain is disabled meanwhile, no longer counts as bad provider data. Its next page failed with `Provider returned an event for an address that is not watched`, and an account sync recorded that as an address failure and ended `FAILED`. The address's own run now fails with `Watched address was disabled during the sync.`, and an account pass leaves the address out without an error.
 - A provider event whose transaction hash is longer than 128 characters fails its page before anything is written, like the other hash rules. The database refused it only after the events before it on the page were stored, and every later sync of the address failed on it again.

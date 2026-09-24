@@ -308,7 +308,7 @@ class SyncRunLifecycleService(
                     delay,
                 )
             }
-            SyncRunContinuationRequeueResult.FAILED_LIMIT_EXCEEDED ->
+            SyncRunContinuationRequeueResult.FAILED_LIMIT_EXCEEDED -> {
                 logger.warn(
                     "sync_run_continuation_limit_exceeded syncRunId={} targetType={} targetId={} maxContinuations={}",
                     claim.run.id,
@@ -316,6 +316,9 @@ class SyncRunLifecycleService(
                     claim.run.targetId,
                     syncProperties.pagination.maxContinuationsPerRun,
                 )
+                // A failed run like any other, so an alert on FAILED runs sees it.
+                recordCompleted(syncRun = claim.run, status = SyncRunStatus.FAILED, eventsSeen = eventsSeen, eventsChanged = eventsChanged)
+            }
             SyncRunContinuationRequeueResult.STALE_CLAIM ->
                 logStaleClaimCompletion(claim = claim, intendedStatus = SyncRunStatus.QUEUED)
         }
