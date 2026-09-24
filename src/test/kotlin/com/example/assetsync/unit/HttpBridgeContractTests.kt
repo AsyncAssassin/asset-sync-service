@@ -2,6 +2,7 @@ package com.example.assetsync.unit
 
 import com.example.assetsync.application.sync.ChainProviderEventsPageRequest
 import com.example.assetsync.application.sync.ProviderConfigurationException
+import com.example.assetsync.application.sync.ProviderDataInvalidException
 import com.example.assetsync.config.ProviderConfiguration
 import com.example.assetsync.config.ProviderProperties
 import com.example.assetsync.config.SyncProperties
@@ -83,6 +84,33 @@ class HttpBridgeContractTests {
         val health = HttpChainProviderHealthIndicator(provider).health()
         assertEquals(Status.DOWN, health.status)
         assertEquals(failure.message, health.details["error"])
+    }
+
+    @Test
+    fun `a rejected credential fails at once with health down, while an unknown address stays that address's error`() {
+        listOf(401, 403).forEach { code ->
+            handler.set { exchange -> respond(exchange, code, """{"error":"denied"}""") }
+            val provider = provider()
+
+            val failure = assertThrows<ProviderConfigurationException> { provider.fetchObservedEventsPage(pageRequest()) }
+
+            assertEquals(
+                "Provider rejected the service's credentials with HTTP $code; check the bridge credentials and asset-sync.provider.base-url.",
+                failure.message,
+            )
+            val health = HttpChainProviderHealthIndicator(provider).health()
+            assertEquals(Status.DOWN, health.status, "HTTP $code")
+            assertEquals(failure.message, health.details["error"])
+        }
+
+        handler.set { exchange -> respond(exchange, 200, IDLE_PAGE) }
+        val provider = provider()
+        provider.fetchObservedEventsPage(pageRequest())
+        handler.set { exchange -> respond(exchange, 404, """{"error":"unknown address"}""") }
+        assertThrows<ProviderDataInvalidException> { provider.fetchObservedEventsPage(pageRequest()) }
+        val health = HttpChainProviderHealthIndicator(provider).health()
+        assertEquals(Status.UP, health.status)
+        assertEquals("Provider returned HTTP 404 for a watched address.", health.details["lastDataError"])
     }
 
     private fun provider(properties: ProviderProperties = ProviderProperties(baseUrl = "http://127.0.0.1:${server.address.port}")): HttpChainProvider =

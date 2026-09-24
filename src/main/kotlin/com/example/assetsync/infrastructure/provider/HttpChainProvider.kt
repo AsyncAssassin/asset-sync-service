@@ -125,6 +125,13 @@ class HttpChainProvider @Autowired constructor(
                                     "Provider answered with a redirect (HTTP ${statusCode.value()}); " +
                                         "point asset-sync.provider.base-url at the final address.",
                                 )
+                            // The bridge refuses the service itself, so every address would fail the same way.
+                            statusCode.value() == HttpStatus.UNAUTHORIZED.value() || statusCode.value() == HttpStatus.FORBIDDEN.value() ->
+                                throw ProviderConfigurationException(
+                                    "Provider rejected the service's credentials with HTTP ${statusCode.value()}; " +
+                                        "check the bridge credentials and asset-sync.provider.base-url.",
+                                )
+                            // A bridge may not know an address (404) or refuse one request: that address's error.
                             statusCode.is4xxClientError ->
                                 throw ProviderDataInvalidException("Provider returned HTTP ${statusCode.value()} for a watched address.")
                             else ->
