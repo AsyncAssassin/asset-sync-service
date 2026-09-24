@@ -146,6 +146,11 @@ class SyncApplicationService(
                 runCheckpoint = claim.run.runCheckpoint.deepCopy(),
                 delay = syncProperties.pagination.cursorLeaseRetryDelay,
             )
+            AddressSyncOutcome.ProviderBusy -> SyncClaimOutcome.Continuation(
+                reason = SyncRunRequeueReason.PROVIDER_BUSY,
+                runCheckpoint = claim.run.runCheckpoint.deepCopy(),
+                delay = syncProperties.pagination.cursorLeaseRetryDelay,
+            )
             AddressSyncOutcome.Continuation -> SyncClaimOutcome.Continuation(
                 reason = SyncRunRequeueReason.CONTINUATION,
                 runCheckpoint = claim.run.runCheckpoint.deepCopy(),
@@ -207,6 +212,9 @@ class SyncApplicationService(
                     }
                     AccountAddressOutcome.Continuation ->
                         return accountContinuation(pass, SyncRunRequeueReason.CONTINUATION)
+                    // The pass resumes at this address once the pool has a free thread.
+                    AccountAddressOutcome.ProviderBusy ->
+                        return accountContinuation(pass, SyncRunRequeueReason.PROVIDER_BUSY)
                     is AccountAddressOutcome.Failed -> {
                         pass.recordFailure(watchedAddress.id, outcome.error)
                         pass.advancePast(watchedAddress)
@@ -232,6 +240,8 @@ class SyncApplicationService(
                 AccountAddressOutcome.LeaseBusy -> Unit
                 AccountAddressOutcome.Continuation ->
                     return accountContinuation(pass, SyncRunRequeueReason.CONTINUATION)
+                AccountAddressOutcome.ProviderBusy ->
+                    return accountContinuation(pass, SyncRunRequeueReason.PROVIDER_BUSY)
                 is AccountAddressOutcome.Failed -> {
                     pass.revisitDone(watchedAddressId)
                     pass.recordFailure(watchedAddressId, outcome.error)
@@ -252,7 +262,7 @@ class SyncApplicationService(
         SyncClaimOutcome.Continuation(
             reason = reason,
             runCheckpoint = pass.toCheckpoint(),
-            delay = if (reason == SyncRunRequeueReason.LEASE_BUSY) {
+            delay = if (reason == SyncRunRequeueReason.LEASE_BUSY || reason == SyncRunRequeueReason.PROVIDER_BUSY) {
                 syncProperties.pagination.cursorLeaseRetryDelay
             } else {
                 syncProperties.pagination.continuationRequeueDelay
@@ -261,9 +271,11 @@ class SyncApplicationService(
 
     /**
      * Syncs one address of an account run. Failures that would fail the same way on every attempt
-     * (malformed or rejected provider data, provider configuration, a database constraint) end
-     * that address only; anything retryable, a lost claim or lease, and shutdown interrupts keep
-     * failing the whole claim so the run retries or requeues as before.
+     * for this address only (malformed or rejected provider data, a configuration gap of the
+     * address, a database constraint) end that address. A configuration failure of the whole
+     * provider, such as a rejected credential or a redirect, would fail every address the same way,
+     * so it fails the run at once, like anything retryable, a lost claim or lease, and shutdown
+     * interrupts, which keep failing the whole claim.
      */
     private fun processAccountAddress(
         claim: ClaimedSyncRun,
@@ -276,10 +288,11 @@ class SyncApplicationService(
                 AddressSyncOutcome.Done -> AccountAddressOutcome.Done
                 AddressSyncOutcome.LeaseBusy -> AccountAddressOutcome.LeaseBusy
                 AddressSyncOutcome.Continuation -> AccountAddressOutcome.Continuation
+                AddressSyncOutcome.ProviderBusy -> AccountAddressOutcome.ProviderBusy
             }
         } catch (exception: RuntimeException) {
             val addressTerminal = exception is ProviderDataInvalidException ||
-                exception is ProviderConfigurationException ||
+                exception is AddressConfigurationException ||
                 exception is DataIntegrityViolationException
             if (!addressTerminal || Thread.currentThread().isInterrupted) {
                 throw exception
@@ -367,12 +380,19 @@ class SyncApplicationService(
                     checkpoint = current.checkpoint,
                 )
 
-                val page = fetchProviderPage(
-                    claim = claim,
-                    watchedAddress = watchedAddress,
-                    request = request,
-                    current = current,
-                )
+                val page = try {
+                    fetchProviderPage(
+                        claim = claim,
+                        watchedAddress = watchedAddress,
+                        request = request,
+                        current = current,
+                    )
+                } catch (exception: SyncCapacityExceededException) {
+                    // The service's own pool is full, which says nothing about the provider: the run
+                    // comes back as a continuation, spends no retry budget, and stays bounded by
+                    // max-continuations-per-run.
+                    return AddressSyncOutcome.ProviderBusy
+                }
 
                 cursorHeartbeat.throwIfFailed()
                 val pageChanges = ingestWholePage(page.events, progress)
@@ -594,13 +614,21 @@ class SyncApplicationService(
             } catch (exception: WatchedAddressNotFoundException) {
                 throw ProviderDataInvalidException("Provider returned an event for an address that is not watched.", exception)
             } catch (exception: ObservedTransactionConflictException) {
-                throw ProviderDataInvalidException("Provider returned an event that conflicts with stored immutable fields.", exception)
+                // The natural key has no direction: a transfer of the address to itself sent as two
+                // rows on either side of a page boundary ends here, after the first row was stored.
+                val fields = exception.conflictingFields.map { it.name.lowercase() }.sorted().joinToString(" and ")
+                val txHash = ChainIdentityNormalizer.normalizeTxHash(event.chainId, event.txHash)
+                throw ProviderDataInvalidException(
+                    "Provider returned transaction $txHash event ${event.eventIndex} with another $fields than the stored row; " +
+                        "one row per event, and a transfer of the address to itself is left out.",
+                    exception,
+                )
             } catch (exception: InvalidObservedEventRequestException) {
                 throw ProviderDataInvalidException("Provider returned an invalid event: ${exception.message}", exception)
             } catch (exception: IllegalArgumentException) {
                 throw ProviderDataInvalidException("Provider returned an event that breaks a domain invariant: ${exception.message}", exception)
             } catch (exception: UnsupportedChainException) {
-                throw ProviderConfigurationException("Chain ${exception.chainId} is not enabled, so its events cannot be ingested.", exception)
+                throw AddressConfigurationException("Chain ${exception.chainId} is not enabled, so its events cannot be ingested.", exception)
             }
             if (result.result == TransitionOutcome.CREATED || result.result == TransitionOutcome.UPDATED) {
                 changed += 1
@@ -681,8 +709,8 @@ class SyncApplicationService(
             val sameKey = eventsByKey.putIfAbsent(txHash to event.eventIndex, event)
             if (sameKey != null && (sameKey.direction != event.direction || sameKey.amount.compareTo(event.amount) != 0)) {
                 throw ProviderDataInvalidException(
-                    "Provider returned event index ${event.eventIndex} of transaction $txHash twice in one page with another " +
-                        "direction or amount; a page carries one row per event, and a transfer of the address to itself is left out.",
+                    "Provider returned transaction $txHash event ${event.eventIndex} twice with another direction or amount; " +
+                        "one row per event, and a transfer of the address to itself is left out.",
                 )
             }
             if (AmountPolicy.normalizedOrNull(event.amount) == null) {
@@ -898,15 +926,6 @@ class SyncApplicationService(
                     eventsChanged = progress.eventsChanged,
                     lastError = error,
                 )
-            } else if (throwable is SyncCapacityExceededException) {
-                // The service's own provider pool was full, which says nothing about the provider:
-                // back off without spending the retry budget, like a full worker pool.
-                syncRunLifecycleService.requeue(
-                    claim = claim,
-                    eventsSeen = progress.eventsSeen,
-                    eventsChanged = progress.eventsChanged,
-                    lastError = error,
-                )
             } else {
                 syncRunLifecycleService.requeueFailure(
                     claim = claim,
@@ -1075,6 +1094,7 @@ class SyncApplicationService(
         Done,
         LeaseBusy,
         Continuation,
+        ProviderBusy,
     }
 
     private sealed interface AccountAddressOutcome {
@@ -1083,6 +1103,8 @@ class SyncApplicationService(
         data object LeaseBusy : AccountAddressOutcome
 
         data object Continuation : AccountAddressOutcome
+
+        data object ProviderBusy : AccountAddressOutcome
 
         data class Failed(val error: String) : AccountAddressOutcome
     }

@@ -23,7 +23,10 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.assertThrows
+import org.junit.jupiter.api.extension.ExtendWith
 import org.mockito.Mockito
+import org.springframework.boot.test.system.CapturedOutput
+import org.springframework.boot.test.system.OutputCaptureExtension
 
 /**
  * Locks the JSON-RPC client contract against a stub endpoint: how the key travels in each auth
@@ -31,6 +34,7 @@ import org.mockito.Mockito
  * classes, and that no message ever carries the key, not even when a transport failure embeds the
  * request URL of path mode.
  */
+@ExtendWith(OutputCaptureExtension::class)
 class AlchemyJsonRpcClientTests {
 
     private val apiKey = "secret-key-123"
@@ -187,6 +191,24 @@ class AlchemyJsonRpcClientTests {
     }
 
     @Test
+    fun `a key that would end the url match is scrubbed whole from the logged cause chain`(output: CapturedOutput) {
+        // A quote is legal in a URL path but ends the URL match, so cutting URLs before scrubbing
+        // left the tail of the key in the WARN line.
+        val quotedKey = "quoted'secret-tail-789"
+        val closedPort = ServerSocket(0, 0, InetAddress.getLoopbackAddress()).use { it.localPort }
+        val client = client(
+            authMode = AlchemyAuthMode.PATH,
+            pathEndpointTemplate = "http://127.0.0.1:$closedPort/{network}/v2/{apiKey}",
+            key = quotedKey,
+        )
+
+        assertThrows<ChainProviderUnavailableException> { client.blockNumber("eth-sepolia") }
+
+        assertTrue(output.out.contains("alchemy_rpc_failed"), output.out)
+        assertFalse(output.out.contains("secret-tail-789"), output.out)
+    }
+
+    @Test
     fun `a redirect is not followed and is a configuration failure`() {
         stub.responder = {
             AlchemyJsonRpcStubServer.StubResponse(body = "", status = 302, headers = mapOf("Location" to "http://127.0.0.1:${stub.port}/moved/v2/"))
@@ -206,12 +228,13 @@ class AlchemyJsonRpcClientTests {
         authMode: AlchemyAuthMode = AlchemyAuthMode.HEADER,
         pathEndpointTemplate: String = stub.pathEndpointTemplate(),
         maxResponseBytes: Int = AlchemyJsonRpcClient.DEFAULT_MAX_RESPONSE_BYTES,
+        key: String = apiKey,
     ): AlchemyJsonRpcClient =
         AlchemyJsonRpcClient(
             // The production client: its request factory and timeouts are part of the contract.
             restClient = AlchemyProviderConfiguration().alchemyRestClient(ProviderProperties()),
             properties = AlchemyProviderProperties(
-                apiKey = apiKey,
+                apiKey = key,
                 authMode = authMode,
                 endpointTemplate = stub.headerEndpointTemplate(),
                 pathEndpointTemplate = pathEndpointTemplate,

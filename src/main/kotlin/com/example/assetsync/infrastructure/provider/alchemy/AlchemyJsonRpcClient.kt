@@ -139,7 +139,7 @@ class AlchemyJsonRpcClient(
             val message = ProviderHttpSupport.transportKind(exception)
                 ?.let { "Alchemy transport failure for network $network: $it." }
                 ?: "Alchemy request failed for network $network (${exception.javaClass.simpleName})."
-            val causes = scrubber.scrub(ProviderHttpSupport.causeChainWithoutUrls(exception))
+            val causes = ProviderHttpSupport.causeChainWithoutUrls(exception) { scrubber.scrub(it) }
             throw failed(network, method, ChainProviderUnavailableException(message), sample, RESULT_UNAVAILABLE, causes)
         }
     }

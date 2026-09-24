@@ -38,7 +38,7 @@ class ProviderConfiguration {
             // RestClient.Builder.apply(Consumer), not Kotlin's apply: the builder is `it`.
             .apply {
                 if (properties.authHeaderValue.isNotEmpty()) {
-                    it.defaultHeader(properties.authHeaderName, properties.authHeaderValue)
+                    it.defaultHeader(properties.effectiveAuthHeaderName, properties.authHeaderValue)
                 }
             }
             .build()
@@ -57,7 +57,7 @@ data class ProviderProperties(
     val connectTimeout: Duration = Duration.ofSeconds(2),
     val readTimeout: Duration = Duration.ofSeconds(5),
     /** Header that carries the bridge credential, such as `Authorization` or `X-API-Key`. */
-    val authHeaderName: String = "Authorization",
+    val authHeaderName: String = DEFAULT_AUTH_HEADER_NAME,
     /**
      * The bridge credential, sent in [authHeaderName] on every bridge request when set. A secret:
      * no message, log line, or health detail quotes it, and [toString] masks it.
@@ -71,7 +71,8 @@ data class ProviderProperties(
         require(!readTimeout.isNegative && !readTimeout.isZero) {
             "asset-sync.provider.read-timeout must be positive."
         }
-        require(authHeaderName.isNotEmpty() && authHeaderName.all { it in HEADER_NAME_CHARACTERS }) {
+        // Checked only with a credential to send; a blank name, as an empty variable gives, is the default.
+        require(authHeaderValue.isEmpty() || effectiveAuthHeaderName.all { it in HEADER_NAME_CHARACTERS }) {
             "asset-sync.provider.auth-header-name must be an HTTP header name."
         }
         // The message leaves the value out: it is the credential.
@@ -80,12 +81,18 @@ data class ProviderProperties(
         }
     }
 
+    /** The header the credential goes in: [authHeaderName], or `Authorization` when it is blank. */
+    val effectiveAuthHeaderName: String
+        get() = authHeaderName.ifBlank { DEFAULT_AUTH_HEADER_NAME }
+
     override fun toString(): String =
         "ProviderProperties(type=$type, baseUrl=${if (baseUrl.isBlank()) "<unset>" else "<set>"}, " +
-            "connectTimeout=$connectTimeout, readTimeout=$readTimeout, authHeaderName=$authHeaderName, " +
+            "connectTimeout=$connectTimeout, readTimeout=$readTimeout, authHeaderName=$effectiveAuthHeaderName, " +
             "authHeaderValue=${if (authHeaderValue.isEmpty()) "<unset>" else "***"})"
 
     private companion object {
+        const val DEFAULT_AUTH_HEADER_NAME = "Authorization"
+
         /** RFC 9110 token characters, which a header name consists of. */
         val HEADER_NAME_CHARACTERS: Set<Char> = (('a'..'z') + ('A'..'Z') + ('0'..'9') + "!#$%&'*+-.^_`|~".toList()).toSet()
     }

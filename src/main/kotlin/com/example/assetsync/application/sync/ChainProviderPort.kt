@@ -42,8 +42,8 @@ data class ChainProviderEventsPageRequest(
 data class ChainProviderEventsPage(
     val events: List<ChainProviderObservedEvent>,
     /**
-     * Durable provider resume token. A final page may omit it only when the page supplies durable
-     * block high-water (`safeBlockHeight`, or `latestBlockHeight` when no safe height exists).
+     * Durable provider resume token. A final page may omit it: the stored cursor is kept after a
+     * page without events and cleared after one with events, and the checkpoint resumes the rest.
      */
     val nextCursor: String?,
     val hasMore: Boolean,

@@ -4,7 +4,6 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.net.ConnectException
-import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.net.http.HttpTimeoutException
@@ -12,8 +11,9 @@ import java.time.Duration
 import java.time.Instant
 import java.time.format.DateTimeFormatter
 import javax.net.ssl.SSLException
+import org.springframework.boot.http.client.ClientHttpRequestFactoryBuilder
+import org.springframework.boot.http.client.ClientHttpRequestFactorySettings
 import org.springframework.http.client.ClientHttpRequestFactory
-import org.springframework.http.client.SimpleClientHttpRequestFactory
 
 /**
  * HTTP helpers shared by the provider adapters: their request factory, `Retry-After` parsing for
@@ -30,15 +30,12 @@ internal object ProviderHttpSupport {
      * fix; following it would also send the bridge credentials or the Alchemy key somewhere else.
      */
     fun requestFactory(connectTimeout: Duration, readTimeout: Duration): ClientHttpRequestFactory =
-        object : SimpleClientHttpRequestFactory() {
-            override fun prepareConnection(connection: HttpURLConnection, httpMethod: String) {
-                super.prepareConnection(connection, httpMethod)
-                connection.instanceFollowRedirects = false
-            }
-        }.apply {
-            setConnectTimeout(connectTimeout)
-            setReadTimeout(readTimeout)
-        }
+        ClientHttpRequestFactoryBuilder.simple().build(
+            ClientHttpRequestFactorySettings.defaults()
+                .withConnectTimeout(connectTimeout)
+                .withReadTimeout(readTimeout)
+                .withRedirects(ClientHttpRequestFactorySettings.Redirects.DONT_FOLLOW),
+        )
 
     /**
      * The kind of a transport failure, such as `timeout (SocketTimeoutException)`, from the I/O
@@ -59,11 +56,14 @@ internal object ProviderHttpSupport {
         return "$kind (${cause.javaClass.simpleName})"
     }
 
-    /** A cause chain for a WARN line, with every URL cut out; see [transportKind]. */
-    fun causeChainWithoutUrls(exception: Throwable): String =
+    /**
+     * A cause chain for a WARN line, with every URL cut out; see [transportKind]. [scrub] runs on
+     * each message first, so a secret that would end the URL match early is removed whole.
+     */
+    fun causeChainWithoutUrls(exception: Throwable, scrub: (String) -> String = { it }): String =
         generateSequence(exception) { it.cause }
             .take(MAX_CAUSE_DEPTH)
-            .joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message?.replace(URL_PATTERN, "<url>")}" }
+            .joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message?.let(scrub)?.replace(URL_PATTERN, "<url>")}" }
 
     private const val MAX_CAUSE_DEPTH = 16
 

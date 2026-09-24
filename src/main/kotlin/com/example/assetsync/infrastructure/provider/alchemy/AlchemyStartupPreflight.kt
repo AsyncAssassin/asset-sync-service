@@ -99,14 +99,14 @@ object AlchemyRolloutRules {
 /**
  * Runs once while the Alchemy beans are created, after Liquibase: static configuration rules,
  * the registry rules above, and one `eth_blockNumber` auth probe per required network. A rule
- * violation or a probe that the key or the configuration fails (401, 403, JSON-RPC `-32600`, or
- * an answer that is not a block number, which for this fixed request means a wrong endpoint) is a
- * scrubbed [ProviderConfigurationException], so a bad key or an unserved chain stops the process
- * before the worker can create retrying sync runs. A probe that meets an availability failure
- * (5xx, 429, a timeout, a transport error) does not: the provider starts in the `probe-failed`
- * state and health is DOWN, while the REST API and outbox publishing keep working. Sync runs retry
- * with backoff up to `asset-sync.sync.worker.max-attempts` and then fail; nothing probes again, so
- * the state clears with the first successful fetch.
+ * violation or a probe that the key or the configuration fails (401, 403, JSON-RPC `-32600`, a
+ * redirect, or an answer that is not a block number, which for this fixed request means a wrong
+ * endpoint) is a scrubbed [ProviderConfigurationException], so a bad key or an unserved chain
+ * stops the process before the worker can create retrying sync runs. A probe that meets an
+ * availability failure (5xx, 429, a timeout, a transport error) does not: the provider starts in
+ * the `probe-failed` state and health is DOWN, while the REST API and outbox publishing keep
+ * working. Sync runs retry with backoff up to `asset-sync.sync.worker.max-attempts` and then fail;
+ * nothing probes again, so the state clears with the first successful fetch.
  */
 class AlchemyStartupPreflight(
     private val properties: AlchemyProviderProperties,

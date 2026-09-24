@@ -206,7 +206,8 @@ How each answer is handled:
 | Bridge answer | Class | Run | `httpChainProvider` health | `failure_attempts` |
 | --- | --- | --- | --- | --- |
 | `2xx` with a page that follows the rules above | success | continues | `UP` | — |
-| `2xx` with malformed JSON, bytes that are not JSON text, a `null` element in `events`, a body over `max-provider-page-bytes`, or a page that breaks a rule above | data of that address | `FAILED` | state kept, reason in `lastDataError` | not spent |
+| `2xx` with malformed JSON, bytes that are not JSON text, a `null` element in `events`, or a body over `max-provider-page-bytes` | data of that address | `FAILED` | state kept, reason in `lastDataError` | not spent |
+| `2xx` with a page that breaks a rule above: event order, the checkpoint, one row per event, cursor progress | data of that address | `FAILED` | the fetch counts as healthy, so no `lastDataError`; the run's `last_error` names the rule | not spent |
 | `404`, for an address the bridge does not know, and any other `4xx` not listed here | data of that address | `FAILED` | state kept, reason in `lastDataError` | not spent |
 | `401`, `403`: the bridge refuses the service itself, so every address would fail the same way | configuration | `FAILED` | `DOWN` | not spent |
 | `3xx`: not followed, because the operator configures `base-url` and retries cannot fix it | configuration | `FAILED` | `DOWN` | not spent |
@@ -215,7 +216,7 @@ How each answer is handled:
 
 `DOWN` lasts until the next successful fetch. A failure the bridge did not report itself is named by its kind, such as `Provider transport failure: timeout (SocketTimeoutException).`, never with the bridge URL. The client uses `asset-sync.provider.connect-timeout` and `read-timeout` (the longest pause between two reads), and `asset-sync.sync.provider-timeout` bounds the whole page, as described above.
 
-Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. A full provider pool (`SyncCapacityExceededException`) is the service's own capacity, not a provider failure: the run is requeued with backoff by claim count and does not increment `failure_attempts` either. Retryable provider failures, including 429 throttling, increment `failure_attempts`. Provider configuration failures (`ProviderConfigurationException`: rejected credentials, a chain without a provider network mapping, a fetch the configured provider cannot serve) are terminal like malformed pages, so they never burn the retry budget on attempts that cannot succeed.
+Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. A full provider pool (`SyncCapacityExceededException`) is the service's own capacity, not a provider failure: like a busy cursor lease, the run is requeued as a continuation (`PROVIDER_BUSY`) after `cursor-lease-retry-delay`, and an account run resumes its pass at the address that met it. Retryable provider failures, including 429 throttling, increment `failure_attempts`. Provider configuration failures (`ProviderConfigurationException`: rejected credentials, a chain without a provider network mapping, a fetch the configured provider cannot serve) are terminal like malformed pages, so they never burn the retry budget on attempts that cannot succeed.
 
 ### Alchemy Provider Page Building
 
@@ -702,7 +703,7 @@ Key columns:
 Rationale:
 - Per-address cursor leases prevent direct address sync and account sync from advancing the same checkpoint concurrently.
 - Checkpoint state advances only after a full provider page has been ingested.
-- A final empty provider page may omit `nextCursor` only when it supplies durable block high-water such as `safeBlockHeight` or `latestBlockHeight`; empty pages with no cursor and no high-water are rejected as no-progress provider data.
+- A final provider page may omit `nextCursor`: the stored cursor is kept after one without events and cleared after one with events, and the next request carries the stored cursor or the checkpoint.
 - `version + locked_by + lock_token` fencing makes stale owners harmless.
 
 ### Liquibase Changelog Structure
@@ -1197,7 +1198,7 @@ Metrics, as registered by `AssetSyncMetrics`:
 - `asset.sync.observed.transaction.transitions{eventType,status}`: counter of lifecycle transitions that emitted an outbox event.
 - `asset.sync.observed.transaction.immutable.conflicts`: counter of rejected immutable-field conflicts.
 - `asset.sync.sync.runs{targetType,status}`: counter of sync run state changes (`QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`).
-- `asset.sync.sync.continuations{reason,targetType}`: counter of healthy requeues (`CONTINUATION`, `LEASE_BUSY`) that do not consume retry budget.
+- `asset.sync.sync.continuations{reason,targetType}`: counter of healthy requeues (`CONTINUATION`, `LEASE_BUSY`, `PROVIDER_BUSY`) that do not consume retry budget.
 - `asset.sync.provider.fetches{targetType,status}`: counter of provider page fetches (`ATTEMPTED`, `SUCCEEDED`, `FAILED`).
 - `asset.sync.provider.fetch.duration{targetType,status}`: timer around one provider page fetch.
 - `asset.sync.provider.pages{targetType,result}`: counter of validated pages (`SUCCEEDED`, `FAILED`, `MALFORMED`).

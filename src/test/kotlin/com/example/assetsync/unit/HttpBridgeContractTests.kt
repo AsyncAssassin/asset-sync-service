@@ -38,6 +38,7 @@ class HttpBridgeContractTests {
 
     private val requests = CopyOnWriteArrayList<RecordedRequest>()
     private val handler = AtomicReference<(HttpExchange) -> Unit> { exchange -> respond(exchange, 200, IDLE_PAGE) }
+    private val serverExecutor = Executors.newCachedThreadPool()
     private val server: HttpServer = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
         createContext("/") { exchange ->
             requests += RecordedRequest(
@@ -47,13 +48,15 @@ class HttpBridgeContractTests {
             )
             handler.get()(exchange)
         }
-        executor = Executors.newCachedThreadPool()
+        executor = serverExecutor
         start()
     }
 
     @AfterTest
     fun tearDown() {
         server.stop(0)
+        // HttpServer.stop does not stop an executor the caller supplied.
+        serverExecutor.shutdownNow()
     }
 
     @Test
@@ -142,7 +145,7 @@ class HttpBridgeContractTests {
 
     @Test
     fun `a credential header that could not be sent stops startup without quoting the value`() {
-        val badName = assertThrows<IllegalArgumentException> { ProviderProperties(authHeaderName = "X API Key") }
+        val badName = assertThrows<IllegalArgumentException> { ProviderProperties(authHeaderName = "X API Key", authHeaderValue = "k") }
         assertEquals("asset-sync.provider.auth-header-name must be an HTTP header name.", badName.message)
 
         val injected = assertThrows<IllegalArgumentException> { ProviderProperties(authHeaderValue = "Bearer t0ken\r\nX-Injected: 1") }
@@ -163,6 +166,18 @@ class HttpBridgeContractTests {
 
         assertEquals("Provider returned a body that is not JSON text.", failure.message)
         assertEquals(Status.UP, HttpChainProviderHealthIndicator(provider).health().status)
+    }
+
+    @Test
+    fun `an empty header name means the default and matters only with a credential`() {
+        // An empty variable, as a template that passes every documented variable gives.
+        ProviderProperties(authHeaderName = "")
+        ProviderProperties(authHeaderName = "X API Key")
+
+        val provider = provider(ProviderProperties(baseUrl = baseUrl(), authHeaderName = "", authHeaderValue = "Bearer t0ken"))
+        provider.fetchObservedEventsPage(pageRequest())
+
+        assertEquals(listOf("Bearer t0ken"), requests.last().headers["authorization"])
     }
 
     private fun baseUrl(): String = "http://127.0.0.1:${server.address.port}"
