@@ -2,12 +2,12 @@ package com.example.assetsync.infrastructure.provider.alchemy
 
 import com.example.assetsync.application.account.AssetConfigRepository
 import com.example.assetsync.application.observability.AssetSyncMetrics
+import com.example.assetsync.application.sync.AddressConfigurationException
 import com.example.assetsync.application.sync.ChainProviderEventsPage
 import com.example.assetsync.application.sync.ChainProviderEventsPageRequest
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
 import com.example.assetsync.application.sync.ChainProviderPort
 import com.example.assetsync.application.sync.ChainProviderUnavailableException
-import com.example.assetsync.application.sync.ProviderConfigurationException
 import com.example.assetsync.application.sync.ProviderDataInvalidException
 import com.example.assetsync.config.AlchemyAuthMode
 import com.example.assetsync.config.AlchemyFinalityMode
@@ -58,6 +58,13 @@ class AlchemyChainProvider(
 
     override val providerName: String = "alchemy"
 
+    /**
+     * Only chains mapped to an Alchemy network, which the seeded `local-evm` is not, and under
+     * `configured-block` only those with a start block: a sync there could not pick its first block.
+     */
+    override fun supportsChain(chainId: String): Boolean =
+        properties.networkFor(chainId)?.let { properties.startMode != AlchemyStartMode.CONFIGURED_BLOCK || it.startBlock != null } == true
+
     private val logger = LoggerFactory.getLogger(AlchemyChainProvider::class.java)
     private val scrubber = AlchemySecretScrubber(properties.apiKey)
     private val finalityFallbackWarned: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -92,8 +99,12 @@ class AlchemyChainProvider(
         } catch (exception: ProviderDataInvalidException) {
             // Invalid data for one address (a rejected parameter, an unmappable row) says nothing
             // about Alchemy's availability, so the state stays and health keeps it as a detail.
-            lastDataError = scrubber.scrub(exception.message).take(MAX_ERROR_LENGTH)
-            logFailure(request, lastDataError)
+            recordDataError(request, exception)
+            throw exception
+        } catch (exception: AddressConfigurationException) {
+            // So does a configuration gap of one address: its chain's mapping or start block, its
+            // asset, or a block it cannot page.
+            recordDataError(request, exception)
             throw exception
         } catch (exception: RuntimeException) {
             recordFailure(request, exception)
@@ -105,6 +116,12 @@ class AlchemyChainProvider(
     fun lastError(): String? = lastError
 
     fun lastDataError(): String? = lastDataError
+
+    private fun recordDataError(request: ChainProviderEventsPageRequest, exception: RuntimeException) {
+        val error = scrubber.scrub(exception.message).take(MAX_ERROR_LENGTH)
+        lastDataError = error
+        logFailure(request, error)
+    }
 
     private fun recordFailure(request: ChainProviderEventsPageRequest, exception: RuntimeException) {
         val error = scrubber.scrub(exception.message).take(MAX_ERROR_LENGTH)
@@ -166,14 +183,14 @@ class AlchemyChainProvider(
 
         fun run(): ChainProviderEventsPage {
             network = properties.networkFor(request.chainId)?.network
-                ?: throw ProviderConfigurationException(
+                ?: throw AddressConfigurationException(
                     "No Alchemy network is mapped for chain ${request.chainId}; add " +
-                        "${AlchemyProviderProperties.PREFIX}.networks.${request.chainId}.network or disable the chain.",
+                        "${AlchemyProviderProperties.PREFIX}.networks.${request.chainId}.network or disable the address.",
                 )
             identity = ChainIdentityNormalizer.normalize(chainId = request.chainId, address = request.address, asset = request.asset)
             assetConfig = assetConfigRepository.findEnabledByChainIdAndAsset(identity.chainId, identity.asset)
-                ?: throw ProviderConfigurationException(
-                    "No enabled asset config for (${identity.chainId}, ${identity.asset}); the registry preflight should have caught this.",
+                ?: throw AddressConfigurationException(
+                    "No enabled asset config for (${identity.chainId}, ${identity.asset}); enable it or disable the address.",
                 )
             if (assetConfig.tokenStandard != AlchemyRolloutRules.SUPPORTED_TOKEN_STANDARD) {
                 throw ProviderDataInvalidException(
@@ -276,7 +293,7 @@ class AlchemyChainProvider(
                 block = when (properties.startMode) {
                     AlchemyStartMode.REGISTRATION_SAFE -> safeBlockHeight + 1
                     AlchemyStartMode.CONFIGURED_BLOCK -> properties.networkFor(request.chainId)?.startBlock
-                        ?: throw ProviderConfigurationException(
+                        ?: throw AddressConfigurationException(
                             "start-mode=configured-block requires ${AlchemyProviderProperties.PREFIX}.networks.${request.chainId}.start-block.",
                         )
                 }
@@ -370,7 +387,7 @@ class AlchemyChainProvider(
             events.forEach { byBlock.getOrPut(it.blockHeight) { mutableListOf() }.add(it) }
             for ((blockHeight, blockEvents) in byBlock) {
                 if (blockEvents.size > request.limit) {
-                    throw ProviderConfigurationException(
+                    throw AddressConfigurationException(
                         "Alchemy block $blockHeight has ${blockEvents.size} ERC20 events for the watched address, exceeding " +
                             "request.limit=${request.limit}; the current ChainProviderPort cannot safely split one block. " +
                             "Raise asset-sync.sync.pagination.page-size or narrow the watched scope.",

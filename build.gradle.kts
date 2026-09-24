@@ -105,6 +105,14 @@ springBoot {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    // The tests configure the application themselves; variables exported in the shell, such as
+    // SERVER_ADDRESS after a remote demo or ASSET_SYNC_PROVIDER_TYPE from the Alchemy runbook, would
+    // override their settings through Spring's relaxed binding. The live smoke reads its API key
+    // from the environment itself.
+    environment.keys
+        .filter { name -> listOf("SPRING_", "SERVER_", "MANAGEMENT_", "LOGGING_", "ASSET_SYNC_").any { name.startsWith(it) } }
+        .filter { name -> name != "ASSET_SYNC_PROVIDER_ALCHEMY_API_KEY" }
+        .forEach { environment.remove(it) }
     // The documentation drift guards (DocsConsistencyTests) and the generated-source guard read
     // these files at test time. Declaring them as inputs makes Gradle re-run the tests when only
     // the docs change instead of treating the task as up-to-date.

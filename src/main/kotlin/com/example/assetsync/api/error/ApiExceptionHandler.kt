@@ -8,12 +8,15 @@ import com.example.assetsync.application.account.InvalidWatchedAddressPageExcept
 import com.example.assetsync.application.account.UnknownWatchedAddressException
 import com.example.assetsync.application.account.UnsupportedAssetException
 import com.example.assetsync.application.account.UnsupportedChainException
+import com.example.assetsync.application.isDatabaseFailure
 import com.example.assetsync.application.sync.SyncQueueFullException
 import com.example.assetsync.application.sync.SyncRunNotFoundException
 import com.example.assetsync.application.sync.WatchedAddressByIdNotFoundException
 import com.example.assetsync.application.transaction.InvalidObservedEventRequestException
 import com.example.assetsync.application.transaction.ObservedTransactionConflictException
 import com.example.assetsync.application.transaction.WatchedAddressNotFoundException
+import com.example.assetsync.config.JacksonConfiguration.Companion.MAX_JSON_STRING_LENGTH
+import com.example.assetsync.config.exceedsJsonReadLimit
 import jakarta.servlet.http.HttpServletRequest
 import jakarta.validation.ConstraintViolationException
 import java.time.Duration
@@ -27,6 +30,8 @@ import org.springframework.http.converter.HttpMessageNotReadableException
 import org.slf4j.LoggerFactory
 import org.springframework.security.access.AccessDeniedException
 import org.springframework.security.core.AuthenticationException
+import org.springframework.transaction.CannotCreateTransactionException
+import org.springframework.transaction.TransactionSystemException
 import org.springframework.validation.FieldError
 import org.springframework.web.ErrorResponse
 import org.springframework.web.HttpMediaTypeNotSupportedException
@@ -73,7 +78,11 @@ class ApiExceptionHandler {
             is MethodArgumentTypeMismatchException ->
                 "${exception.name} must be a valid ${exception.requiredType?.simpleName ?: "value"}."
             is HttpMessageNotReadableException ->
-                "Request body is malformed or contains invalid field types."
+                if (exception.exceedsJsonReadLimit()) {
+                    "Request body exceeds a JSON size limit, such as a string over $MAX_JSON_STRING_LENGTH characters or a number over 1000 digits."
+                } else {
+                    "Request body is malformed or contains invalid field types."
+                }
             is MissingServletRequestParameterException ->
                 "${exception.parameterName} request parameter is required."
             else ->
@@ -158,12 +167,13 @@ class ApiExceptionHandler {
         exception: UnsupportedChainException,
         request: HttpServletRequest,
     ): ResponseEntity<ProblemDetail> =
-        // Missing and disabled chains are intentionally indistinguishable for registration callers.
+        // Missing, disabled, and chains the active provider cannot serve are intentionally
+        // indistinguishable for registration callers.
         problem(
             status = HttpStatus.NOT_FOUND,
             type = "not-found",
             title = "Unsupported chain",
-            detail = "Chain configuration was not found or is disabled.",
+            detail = "The chain is not configured, is disabled, or is not served by the active provider.",
             request = request,
         )
 
@@ -378,23 +388,19 @@ class ApiExceptionHandler {
         )
     }
 
-    @ExceptionHandler(DataAccessException::class)
+    // The types isDatabaseFailure() names; an SQL error Spring could not translate arrives as a jOOQ
+    // exception and is routed here from handleUnexpected.
+    @ExceptionHandler(
+        DataAccessException::class,
+        CannotCreateTransactionException::class,
+        TransactionSystemException::class,
+    )
     fun handleDatabaseFailure(
-        exception: DataAccessException,
+        exception: RuntimeException,
         request: HttpServletRequest,
     ): ResponseEntity<ProblemDetail> {
-        logger.error(
-            "database_operation_failed path={} exceptionClass={}",
-            request.requestURI,
-            exception.javaClass.simpleName,
-        )
-        return problem(
-            status = HttpStatus.SERVICE_UNAVAILABLE,
-            type = "database-unavailable",
-            title = "Database unavailable",
-            detail = "Database operation failed.",
-            request = request,
-        )
+        RequestFailureLog.database(request, exception)
+        return respond(ProblemDetails.databaseUnavailable(request))
     }
 
     @ExceptionHandler(Exception::class)
@@ -421,25 +427,20 @@ class ApiExceptionHandler {
                 headers = exception.headers,
             )
         }
+        if (exception is RuntimeException && exception.isDatabaseFailure()) {
+            return handleDatabaseFailure(exception, request)
+        }
         // Last-resort mapping so no failure falls through to the container's default error page. The
         // client gets a generic detail; the exception itself goes to the log with the request path.
-        logger.error(
-            "unhandled_request_failure path={} exceptionClass={}",
-            request.requestURI,
-            exception.javaClass.simpleName,
-            exception,
-        )
-        return problem(
-            status = HttpStatus.INTERNAL_SERVER_ERROR,
-            type = "internal-error",
-            title = "Internal server error",
-            detail = "The request could not be processed.",
-            request = request,
-        )
+        RequestFailureLog.unhandled(request, exception)
+        return respond(ProblemDetails.internalError(request))
     }
 
     private fun FieldError.toErrorMessage(): String =
         "$field: ${defaultMessage ?: "invalid value"}"
+
+    private fun respond(problem: ProblemDetail): ResponseEntity<ProblemDetail> =
+        ResponseEntity.status(problem.status).body(problem)
 
     // Retry-After takes whole seconds; round up so a sub-second delay never advertises zero.
     private fun Duration.toRetryAfterSeconds(): Long =

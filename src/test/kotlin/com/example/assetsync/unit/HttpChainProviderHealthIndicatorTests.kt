@@ -3,9 +3,12 @@ package com.example.assetsync.unit
 import com.example.assetsync.application.sync.ChainProviderEventsPageRequest
 import com.example.assetsync.application.sync.ChainProviderUnavailableException
 import com.example.assetsync.application.sync.ProviderDataInvalidException
+import com.example.assetsync.config.JacksonConfiguration
+import com.example.assetsync.config.JacksonConfiguration.Companion.MAX_JSON_STRING_LENGTH
 import com.example.assetsync.config.SyncProperties
 import com.example.assetsync.infrastructure.provider.HttpChainProvider
 import com.example.assetsync.infrastructure.provider.HttpChainProviderHealthIndicator
+import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
@@ -20,6 +23,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.assertThrows
 import org.springframework.boot.actuate.health.Status
+import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder
 import org.springframework.web.client.RestClient
 
 /**
@@ -119,6 +123,34 @@ class HttpChainProviderHealthIndicatorTests {
     }
 
     @Test
+    fun `unknown fields are skipped at any length while a known string past the json limit fails the page`() {
+        // The mapper Spring builds, with the application's customizer applied.
+        val builder = Jackson2ObjectMapperBuilder.json()
+        JacksonConfiguration().jsonStringLengthLimit().customize(builder)
+        val limitedProvider = HttpChainProvider(
+            chainProviderRestClient = RestClient.builder().baseUrl("http://127.0.0.1:${server.address.port}").build(),
+            objectMapper = builder.build<ObjectMapper>(),
+            syncProperties = SyncProperties(),
+        )
+        val long = "x".repeat(MAX_JSON_STRING_LENGTH + 1)
+        responseStatus.set(200)
+        responseBody.set(
+            """{"extra":"$long","events":[{"note":"$long","txHash":"0xlimit","eventIndex":0,"address":"0xhealthcheck",""" +
+                """"asset":"USDC","amount":"1.5","blockHeight":7,"confirmations":1,"direction":"INBOUND","status":"SEEN"}],""" +
+                """"hasMore":false,"nextCursor":"limit-final"}""",
+        )
+
+        assertEquals(1, limitedProvider.fetchObservedEventsPage(pageRequest()).events.size)
+
+        responseBody.set("""{"events":[],"hasMore":false,"nextCursor":"$long"}""")
+        val failure = assertThrows<ProviderDataInvalidException> { limitedProvider.fetchObservedEventsPage(pageRequest()) }
+        assertEquals(
+            "Provider returned JSON past a size limit, such as a string over $MAX_JSON_STRING_LENGTH characters.",
+            failure.message,
+        )
+    }
+
+    @Test
     fun `http 429 is retryable and parses valid retry after while ignoring invalid values`() {
         responseStatus.set(429)
         retryAfterHeader.set("2")
@@ -132,6 +164,30 @@ class HttpChainProviderHealthIndicatorTests {
         retryAfterHeader.set("not-a-date")
         val invalidRetryAfter = assertThrows<ChainProviderUnavailableException> { provider.fetchObservedEventsPage(pageRequest()) }
         assertNull(invalidRetryAfter.retryAfter)
+    }
+
+    @Test
+    fun `a null event is a data error for the address, not an outage`() {
+        responseStatus.set(200)
+        responseBody.set("""{"events":[null],"hasMore":false,"nextCursor":"null-event"}""")
+
+        val failure = assertThrows<ProviderDataInvalidException> { provider.fetchObservedEventsPage(pageRequest()) }
+
+        assertEquals("Provider response has a null element in its events field.", failure.message)
+        val health = indicator.health()
+        assertEquals(Status.UP, health.status)
+        assertEquals(failure.message, health.details["lastDataError"])
+    }
+
+    @Test
+    fun `a retry after beyond the representable range is ignored, and the 429 stays a rate limit`() {
+        responseStatus.set(429)
+        retryAfterHeader.set("99999999999999999")
+
+        val throttled = assertThrows<ChainProviderUnavailableException> { provider.fetchObservedEventsPage(pageRequest()) }
+
+        assertEquals("Provider rate limited the request with HTTP 429.", throttled.message)
+        assertNull(throttled.retryAfter)
     }
 
     private fun pageRequest(): ChainProviderEventsPageRequest =

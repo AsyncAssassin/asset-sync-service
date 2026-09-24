@@ -10,7 +10,7 @@ All MVP endpoints are exposed under `/api/v1`. The version is part of the URL be
 
 Conventions:
 
-- Request and response bodies use JSON.
+- Request and response bodies use JSON; a body of any other content type, YAML included, gets `415`. A string longer than 100 000 characters in a request field fails the request with `400 invalid-request` while the body is read, before any field rule runs. Unknown fields are ignored, whatever their size.
 - Timestamps use UTC ISO-8601 strings.
 - Identifiers use UUID strings.
 - Monetary amounts are encoded as decimal strings and stored with `numeric(38, 18)` precision.
@@ -178,7 +178,7 @@ No `Location` header is returned because the MVP does not expose a canonical wat
 Validation:
 
 - `accountId` must reference an existing account.
-- `chainId` must reference an enabled chain configuration.
+- `chainId` must reference an enabled chain configuration that the active provider serves; under `type=alchemy` that is a chain mapped to an Alchemy network, and under `start-mode=configured-block` one with a start block. Otherwise the answer is `404` with the title `Unsupported chain`.
 - `asset` must be registered and enabled for that chain in the asset registry; unknown or disabled assets return `404` with the title `Unsupported asset`. The seeded registry covers `USDC` on `local-evm` and `eth-sepolia`; `eth-mainnet` is seeded disabled.
 - `address` is required and must be non-blank.
 - `address` must be well formed for the chain once normalized: `0x` followed by 40 hex digits, in any casing, on `eth-sepolia` and `eth-mainnet`; no whitespace, `/`, or `:` on `local-evm`, which keeps accepting synthetic identifiers such as `0xdemoaddr`; no control characters on any chain. A malformed address returns `400` with `invalid-request` and the `chainId`, after the chain and asset checks.
@@ -251,6 +251,7 @@ Behavior:
 
 - `status` is required and must be `ACTIVE` or `DISABLED`; any other value returns `400` with `validation-failed`.
 - An unknown address id returns `404` with `not-found`.
+- Enabling an address runs the chain and asset checks of registration again, so it cannot bring back an address the registry or the active provider no longer serves: a disabled chain or one the provider does not serve returns `404` with the title `Unsupported chain`, an asset without an enabled config `404` with `Unsupported asset`, and the address stays `DISABLED`.
 - Setting the current status again returns the address unchanged.
 - A disabled address is skipped by account sync, refused by `POST /api/v1/addresses/{addressId}/sync` with `404`, and does not accept observed events. Enabling it again resumes sync from its stored cursor.
 - This is the way to take an address that keeps failing terminally out of account syncs; see Start Account Sync.
@@ -333,7 +334,7 @@ Validation:
 - `chainId`, `txHash`, `address`, and `asset` are required and must be non-blank.
 - `txHash` follows the address format rules of its chain, with 64 hex digits instead of 40 on `eth-sepolia` and `eth-mainnet`; a malformed hash returns `400` with `invalid-request`.
 - `eventIndex` is required and must be `>= 0`.
-- `amount` is required, must parse as a non-negative decimal, exponent notation such as `1e2` included, and must fit `numeric(38, 18)`: at most 20 integer and 18 fraction digits. It is stored at scale 18.
+- `amount` is required, must parse as a non-negative decimal, exponent notation such as `1e2` included, and must fit `numeric(38, 18)`: at most 20 integer and 18 fraction digits. It is stored at scale 18. A value longer than 80 characters is refused by its length alone, before it is parsed.
 - `blockHeight` is required and must be `>= 0`.
 - `confirmations` is required and must be `>= 0`.
 - `direction` must be `INBOUND` or `OUTBOUND`.
@@ -542,11 +543,11 @@ Response:
 
 Possible statuses are `QUEUED`, `RUNNING`, `SUCCEEDED`, and `FAILED`. Legacy `STARTED` may be visible for pre-async rows until recovery or an operator runbook drains them. `startedAt` is nullable while a run is still `QUEUED`.
 
-`lastError` carries the service's own failure messages, such as `Provider timeout after PT10S.`, bounded to `asset-sync.sync.worker.max-error-length`. A database failure shows only its class, for example `Database error (DataIntegrityViolationException).`, and any other unexpected failure shows `Unexpected error (<class>).`, because their messages can quote SQL; the full detail is logged as `sync_run_failure_detail`.
+`lastError` carries the service's own failure messages, such as `Provider timeout after PT10S.`, bounded to `asset-sync.sync.worker.max-error-length`. A failure to reach the HTTP bridge names its kind, such as `Provider transport failure: connection refused (ConnectException).`, never the bridge URL, whose path or query may carry a bridge token. A database failure shows only its class, for example `Database error (DataIntegrityViolationException).`, and any other unexpected failure shows `Unexpected error (<class>).`, because their messages can quote SQL; the full detail is logged as `sync_run_failure_detail`.
 
 ## 14. ProblemDetail Error Mapping
 
-All errors produced by the API layer use `ProblemDetail`, including framework-level routing failures such as unknown paths, unsupported methods, and unsupported content types. The `type` field is a stable service-owned URI. Implementations may add properties for correlation and domain identifiers, but must not expose internal stack traces. Under the protected profiles, `401` and `403` are produced by the Spring Security filter chain before a request reaches Spring MVC; a dedicated authentication entry point and access-denied handler write the same `ProblemDetail` shape, including `requestId`, and `401` responses keep the `WWW-Authenticate: Basic` challenge.
+All errors produced by the API layer use `ProblemDetail`, including framework-level routing failures such as unknown paths, unsupported methods, and unsupported content types. The `type` field is a stable service-owned URI. Implementations may add properties for correlation and domain identifiers, but must not expose internal stack traces. Under the protected profiles, `401` and `403` are produced by the Spring Security filter chain before a request reaches Spring MVC; a dedicated authentication entry point and access-denied handler write the same `ProblemDetail` shape, including `requestId`, and `401` responses keep the `WWW-Authenticate: Basic` challenge. A request with credentials that arrives while PostgreSQL is unavailable gets `503 database-unavailable` from the entry point instead, without a challenge, because the credentials could not be checked; `docs/failure-modes.md` section 6 describes the outage.
 
 A request that Spring Security's `StrictHttpFirewall` rejects before authentication, for example one with `//` or `;` in its path, never reaches the API layer. It gets `400` from the servlet container's error page in every profile, with Spring Boot's default error body instead of a `ProblemDetail` and without a Basic challenge.
 
@@ -554,7 +555,7 @@ Common mappings:
 
 | Condition | HTTP status | Problem type |
 | --- | ---: | --- |
-| Malformed JSON or invalid field type | 400 | `https://asset-sync-service/errors/invalid-request` |
+| Malformed JSON, invalid field type, or a field string longer than 100 000 characters | 400 | `https://asset-sync-service/errors/invalid-request` |
 | Bean validation failure | 400 | `https://asset-sync-service/errors/validation-failed` |
 | Invalid enum value | 400 | `https://asset-sync-service/errors/validation-failed` |
 | Missing required request parameter | 400 | `https://asset-sync-service/errors/invalid-request` |
@@ -572,7 +573,7 @@ Common mappings:
 | Database constraint violation from non-HTTP ingest paths | 400 | `https://asset-sync-service/errors/database-constraint-violation` |
 | Sync queue is full, with `Retry-After` | 429 | `https://asset-sync-service/errors/sync-queue-full` |
 | Provider timeout or unavailable during async execution | Stored on sync run | n/a |
-| PostgreSQL unavailable | 503 | `https://asset-sync-service/errors/database-unavailable` |
+| PostgreSQL unavailable, also while checking HTTP Basic credentials | 503 | `https://asset-sync-service/errors/database-unavailable` |
 | Unexpected server failure | 500 | `https://asset-sync-service/errors/internal-error` |
 | Any other Spring MVC error response, for example `406 Not Acceptable` | native status | `https://asset-sync-service/errors/<status-name>`, for example `not-acceptable` |
 
@@ -583,12 +584,15 @@ Example:
   "type": "https://asset-sync-service/errors/immutable-field-conflict",
   "title": "Immutable observed transaction field conflict",
   "status": 409,
-  "detail": "Observed transaction natural key matched an existing row, but amount or direction did not match.",
+  "detail": "Observed transaction natural key matched an existing row, but immutable fields did not match.",
   "instance": "/api/v1/observed-events",
+  "requestId": "018ff4c8-4b6f-7f2e-a3aa-0c7d23f6ac4e",
   "chainId": "local-evm",
   "txHash": "0xdeadbeef",
   "eventIndex": 0,
-  "requestId": "018ff4c8-4b6f-7f2e-a3aa-0c7d23f6ac4e"
+  "address": "0xabc",
+  "asset": "USDC",
+  "conflictingFields": ["AMOUNT"]
 }
 ```
 

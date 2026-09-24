@@ -17,7 +17,8 @@ internal object ProviderHttpSupport {
     fun parseRetryAfter(value: String?, now: Instant = Instant.now()): Instant? {
         val trimmed = value?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         trimmed.toLongOrNull()?.let { seconds ->
-            return if (seconds <= 0) null else now.plusSeconds(seconds)
+            // A delay past the end of Instant's range is as unusable as an unparseable one.
+            return if (seconds <= 0) null else runCatching { now.plusSeconds(seconds) }.getOrNull()
         }
         val parsed = runCatching {
             Instant.from(DateTimeFormatter.RFC_1123_DATE_TIME.parse(trimmed))

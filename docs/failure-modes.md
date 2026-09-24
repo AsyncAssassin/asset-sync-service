@@ -32,8 +32,8 @@ Expected behavior:
 
 Operational signal:
 
-- Increment duplicate observed-event metrics when metrics are implemented.
-- Log at debug or info level with natural key fields.
+- `asset.sync.observed.events.ingested` counts each duplicate with `result=NO_CHANGE`.
+- The `observed_event_ingested` INFO line carries `result=NO_CHANGE` and the natural key fields.
 
 ## 3. Provider Stale Confirmations
 
@@ -51,7 +51,7 @@ Expected behavior:
 
 Operational signal:
 
-- Log stale confirmation diagnostics with stored and incoming counts.
+- A stale event is counted and logged like any other `NO_CHANGE` (section 2), with the stored status; the stored and incoming confirmation counts are not logged.
 
 ## 4. Immutable Conflicts
 
@@ -93,26 +93,32 @@ Expected behavior:
 
 Operational signal:
 
-- Increment reverted transaction metrics when metrics are implemented.
-- Log the transition with transaction id and natural key.
+- `asset.sync.observed.transaction.transitions` counts the transition with `eventType=TRANSACTION_REVERTED`.
+- The `observed_transaction_transition` INFO line carries the transaction id, the natural key, and the outbox event id.
 
 ## 6. PostgreSQL Unavailable
 
 Scenario:
 
 - PostgreSQL connection cannot be acquired.
-- Query execution fails due to database outage.
+- Query execution fails due to database outage, or PostgreSQL refuses writes, for example after a failover to a read-only standby.
+- PostgreSQL stops answering without closing connections, for example on a paused host or behind a network partition.
 
 Expected behavior:
 
-- API returns `503 Service Unavailable`.
+- API returns `503 Service Unavailable` with the `database-unavailable` problem type. In the protected profiles this includes a request that carries credentials: HTTP Basic cannot read its user store to check them, so the answer is neither a `401` nor a Basic challenge. A request without credentials keeps its `401`.
+- A request waits for a pooled connection up to the Hikari `connection-timeout`, 30 seconds by default.
+- A query already sent to a server that stopped answering ends after the 40-second JDBC socket timeout (`socketTimeout`), which sits above the 30-second `statement_timeout`; raise both together. A new connection gives up on the TCP connect after 5 seconds (`connectTimeout`).
+- A `COMMIT` is not bound by `statement_timeout`. One that waits longer than the socket timeout, behind a stalled synchronous standby or disk, answers `503` although PostgreSQL may still commit it, so a client that retries can repeat the change: a retried `POST /api/v1/accounts` with the same `externalRef` gets `409`, one without an `externalRef` creates a second account.
+- Every request with credentials reads the user store, so during the outage it waits for the connection timeout too, including authenticated `/actuator/metrics` and `/actuator/prometheus` requests; anonymous health probes do not.
+- A sync run that meets the outage records `Database error (<class>).` and is retried with backoff.
 - Readiness health check fails.
 - No fake success response is returned.
 - No provider call should be started for a sync request if the initial `sync_run` cannot be created.
 
 Operational signal:
 
-- Log database exception class and operation name.
+- `database_operation_failed` at ERROR with the request path, the exception class, and the class of its root cause, both from the API and from the credential check. A username the user store cannot hold, such as one with a NUL character, is a bad credential (`401`), not an outage.
 - Avoid logging credentials or raw connection strings.
 
 ## 7. Provider Timeout Or Backpressure
@@ -136,11 +142,11 @@ Expected behavior:
 - Under the Alchemy provider, a repeated `pageKey`, a restarted continuation page, a row outside the requested block window, a safe frontier above the latest block, and an exhausted per-fetch RPC or time budget before the first block was drained are all retryable: the cursor stays on its block boundary and the next attempt rescans from it. A budget exhausted after at least one drained block returns that prefix instead.
 - The local token bucket waits for a token only within the fetch deadline; a wait that cannot be met is a retryable outage rather than a provider 429.
 - An Alchemy that is unavailable when the service starts is the same case: the startup probe leaves the provider in the `probe-failed` state instead of stopping the process, and sync runs against it retry as above.
-- These availability failures, and for Alchemy rejected credentials or configuration, turn the provider health indicator `DOWN` until the next successful fetch. A data error for one address (a `4xx`, malformed JSON, an oversized body, an unmappable Alchemy row) keeps the indicator's state and appears as its `lastDataError` detail.
+- These availability failures, and for Alchemy rejected credentials, turn the provider health indicator `DOWN` until the next successful fetch. A data error or a configuration gap of one address (a `4xx`, malformed JSON, an oversized body, an unmappable Alchemy row; under Alchemy also its chain without a network or a start block, its asset without an enabled config, or a block larger than a page) keeps the indicator's state and appears as its `lastDataError` detail until the next successful fetch of any address; the run's `last_error` keeps it.
 
 Operational signal:
 
-- Store concise failure detail in `sync_runs.last_error`. Readers of the run see the service's own messages only; a database or unexpected failure is stored as its class, and the full exception is logged as `sync_run_failure_detail`.
+- Store concise failure detail in `sync_runs.last_error`. Readers of the run see the service's own messages only; a database or unexpected failure is stored as its class, and the full exception is logged as `sync_run_failure_detail`. A failure to reach the HTTP bridge is stored by its kind, never with the bridge URL, which may carry a bridge token.
 - Log `syncRunId`, target type, target id, and provider operation.
 
 ## 8. Malformed Provider Page
@@ -148,7 +154,7 @@ Operational signal:
 Scenario:
 
 - The HTTP provider omits required `events` or `hasMore`.
-- The provider returns too many events, an oversized cursor/body/checkpoint, `hasMore=true` without cursor progress, wrong address/asset, invalid high-water fields, or insufficient final resume state. A final empty page may omit `nextCursor` only when it supplies durable block high-water such as `safeBlockHeight` or `latestBlockHeight`.
+- The provider returns too many events, an oversized cursor/body/checkpoint, a page field string over 100 000 characters, `hasMore=true` without cursor progress, wrong address/asset, invalid high-water fields, or insufficient final resume state. A final empty page may omit `nextCursor` only when it supplies durable block high-water such as `safeBlockHeight` or `latestBlockHeight`.
 - The provider returns events out of non-decreasing `(blockHeight, eventIndex, txHash)` order, or a page whose first event is behind the stored `last_processed_block_height` / `last_processed_event_index` checkpoint.
 - An event carries an amount that is negative or does not fit `numeric(38, 18)`, which PostgreSQL would otherwise round or reject, or a transaction hash that is blank or breaks the chain's format rules (`0x` and 64 hex digits on `eth-sepolia` and `eth-mainnet`, no whitespace, `/`, or `:` on `local-evm`, no control characters anywhere). Every event of the page is checked before the first one is written.
 - The Alchemy adapter meets a row it cannot map honestly: a `uniqueId` without the ERC-20 `:log:{n}` suffix or not matching the transaction hash, a non-hex `blockNum` or `rawContract.value`, a `rawContract.decimal` that disagrees with the registry, a missing address or contract, a category other than `erc20`, a row on the wrong side of the watched address, or a malformed provider cursor.
@@ -261,7 +267,7 @@ Expected behavior:
 Operational signal:
 
 - Log each sync run independently.
-- Track duplicate processing metrics when implemented.
+- Duplicate events count as `asset.sync.observed.events.ingested` with `result=NO_CHANGE`; duplicate provider work has no metric of its own.
 
 Notes:
 
@@ -331,15 +337,16 @@ Scenario:
 Expected behavior:
 
 - At startup with `asset-sync.provider.type=alchemy`, the preflight fails the process before the sync worker starts: static validation (key, auth mode, templates, numeric caps, `max-rpc-calls-per-fetch >= 4`), the registry rules, and one `eth_blockNumber` probe per required network that Alchemy rejects (HTTP 401/403, JSON-RPC `-32600`, or an answer that is not a block number). The failure is a `ProviderConfigurationException` whose message names the chains or `(chain_id, asset)` pairs and the operator action, never the key or the endpoint.
-- A probe that meets an outage (`5xx`, `429`, a timeout, a transport error) does not fail startup: the provider starts in the `probe-failed` state with health `DOWN` and the scrubbed error, and the first successful fetch clears it (section 7). An enabled chain without a mapping and without active watched addresses, such as the seeded `local-evm` on a fresh database, is only logged; a sync of an address registered there later fails terminally.
+- A probe that meets an outage (`5xx`, `429`, a timeout, a transport error) does not fail startup: the provider starts in the `probe-failed` state with health `DOWN` and the scrubbed error, and the first successful fetch clears it (section 7). An enabled chain without a mapping and without active watched addresses, such as the seeded `local-evm` on a fresh database, is only logged; registering an address there, or enabling one again, answers `404 Unsupported chain`.
 - During a sync run, `ProviderConfigurationException` is terminal: the run is marked `FAILED` at once, `failure_attempts` is not spent on retries that cannot succeed, and the checkpoint does not move.
+- A configuration gap of one address (its chain without a mapping or, under `configured-block`, without a start block, its asset without an enabled config, a block with more events than a page) fails only that address's runs: provider health stays `UP` with the gap as `lastDataError`, while rejected credentials turn it `DOWN`. The startup preflight still refuses the first three at the next start, so disable such an address or fix its configuration before restarting.
 - `sync_runs.last_error`, log lines, health details, and exception messages are scrubbed of the API key; transport failures that embed a request URL are rethrown with a bounded scrubbed message and without their cause.
 
 Operational signal:
 
 - Startup log `alchemy_preflight_succeeded` with the probed and the unavailable networks, or the startup failure with the scrubbed message; `alchemy_preflight_probe_unavailable` per unavailable network and `alchemy_preflight_unmapped_chains_skipped` for unmapped chains without active addresses.
 - Log `alchemy_rpc_failed` and `alchemy_provider_page_fetch_failed` with the scrubbed error.
-- Health component `alchemyChainProvider` with `provider`, `authMode`, `networks`, `state`, and the scrubbed `error`.
+- Health component `alchemyChainProvider` with `provider`, `authMode`, `networks`, `state`, and the scrubbed `error`. A configuration gap of one address shows only as `lastDataError`, until the next successful fetch of any address, and for good as the run's `last_error`.
 
 ## 18. Future Failure Modes
 

@@ -1,3 +1,9 @@
+# Loopback only: the demo users have public passwords. SERVER_ADDRESS=0.0.0.0 opens a remote demo,
+# on a trusted network only (the JVM then listens on IPv6 too); docker-compose.yml sets it inside
+# the container, whose published port stays on the host's loopback.
+server:
+  address: ${SERVER_ADDRESS:127.0.0.1}
+
 spring:
   datasource:
     url: jdbc:postgresql://${ASSET_SYNC_DB_HOST:localhost}:${ASSET_SYNC_DB_PORT:5432}/${ASSET_SYNC_DB_NAME:asset_sync}
@@ -14,6 +20,11 @@ spring:
 asset-sync:
   provider:
     # The demo provider is the HTTP bridge (type http, the default) calling the bundled in-process
-    # simulator over real HTTP (self-call on the fixed server port). Schedulers stay ON so demo
-    # shows the outbox publisher and recovery live.
-    base-url: http://localhost:${SERVER_PORT:8080}/simulator
+    # simulator over real HTTP (self-call on the server port). Resolving `server.port` rather than
+    # the SERVER_PORT variable follows the configured port whichever way it is set (the variable,
+    # `--server.port`, an IDE run configuration); the self-call needs a fixed port (not 0) and no
+    # servlet context path. The call goes to 127.0.0.1, where the server listens by default and with
+    # SERVER_ADDRESS=0.0.0.0, never to `localhost`, which can resolve to ::1 first; a bind to one other
+    # interface needs ASSET_SYNC_PROVIDER_BASE_URL pointed at it.
+    # Schedulers stay ON so demo shows the outbox publisher and recovery live.
+    base-url: http://127.0.0.1:${server.port:8080}/simulator

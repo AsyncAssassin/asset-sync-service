@@ -8,6 +8,7 @@ import com.example.assetsync.application.account.AssetConfig
 import com.example.assetsync.application.account.AssetConfigRepository
 import com.example.assetsync.application.observability.AssetSyncMetrics
 import com.example.assetsync.application.outbox.OutboxEventRepository
+import com.example.assetsync.application.sync.AddressConfigurationException
 import com.example.assetsync.application.sync.ChainProviderEventsPage
 import com.example.assetsync.application.sync.ChainProviderEventsPageRequest
 import com.example.assetsync.application.sync.ChainProviderUnavailableException
@@ -20,8 +21,10 @@ import com.example.assetsync.config.AlchemyStartMode
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProvider
+import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProviderHealthIndicator
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyJsonRpcClient
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyPreflightReport
+import com.example.assetsync.infrastructure.provider.alchemy.AlchemyProviderState
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyRequiredChain
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
@@ -38,6 +41,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.assertThrows
 import org.mockito.Mockito
+import org.springframework.boot.actuate.health.Status
 import org.springframework.web.client.RestClient
 
 /**
@@ -171,7 +175,7 @@ class AlchemyChainProviderTests {
     }
 
     @Test
-    fun `configured-block start uses the configured block and fails without one`() {
+    fun `configured-block start uses the configured block, and without one the chain is not served`() {
         chain.transfers += Transfer(block = 100, logIndex = 1, from = other, to = watched)
         val configured = properties(
             startMode = AlchemyStartMode.CONFIGURED_BLOCK,
@@ -184,9 +188,14 @@ class AlchemyChainProviderTests {
         assertEquals(listOf(100L), page.events.map { it.blockHeight })
         assertEquals(100L, page.metadata!!.get("initialStartBlock").asLong())
 
-        val missingStartBlock = properties(startMode = AlchemyStartMode.CONFIGURED_BLOCK)
-        val failure = assertThrows<ProviderConfigurationException> { provider(missingStartBlock).fetchObservedEventsPage(request(cursor = null)) }
+        val missingStartBlock = provider(properties(startMode = AlchemyStartMode.CONFIGURED_BLOCK))
+        assertTrue(provider(configured).supportsChain("eth-sepolia"))
+        assertFalse(missingStartBlock.supportsChain("eth-sepolia"), "registration must refuse a chain without a start block")
+        // An address registered before would fail on its own, like one on an unmapped chain.
+        val failure = assertThrows<AddressConfigurationException> { missingStartBlock.fetchObservedEventsPage(request(cursor = null)) }
         assertTrue(failure.message!!.contains("networks.eth-sepolia.start-block"), failure.message)
+        assertEquals(failure.message, missingStartBlock.lastDataError())
+        assertEquals(Status.UP, AlchemyChainProviderHealthIndicator(missingStartBlock).health().status)
     }
 
     @Test
@@ -223,9 +232,13 @@ class AlchemyChainProviderTests {
 
         chain.transfers.clear()
         (1..4).forEach { index -> chain.transfers += Transfer(block = 100, logIndex = index, from = other, to = watched) }
-        val oversized = assertThrows<ProviderConfigurationException> { provider().fetchObservedEventsPage(request(cursor = cursor(100), limit = 3)) }
+        val oversizedProvider = provider()
+        val oversized = assertThrows<AddressConfigurationException> { oversizedProvider.fetchObservedEventsPage(request(cursor = cursor(100), limit = 3)) }
         assertTrue(oversized.message!!.contains("Alchemy block 100 has 4 ERC20 events"), oversized.message)
         assertTrue(oversized.message!!.contains("exceeding request.limit=3"), oversized.message)
+        assertEquals(oversized.message, oversizedProvider.lastDataError())
+        assertNull(oversizedProvider.lastError())
+        assertEquals(Status.UP, AlchemyChainProviderHealthIndicator(oversizedProvider).health().status)
     }
 
     @Test
@@ -435,6 +448,29 @@ class AlchemyChainProviderTests {
         val exception = assertThrows<ChainProviderUnavailableException> { provider().fetchObservedEventsPage(request(cursor = cursor(100))) }
 
         assertTrue(exception.message!!.contains("safe block 250 is above the latest block 200"), exception.message)
+    }
+
+    @Test
+    fun `a configuration gap of one address is a data error that keeps the provider up`() {
+        listOf(
+            provider() to request(cursor = cursor(100), chainId = "local-evm"),
+            provider(assetConfig = null) to request(cursor = cursor(100)),
+        ).forEach { (gapped, gappedRequest) ->
+            val failure = assertThrows<AddressConfigurationException> { gapped.fetchObservedEventsPage(gappedRequest) }
+
+            assertFalse(failure.message!!.contains("disable the chain"), "a disabled chain still syncs its active addresses: ${failure.message}")
+            assertEquals(AlchemyProviderState.PROBE_SUCCEEDED, gapped.state())
+            assertEquals(failure.message, gapped.lastDataError())
+            assertNull(gapped.lastError())
+            assertEquals(Status.UP, AlchemyChainProviderHealthIndicator(gapped).health().status)
+        }
+        assertEquals(emptyList(), stub.requests, "a configuration gap must not spend RPC calls")
+    }
+
+    @Test
+    fun `only chains mapped to an alchemy network are served`() {
+        assertTrue(provider().supportsChain("eth-sepolia"))
+        assertFalse(provider().supportsChain("local-evm"))
     }
 
     @Test

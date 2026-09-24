@@ -15,6 +15,7 @@ import com.example.assetsync.infrastructure.provider.FakeChainProviderStep
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import java.math.BigDecimal
+import java.sql.SQLException
 import java.sql.Timestamp
 import java.time.Duration
 import java.time.Instant
@@ -38,6 +39,7 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
+import org.springframework.transaction.TransactionSystemException
 
 @ActiveProfiles("test")
 @Import(TestcontainersConfiguration::class)
@@ -1033,6 +1035,33 @@ class SyncApiIntegrationTests(
         assertEquals(0, singleInt("SELECT events_changed FROM sync_runs WHERE id = ?", syncRunId))
         assertEquals(0, tableCount("observed_transactions"))
         assertEquals(0, tableCount("outbox_events"))
+    }
+
+    @Test
+    fun `a transaction the database could not serve is recorded as a database error`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-db-transaction")
+        val addressId = watchedAddress["id"].asText()
+        // What a rollback on a connection an outage broke throws; retried like any database failure.
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-db-transaction",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.ThrowableFailure(
+                    TransactionSystemException("JDBC rollback failed", SQLException("Connection is closed")),
+                ),
+            ),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("QUEUED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(
+            "Database error (TransactionSystemException).",
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId),
+        )
     }
 
     @Test

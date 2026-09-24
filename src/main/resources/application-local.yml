@@ -1,3 +1,9 @@
+# Loopback only: `local` has no authentication, so a run on a host must not be reachable from
+# other machines. SERVER_ADDRESS=0.0.0.0 would open it; do that only inside a container reached
+# through a port published on the host's loopback, as docker-compose.yml does.
+server:
+  address: ${SERVER_ADDRESS:127.0.0.1}
+
 spring:
   datasource:
     url: jdbc:postgresql://${ASSET_SYNC_DB_HOST:localhost}:${ASSET_SYNC_DB_PORT:5432}/${ASSET_SYNC_DB_NAME:asset_sync}

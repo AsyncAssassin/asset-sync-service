@@ -191,7 +191,7 @@ On shutdown the worker acts as a Spring `SmartLifecycle` in the web server's gra
 
 Request: `GET {base-url}/v1/chains/{chainId}/addresses/{address}/events` with the query parameters `asset`, `limit` (the page size), `cursor` (the stored resume token, absent before the first page), and, once the address has a checkpoint, `fromBlockHeight` and `fromEventIndex` of its last processed event. A bridge resumes from `cursor` when one is sent, otherwise from the first event at or after `(fromBlockHeight, fromEventIndex)`, and from the start of its history when neither is sent. Serving the checkpoint event itself again is harmless; serving anything before it fails the page.
 
-Response body, at most `max-provider-page-bytes`:
+Response body, at most `max-provider-page-bytes`, with no string longer than 100 000 characters in the fields below; other fields are ignored:
 
 - `events` (required): objects with `txHash`, `eventIndex`, `address`, `asset`, `amount` (a JSON number or decimal string), `blockHeight`, `confirmations`, `direction` (`INBOUND` or `OUTBOUND`), and `status` (`SEEN`, `CONFIRMED`, or `REVERTED`), in non-decreasing `(blockHeight, eventIndex, txHash)` order and at most `limit` of them.
 - `hasMore` (required): whether another page follows now; `true` requires a `nextCursor` that differs from the request cursor.
@@ -199,7 +199,7 @@ Response body, at most `max-provider-page-bytes`:
 - `latestBlockHeight`, `safeBlockHeight`: block high-water, optional; `safeBlockHeight` must not exceed `latestBlockHeight`.
 - `metadata`: an optional JSON object stored as the address checkpoint, at most `max-checkpoint-json-length` bytes.
 
-Status handling: `2xx` is parsed as above; `408`, `429` (honoring `Retry-After`), and `5xx` are retryable and spend the run's retry budget; any other `4xx`, malformed JSON, and an oversized body are terminal provider data invalid for that address. Only the retryable class turns the `httpChainProvider` health indicator `DOWN`.
+Status handling: `2xx` is parsed as above; `408`, `429` (honoring `Retry-After`), and `5xx` are retryable and spend the run's retry budget; any other `4xx`, malformed JSON, a `null` element in `events`, and an oversized body are terminal provider data invalid for that address. Only the retryable class turns the `httpChainProvider` health indicator `DOWN`.
 
 Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. Retryable provider failures, including 429 throttling, increment `failure_attempts`. Provider configuration failures (`ProviderConfigurationException`: rejected credentials, a chain without a provider network mapping, a fetch the configured provider cannot serve) are terminal like malformed pages, so they never burn the retry budget on attempts that cannot succeed.
 
@@ -213,6 +213,8 @@ The Alchemy adapter serves one watched address and one ERC-20 registry asset per
 4. Scan at most `max-window-blocks` up to the frontier: one `alchemy_getAssetTransfers` call per direction (`toAddress` for `INBOUND`, `fromAddress` for `OUTBOUND`, `category=["erc20"]`, the registry contract, `order=asc`, `maxCount=1000`). A range answered without `pageKey` is complete for every block in it. A paged range is not trusted across pages, but its first page still shows the last block it reached, and ascending order means every block before that boundary was covered in full: the scan narrows the range to those blocks and re-queries them as a complete range while the RPC budget leaves room for it, then drains the boundary block alone with `fromBlock == toBlock`, following `pageKey` in memory with loop, restart, and window checks, and continues with the rest of the window.
 5. Merge both streams by `uniqueId`, skip self-transfers, which move no funds and are deliberately not recorded, and rows of another contract (both counted in the checkpoint), map `uniqueId` `:log:{n}` to `eventIndex`, `rawContract.value` and registry decimals to `amount`, `latest - blockHeight + 1` to `confirmations`, emit `SEEN` and let the confirmation policy promote it, and sort by `(blockHeight, eventIndex, txHash)`. A block is never read again, so these confirmations are final: a chain's `required_confirmations` above `latest - frontier + 1` would leave its events `SEEN`.
 6. Emit whole blocks only, up to `request.limit`; the first block that does not fit becomes `nextBlock`, and one block with more events than the limit is a terminal `ProviderConfigurationException` because the page contract cannot split a block.
+
+A configuration gap of one address, such as its chain without a network mapping or, under `configured-block`, without a start block, its asset without an enabled config, or a block with more events than a page, is an `AddressConfigurationException`: terminal for that address's runs and shown as the provider's `lastDataError` until the next successful fetch, while health stays `UP`. Registration and re-enabling refuse a chain the provider cannot serve in the first place (`ChainProviderPort.supportsChain`), so only an address registered before the switch, or one whose asset config was disabled since, gets there; the startup preflight refuses both at the next start.
 
 Durable progress moves only past fully drained blocks: `nextCursor` is always a block boundary, `hasMore` is `nextBlock <= safe`, and a block that cannot be finished within `max-rpc-calls-per-fetch` and the provider timeout is left for the next fetch, or reported as a retryable `ChainProviderUnavailableException` when nothing was finished. `pageKey` never reaches `provider_cursor` or `checkpoint`. The checkpoint metadata stays under 1 KiB: provider, chain, network, asset, contract, scan mode and counters, `nextBlock`, latest and safe heights, finality mode and fallback flag, `initialStartBlock`, and skip counters.
 
@@ -566,7 +568,7 @@ Key columns:
 - `version bigint not null default 0`
 - `created_at timestamptz not null`
 - `updated_at timestamptz not null`
-- `source text null` (who made the last lifecycle change: `rest:<user>` or `provider:<type>`)
+- `source text null` (who made the last lifecycle change: `rest:<user>` or `provider:<type>`; `demo:seed` for the `demo` dataset)
 
 Constraints and indexes:
 - `unique (chain_id, tx_hash, event_index, address, asset)`
@@ -843,13 +845,13 @@ Duplicate no-op response:
 - `400 Bad Request`: invalid request shape, invalid amount, invalid enum value, negative confirmation count, or watched-address pagination outside the supported bounds.
 - `401 Unauthorized`: missing or invalid HTTP Basic credentials in protected profiles; the response keeps the `WWW-Authenticate: Basic` challenge.
 - `403 Forbidden`: authenticated caller without the required role in protected profiles.
-- `404 Not Found`: account, watched address, unsupported chain, sync run, or route not found.
+- `404 Not Found`: account, watched address, unsupported chain or asset, sync run, or route not found.
 - `405 Method Not Allowed`: unsupported HTTP method for a known route, with an `Allow` header.
-- `409 Conflict`: duplicate watched address or immutable observed transaction field mismatch.
+- `409 Conflict`: duplicate account `externalRef`, duplicate watched address, or immutable observed transaction field mismatch.
 - `415 Unsupported Media Type`: request body content type other than JSON.
 - `429 Too Many Requests`: the soft cap on queued plus running sync runs is reached; `Retry-After` carries the worker claim interval in whole seconds.
 - `500 Internal Server Error`: unexpected failure; the response carries a generic detail and the exception goes to the log.
-- `503 Service Unavailable`: request-time infrastructure failure, such as PostgreSQL unavailable.
+- `503 Service Unavailable`: request-time infrastructure failure, such as PostgreSQL unavailable, including a request whose HTTP Basic credentials could not be checked; see `docs/failure-modes.md` section 6.
 
 Provider timeout or unavailability during async sync worker execution does not change the already-returned `202 Accepted` POST response. The worker records retry or terminal `FAILED` state on the `sync_run`, and clients inspect it through `GET /api/v1/sync-runs/{id}`.
 
@@ -860,11 +862,15 @@ ProblemDetail example:
   "type": "https://asset-sync-service/errors/immutable-field-conflict",
   "title": "Immutable observed transaction field conflict",
   "status": 409,
-  "detail": "Observed transaction natural key matched an existing row, but amount or direction did not match.",
+  "detail": "Observed transaction natural key matched an existing row, but immutable fields did not match.",
   "instance": "/api/v1/observed-events",
+  "requestId": "018ff4c8-4b6f-7f2e-a3aa-0c7d23f6ac4e",
   "chainId": "local-evm",
   "txHash": "0xdeadbeef",
-  "eventIndex": 0
+  "eventIndex": 0,
+  "address": "0xabc",
+  "asset": "USDC",
+  "conflictingFields": ["AMOUNT"]
 }
 ```
 
@@ -976,7 +982,7 @@ Payload fields:
 - `status`
 - `confirmations`
 - `blockHeight`
-- `source`: who caused this lifecycle change, `rest:<user>` for `POST /api/v1/observed-events` or `provider:<http|alchemy|fake>` for a sync, so a status reported through the API stays distinguishable from provider data downstream. The published log line carries it too.
+- `source`: who caused this lifecycle change, `rest:<user>` for `POST /api/v1/observed-events` or `provider:<http|alchemy|fake>` for a sync (`demo:seed` for the events the `demo` profile seeds), so a status reported through the API stays distinguishable from provider data downstream. The published log line carries it too.
 
 Poller behavior:
 - Scheduled job selects due `NEW` or `FAILED` rows with `FOR UPDATE SKIP LOCKED`.
@@ -1110,7 +1116,7 @@ Concurrent sync for same address:
 - Optional advisory lock can be added later for stricter global admission control.
 
 PostgreSQL unavailable:
-- API returns `503`.
+- API returns `503` with `database-unavailable`, also for a request whose credentials cannot be checked; timeouts and limits are in `docs/failure-modes.md` section 6.
 - Readiness health check fails.
 - No fake success response is returned.
 
@@ -1199,7 +1205,7 @@ Health checks:
 - Spring Actuator liveness.
 - Spring Actuator readiness.
 - PostgreSQL connectivity.
-- Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere. It turns `DOWN` only on availability failures: a timeout, a transport error, `5xx`, `429`, and for Alchemy also rejected credentials or configuration, and an outage during the startup probe (`probe-failed`) until the first successful fetch. Invalid data for one address, such as a `4xx` answer or malformed JSON, keeps its state and appears as the `lastDataError` detail, so one bad address cannot turn the aggregate health into `503`; `asset.sync.provider.pages` counts those pages as `MALFORMED`. The Alchemy indicator reports the provider, the auth mode, the probed networks, and the state, plus the scrubbed error after a failed startup probe or fetch; never an endpoint, a header, or the API key.
+- Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere. It turns `DOWN` only on availability failures: a timeout, a transport error, `5xx`, `429`, and for Alchemy also rejected credentials, and an outage during the startup probe (`probe-failed`) until the first successful fetch. Invalid data for one address, such as a `4xx` answer or malformed JSON, and under Alchemy a configuration gap of one address keep the state and appear as the `lastDataError` detail until the next successful fetch, so one bad address cannot turn the aggregate health into `503`; `asset.sync.provider.pages` counts pages with invalid data as `MALFORMED` and those with a configuration gap as `FAILED`. The Alchemy indicator reports the provider, the auth mode, the probed networks, and the state, plus the scrubbed error after a failed startup probe or fetch; never an endpoint, a header, or the API key. The HTTP bridge indicator's error names the kind of a transport failure, such as `Provider transport failure: timeout (SocketTimeoutException).`, never the bridge URL; the WARN line `http_provider_page_fetch_failed` adds the cause chain with every URL cut out.
 - Component details are shown to authenticated callers (`management.endpoint.health.show-details: when-authorized`) and to everyone in `local`; anonymous probes see only the aggregate status.
 
 Build information:
@@ -1211,7 +1217,7 @@ MVP services:
 - `asset-sync-service`
 - `postgres`
 
-Both services publish their ports on `127.0.0.1` only. `ASSET_SYNC_HTTP_BIND_ADDRESS` widens the application port for a remote demo under a protected profile; PostgreSQL stays on loopback. The application service has a 40-second `stop_grace_period`, longer than the 30-second graceful-shutdown phase.
+Both services publish their ports on `127.0.0.1` only. Started on a host instead, `local` and `demo` listen on `127.0.0.1` themselves (`server.address`, overridden by `SERVER_ADDRESS`); compose sets `SERVER_ADDRESS=0.0.0.0` for the application container, which is reached through its published port. `ASSET_SYNC_HTTP_BIND_ADDRESS` widens the application port for a remote demo under a protected profile; PostgreSQL stays on loopback. The application service has a 40-second `stop_grace_period`, longer than the 30-second graceful-shutdown phase.
 
 Metrics are exposed through Actuator. The MVP Docker Compose file does not include Prometheus or Grafana services.
 

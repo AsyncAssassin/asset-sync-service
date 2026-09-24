@@ -144,7 +144,7 @@ class DuplicateWatchedAddressException(
 
 class UnsupportedChainException(
     val chainId: String,
-) : RuntimeException("Chain configuration was not found or is disabled.")
+) : RuntimeException("The chain is not configured, is disabled, or is not served by the active provider.")
 
 class UnsupportedAssetException(
     val chainId: String,

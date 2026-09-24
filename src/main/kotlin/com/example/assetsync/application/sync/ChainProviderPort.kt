@@ -15,6 +15,12 @@ interface ChainProviderPort {
     val providerName: String
 
     fun fetchObservedEventsPage(request: ChainProviderEventsPageRequest): ChainProviderEventsPage
+
+    /**
+     * Whether this provider can serve addresses on the chain at all. Registration refuses a chain
+     * it cannot serve, so an address there cannot fail every sync and stop the next start.
+     */
+    fun supportsChain(chainId: String): Boolean = true
 }
 
 data class ChainProviderEventsPageRequest(
@@ -97,7 +103,18 @@ class ProviderDataInvalidException(
  * fix it, so it is terminal for a sync run and never consumes the failure budget as a transient
  * outage would. Messages must already be scrubbed of secrets when the exception is created.
  */
-class ProviderConfigurationException(
+open class ProviderConfigurationException(
     message: String,
     cause: Throwable? = null,
 ) : RuntimeException(message, cause)
+
+/**
+ * A [ProviderConfigurationException] that concerns one watched address, such as its chain
+ * without a provider mapping or its asset without an enabled config. It is terminal for that
+ * address, like any configuration failure, but says nothing about the provider's availability
+ * for the other addresses, so provider health keeps it as a detail instead of turning `DOWN`.
+ */
+class AddressConfigurationException(
+    message: String,
+    cause: Throwable? = null,
+) : ProviderConfigurationException(message, cause)

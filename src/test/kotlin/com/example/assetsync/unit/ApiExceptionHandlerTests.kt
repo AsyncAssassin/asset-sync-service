@@ -2,9 +2,12 @@ package com.example.assetsync.unit
 
 import com.example.assetsync.api.error.ApiExceptionHandler
 import com.example.assetsync.application.sync.SyncQueueFullException
+import java.sql.SQLException
+import java.sql.SQLTransientConnectionException
 import java.time.Duration
 import org.hamcrest.Matchers.containsString
 import org.hamcrest.Matchers.not
+import org.jooq.exception.TooManyRowsException
 import org.junit.jupiter.api.Test
 import org.springframework.http.HttpHeaders
 import org.springframework.http.MediaType
@@ -14,6 +17,9 @@ import org.springframework.test.web.servlet.result.MockMvcResultMatchers.header
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 import org.springframework.test.web.servlet.setup.MockMvcBuilders
+import org.springframework.transaction.CannotCreateTransactionException
+import org.springframework.transaction.TransactionSystemException
+import org.springframework.transaction.UnexpectedRollbackException
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RestController
 
@@ -32,6 +38,35 @@ class ApiExceptionHandlerTests {
         @GetMapping("/queue-full")
         fun queueFull(): String =
             throw SyncQueueFullException(maxInFlightRuns = 1, retryAfter = Duration.ofMillis(1_500))
+
+        // What the transaction manager throws when the pool has no connection to give.
+        @GetMapping("/no-connection")
+        fun noConnection(): String =
+            throw CannotCreateTransactionException(
+                "Could not open JDBC Connection for transaction",
+                SQLTransientConnectionException("HikariPool-1 - Connection is not available, secret internal detail"),
+            )
+
+        // What a rollback on a connection the outage broke throws, overriding the query's own error.
+        @GetMapping("/rollback-failed")
+        fun rollbackFailed(): String =
+            throw TransactionSystemException("JDBC rollback failed", SQLException("Connection is closed"))
+
+        @GetMapping("/unexpected-rollback")
+        fun unexpectedRollback(): String =
+            throw UnexpectedRollbackException("Transaction silently rolled back because it has been marked as rollback-only")
+
+        // What jOOQ throws for an SQL error Spring cannot classify, such as a write to a read-only database.
+        @GetMapping("/read-only-database")
+        fun readOnlyDatabase(): String =
+            throw org.jooq.exception.DataAccessException(
+                "SQL [insert into accounts ...]; secret internal detail",
+                SQLException("ERROR: cannot execute INSERT in a read-only transaction", "25006"),
+            )
+
+        // A jOOQ result error without SQL behind it is a programming error.
+        @GetMapping("/too-many-rows")
+        fun tooManyRows(): String = throw TooManyRowsException("Cursor returned more than one result")
     }
 
     private val mockMvc = MockMvcBuilders
@@ -49,6 +84,36 @@ class ApiExceptionHandlerTests {
             .andExpect(jsonPath("$.detail").value("The request could not be processed."))
             .andExpect(jsonPath("$.instance").value("/boom"))
             .andExpect(content().string(not(containsString("secret internal detail"))))
+    }
+
+    @Test
+    fun `a transaction the database cannot serve maps to database unavailable`() {
+        listOf("/no-connection", "/rollback-failed").forEach { path ->
+            mockMvc.perform(get(path))
+                .andExpect(status().isServiceUnavailable)
+                .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+                .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/database-unavailable"))
+                .andExpect(jsonPath("$.detail").value("Database operation failed."))
+                .andExpect(jsonPath("$.instance").value(path))
+                .andExpect(content().string(not(containsString("secret internal detail"))))
+        }
+    }
+
+    @Test
+    fun `an sql error spring could not translate is still a database failure`() {
+        mockMvc.perform(get("/read-only-database"))
+            .andExpect(status().isServiceUnavailable)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/database-unavailable"))
+            .andExpect(content().string(not(containsString("secret internal detail"))))
+    }
+
+    @Test
+    fun `a transaction misuse or a result error stays an internal error`() {
+        listOf("/unexpected-rollback", "/too-many-rows").forEach { path ->
+            mockMvc.perform(get(path))
+                .andExpect(status().isInternalServerError)
+                .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/internal-error"))
+        }
     }
 
     @Test

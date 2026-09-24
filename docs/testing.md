@@ -65,6 +65,7 @@ Required cases:
 | Area | Cases |
 | --- | --- |
 | Migrations | Full Liquibase changelog applies on an empty PostgreSQL database |
+| Network binding | `local` and `demo` listen on `127.0.0.1`, `SERVER_ADDRESS=0.0.0.0` opens them, and an empty `SERVER_ADDRESS` stops the start |
 | Accounts | `external_ref` uniqueness, valid statuses, nullable `external_ref` |
 | Watched addresses | FK to account, FK to chain config, unique `chain_id + address + asset` |
 | Observed transactions | natural key uniqueness, invalid enum checks, non-negative checks |
@@ -73,20 +74,26 @@ Required cases:
 | Confirmation | `SEEN -> CONFIRMED` updates row and creates one `TRANSACTION_CONFIRMED` event |
 | Reorg | `CONFIRMED -> REVERTED` updates row and creates one `TRANSACTION_REVERTED` event |
 | Duplicate reorg | no duplicate outbox event |
+| Alchemy address gaps | registration on a chain without an Alchemy network, or without a start block under `configured-block`, is refused with `404`, and so is enabling such an address again; a chain, start-block, or asset gap of one address, or a block larger than a page, fails that address with health `UP` and `lastDataError`, while a key rejected at fetch time turns health `DOWN`; a cursor another provider wrote names the fix whatever its shape, and a damaged Alchemy cursor is never called foreign |
 | Atomicity | rollback prevents observed transaction and outbox writes from splitting |
 | Retry race | concurrent duplicate processing results in one canonical row |
 | Outbox poller | `FOR UPDATE SKIP LOCKED` prevents duplicate claims across pollers |
 | Publisher retry | failed publish increments attempts and schedules `next_attempt_at` |
 | Sync cursors | lease acquire/release/reclaim, expired lease fencing, stale token rejection, heartbeat extension, high-water preservation |
 | Provider pages | missing required fields, explicit empty page, high-water-only final page, byte cap, cursor progress, multi-page success, an invalid amount or transaction hash failing the whole page before any write, a chain disabled after registration failing the run terminally, a final page without a cursor keeping the stored cursor only when it had no events, and the next fetch carrying the checkpoint as `fromBlockHeight` and `fromEventIndex` |
+| Bridge credentials | an unreachable bridge whose `base-url` carries a token in the path and the query: `lastError` for a `READ` caller, health, and the logs, at TRACE too, name the failure kind and no token; the kind comes from the exception RestClient wraps, for either HTTP client; a read timeout is a timeout; a user name or password in `base-url` stops startup; a `null` event is a data error; a `Retry-After` beyond the representable range is ignored |
 | Sync continuation | page failure retry from checkpoint, continuation count separate from failure attempts |
 | Account traversal | busy early address is skipped while later addresses are processed; a pass larger than one claim resumes from its keyset and completes; an address registered between claims joins the pass; an address with pages left is drained before the scan moves on; a busy address is revisited after the scan; a terminally failing address is reported in `last_error` while the others sync, and disabling it lets the account sync pass |
 | Sync shutdown | draining finishes an in-flight run, interruption requeues without failure budget, a stopped worker refuses claims |
+| Database outage | a dedicated PostgreSQL stopped under running `test` and `e2e` contexts: every API endpoint answers `503 database-unavailable`, under the protected chain also with credentials that worked before and without a Basic challenge; an anonymous request keeps its `401`; health turns `503`; pooled connections carry a socket timeout above `statement_timeout` and the connect timeout; with the database up, a username with a NUL character gets `401`; a transaction failure in a sync run is recorded as a database error; a jOOQ SQL error Spring cannot translate is a database failure, a result error is not |
 | Asset registry | changeset 015 seeds and constraints, unknown and disabled asset rejection, disabled chain precedence, Sepolia casing normalization, rollout preflight query |
 | Protected security chain | a path the firewall rejects keeps its `400` without a Basic challenge, with or without credentials; a path that Tomcat refuses before Spring (`%2F`) gets Tomcat's bare `400` page without the error report or the server version; `/simulator` requires authentication in `prod` and stays open under `demo`, where a non-positive `limit` is a `400` ProblemDetail; the OpenAPI document declares HTTP Basic as the global requirement; an HTTP bridge that returns no cursor resumes from the checkpoint the provider sends |
+| OpenAPI document | each operation's success status (`201`, `202` with a relative `Location`, `201` or `200` for ingest); the shared `ProblemDetail` errors `400`, `401`, `500`, and `503` on every operation and `403` on those that change state, declared once and referenced; no simulator path under `demo`; no validation getters in the request schemas |
 | Credentials and sources | `prod` refuses to start on a database that holds the demo users and names the SQL that removes them; events record `rest:<user>` or `provider:<type>` as their source on the row and in the outbox payload; a database failure reaches `last_error` as its class only; authenticated health shows no `diskSpace` component |
+| Demo profile | the seeder writes every lifecycle stage idempotently, each outbox row a complete event of its transaction with the source `demo:seed`; the simulator returns well-formed, deterministic transaction hashes on every seeded chain; a sync over the real HTTP bridge into the simulator on the server's own port succeeds on `local-evm` and `eth-sepolia`, with the base URL derived from `server.port` |
 | Provider selection | `prod` boots with the HTTP bridge by default and rejects a blank `base-url`; `type=alchemy` boots without `base-url`, wires only Alchemy beans, probes `eth-sepolia` with a bearer token, exposes health without the key, and fails fast on a missing key, HTTP 401, an enabled chain with active watched addresses but no network mapping, and legacy watched addresses; a fresh database boots with the unmapped seeded `local-evm` chain enabled, and HTTP 503 at startup boots the service with health `DOWN` in the `probe-failed` state until the first successful fetch; `local` keeps the fake provider |
 | Alchemy sync | the real worker against the Alchemy adapter and a scripted JSON-RPC stub in path auth mode: `registration-safe` idle start without backfill, ingestion and confirmation of whole pages below the finality frontier with outbox events, cursor and high-water advancement, retry from the durable cursor after HTTP 500 and after a transport failure with a scrubbed `last_error`, `Retry-After` on 429, and continuation across claims without failure attempts |
+| Profile guards | `demo`, `local`, and `test` combined with `prod` or a custom profile stop before anything reaches the database, also without the prod secrets, and name the profiles; the demo-user guard refuses a database with the demo users under `prod`, a custom `staging`, and no profile, skips a database without the `users` table, and runs in exactly the profile sets the combination guard lets start except `demo`; the prod admin cannot take a demo user name |
 
 Testcontainers expectations:
 
@@ -108,12 +115,12 @@ Required cases:
 
 | Endpoint | Cases |
 | --- | --- |
-| `POST /api/v1/accounts` | create success, duplicate `externalRef`, blank `externalRef` |
+| `POST /api/v1/accounts` | create success, duplicate `externalRef`, blank `externalRef`, an oversized `externalRef` ending in a line break reported by its length alone, a YAML body refused with `415` |
 | `GET /api/v1/accounts/{accountId}` | found, not found, invalid UUID |
-| `POST /api/v1/accounts/{accountId}/addresses` | create success, account not found, chain disabled/not found, duplicate address, validation failures, per-chain address format |
+| `POST /api/v1/accounts/{accountId}/addresses` | create success, account not found, chain disabled/not found, a chain the active provider cannot serve, duplicate address, validation failures, per-chain address format |
 | `GET /api/v1/accounts/{accountId}/addresses` | list success, account not found |
 | `PATCH /api/v1/addresses/{addressId}` | disable and enable again, unchanged status keeps `updated_at`, disabled address refused by sync, unknown address, invalid status, operator-only in protected profiles |
-| `POST /api/v1/observed-events` | created, updated, no-change duplicate, immutable conflict, validation failures, per-chain transaction-hash format, extreme exponent amounts, identities that differ only around `:` keeping separate outbox events |
+| `POST /api/v1/observed-events` | created, updated, no-change duplicate, immutable conflict, validation failures, per-chain transaction-hash format, extreme exponent amounts, an oversized amount refused by its length without being parsed, a string past the 100 000-character JSON limit, an unknown field ignored at any length and position, identities that differ only around `:` keeping separate outbox events |
 | `POST /api/v1/addresses/{addressId}/sync` | success, address not found, provider timeout, multi-page checkpointing, retry from page cursor, full queue with `Retry-After` |
 | `POST /api/v1/accounts/{accountId}/sync` | success, account not found, provider failure, busy cursor fairness |
 | `GET /api/v1/sync-runs/{syncRunId}` | found, not found |

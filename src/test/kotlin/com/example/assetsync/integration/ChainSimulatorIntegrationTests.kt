@@ -1,6 +1,9 @@
 package com.example.assetsync.integration
 
 import com.example.assetsync.TestcontainersConfiguration
+import com.fasterxml.jackson.databind.ObjectMapper
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
@@ -34,6 +37,7 @@ import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 @AutoConfigureMockMvc
 class ChainSimulatorIntegrationTests(
     @Autowired private val mockMvc: MockMvc,
+    @Autowired private val objectMapper: ObjectMapper,
 ) {
 
     @Test
@@ -53,8 +57,32 @@ class ChainSimulatorIntegrationTests(
             .andExpect(jsonPath("$.instance").value("/simulator/v1/chains/local-evm/addresses/0xdemoaddr/events"))
     }
 
-    private fun eventsRequest(limit: String): MockHttpServletRequestBuilder =
-        get("/simulator/v1/chains/local-evm/addresses/0xdemoaddr/events")
+    @Test
+    fun `transaction hashes are well formed and deterministic on the seeded demo chains`() {
+        listOf(
+            "local-evm" to "0xdemoaddr",
+            "eth-sepolia" to "0x742d35cc6634c0532925a3b844bc454e4438f44e",
+        ).forEach { (chainId, address) ->
+            val txHash = firstEventTxHash(chainId, address)
+
+            assertTrue(Regex("^0x[0-9a-f]{64}$").matches(txHash), "$chainId returned $txHash")
+            assertEquals(txHash, firstEventTxHash(chainId, address), "$chainId must return the same hash again")
+        }
+    }
+
+    private fun firstEventTxHash(chainId: String, address: String): String {
+        val result = mockMvc.perform(eventsRequest(limit = "1", chainId = chainId, address = address))
+            .andExpect(status().isOk)
+            .andReturn()
+        return objectMapper.readTree(result.response.contentAsString)["events"][0]["txHash"].asText()
+    }
+
+    private fun eventsRequest(
+        limit: String,
+        chainId: String = "local-evm",
+        address: String = "0xdemoaddr",
+    ): MockHttpServletRequestBuilder =
+        get("/simulator/v1/chains/$chainId/addresses/$address/events")
             .param("asset", "USDC")
             .param("limit", limit)
 }

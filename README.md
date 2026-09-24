@@ -95,7 +95,7 @@ When the app is running:
 - Swagger UI: [http://localhost:18080/swagger-ui.html](http://localhost:18080/swagger-ui.html)
 - OpenAPI JSON: [http://localhost:18080/v3/api-docs](http://localhost:18080/v3/api-docs)
 
-The OpenAPI document declares HTTP Basic, so **Authorize** in Swagger UI takes a username and password and sends them with every call. Outside `local` and `test` both pages and every API call require them.
+The OpenAPI document declares HTTP Basic, so **Authorize** in Swagger UI takes a username and password and sends them with every call. Outside `local` and `test` both pages and every API call require them. The document covers the `/api` operations only, with the status each one answers with and the `ProblemDetail` errors they share: `400`, `401`, `500`, and `503` on every operation, and `403` on those that change state; `docs/api.md` section 14 lists the rest.
 
 Current public endpoints:
 
@@ -150,12 +150,20 @@ docker compose down -v
 
 The commands below assume PostgreSQL is running on `55432` and the app is running on `18080` as shown in the quickstart. They use `python3` only to extract JSON ids into shell variables; if you prefer no parser, run each `curl`, copy the returned `id`, and replace the variables manually.
 
+External references and watched addresses are unique, so the flow starts from fresh values and can be repeated against the same database. The address is generated in upper case on purpose: the service stores EVM addresses in lower case, and the responses show the normalized form.
+
+```bash
+RUN_ID=$(date +%s)
+ADDRESS="0x$(openssl rand -hex 20 | tr 'a-f' 'A-F')"
+TX_HASH="0x$(openssl rand -hex 32)"
+```
+
 Create an account:
 
 ```bash
 ACCOUNT_JSON=$(curl -s -X POST http://localhost:18080/api/v1/accounts \
   -H 'Content-Type: application/json' \
-  -d '{"externalRef":"customer-local-001"}')
+  -d "{\"externalRef\":\"customer-local-${RUN_ID}\"}")
 
 printf '%s\n' "$ACCOUNT_JSON"
 ACCOUNT_ID=$(printf '%s' "$ACCOUNT_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
@@ -166,12 +174,15 @@ Register a watched address on `local-evm`:
 ```bash
 ADDRESS_JSON=$(curl -s -X POST "http://localhost:18080/api/v1/accounts/${ACCOUNT_ID}/addresses" \
   -H 'Content-Type: application/json' \
-  -d '{
-    "chainId": "local-evm",
-    "address": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
-    "asset": "USDC",
-    "label": "primary settlement address"
-  }')
+  --data-binary @- <<EOF
+{
+  "chainId": "local-evm",
+  "address": "${ADDRESS}",
+  "asset": "USDC",
+  "label": "primary settlement address"
+}
+EOF
+)
 
 printf '%s\n' "$ADDRESS_JSON"
 ADDRESS_ID=$(printf '%s' "$ADDRESS_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
@@ -182,18 +193,21 @@ Ingest an observed transaction event:
 ```bash
 EVENT_JSON=$(curl -s -X POST http://localhost:18080/api/v1/observed-events \
   -H 'Content-Type: application/json' \
-  -d '{
-    "chainId": "local-evm",
-    "txHash": "0x9f1c2d3e4f5061728394a5b6c7d8e9f00112233445566778899aabbccddeeff0",
-    "eventIndex": 0,
-    "address": "0x742d35Cc6634C0532925a3b844Bc454e4438f44e",
-    "asset": "USDC",
-    "amount": "12.340000000000000000",
-    "blockHeight": 9123456,
-    "confirmations": 1,
-    "direction": "INBOUND",
-    "status": "SEEN"
-  }')
+  --data-binary @- <<EOF
+{
+  "chainId": "local-evm",
+  "txHash": "${TX_HASH}",
+  "eventIndex": 0,
+  "address": "${ADDRESS}",
+  "asset": "USDC",
+  "amount": "12.340000000000000000",
+  "blockHeight": 9123456,
+  "confirmations": 1,
+  "direction": "INBOUND",
+  "status": "SEEN"
+}
+EOF
+)
 
 printf '%s\n' "$EVENT_JSON"
 ```
@@ -231,11 +245,11 @@ docker compose down -v
 The `demo` profile is the fastest way to show every lifecycle stage and the real HTTP provider path without any external service. Compared with `local`:
 
 - Security is the same protected HTTP Basic chain as production. The profile seeds two well-known users: `demo-reader` / `demo-reader-pw` (role `READ`, read-only) and `demo-operator` / `demo-operator-pw` (role `OPERATOR`, mutations and sync). They stay in the database the demo ran on, so never point `prod` at that database: `prod` refuses to start while either user exists and names the SQL that removes them.
-- `HttpChainProvider` is active and points at a bundled in-process simulator under `/simulator`, so an operator sync exercises the real HTTP provider path, per-address cursor checkpoints, and outbox publishing end to end. The simulator returns one `CONFIRMED` event per watched address on the first fetch and an empty page afterwards. Only `demo` opens `/simulator` without credentials; the other protected profiles serve no simulator and require authentication on that path like on any other.
-- `DemoDataSeeder` seeds an idempotent dataset on startup: one account and watched address, observed transactions in `SEEN`, `CONFIRMED`, and `REVERTED`, outbox rows in `NEW`, `PUBLISHED`, `FAILED`, and `DEAD`, and a stale `STARTED` sync run for the recovery job to abandon. Restarts do not duplicate rows.
+- `HttpChainProvider` is active and points at a bundled in-process simulator under `/simulator`, so an operator sync exercises the real HTTP provider path, per-address cursor checkpoints, and outbox publishing end to end. The simulator returns one `CONFIRMED` event per watched address on the first fetch and an empty page afterwards, on every seeded chain, `eth-sepolia` included: its transaction hash is `0x` and the SHA-256 of the chain, address, and asset, synthetic but well formed. Only `demo` opens `/simulator` without credentials; the other protected profiles serve no simulator and require authentication on that path like on any other.
+- `DemoDataSeeder` seeds an idempotent dataset on startup: one account and watched address, observed transactions in `SEEN`, `CONFIRMED`, and `REVERTED`, outbox rows in `NEW`, `PUBLISHED`, `FAILED`, and `DEAD`, and a stale `STARTED` sync run for the recovery job to abandon. Each outbox row is a complete lifecycle event of its transaction, and seeded rows record the source `demo:seed`. Restarts do not duplicate rows, and they do not rewrite rows seeded by an earlier version either: start from an empty database (`docker compose down -v`) to get the current dataset.
 - Schedulers stay on, so the outbox poller, the sync worker, and the recovery job run live.
 
-Start PostgreSQL as in the quickstart, then run the app with the `demo` profile. `SERVER_PORT` must be passed as an environment variable because the simulator base URL is derived from it. The optional recovery delay override makes the stale-run recovery visible within seconds instead of after the default one minute:
+Start PostgreSQL as in the quickstart, then run the app with the `demo` profile. The simulator base URL follows the configured server port, so the port can be set as `SERVER_PORT`, as `--server.port`, or in an IDE run configuration; it has to be a fixed port, not `0`, and the demo does not support a servlet context path. The optional recovery delay override makes the stale-run recovery visible within seconds instead of after the default one minute:
 
 ```bash
 SPRING_PROFILES_ACTIVE=demo ASSET_SYNC_DB_PORT=55432 SERVER_PORT=18080 \
@@ -279,7 +293,7 @@ Within a few seconds the run reports `SUCCEEDED` with `eventsSeen: 1` and `event
 
 What to watch afterwards:
 
-- Application log lines `outbox_event_publish_succeeded` for the seeded `NEW` row, the retried seeded `FAILED` row, and the new `TRANSACTION_CONFIRMED` event from the simulator. The seeded `DEAD` row stays terminal.
+- Application log lines `outbox_event_publish_succeeded` for the seeded `NEW` row (`TRANSACTION_SEEN`), the retried seeded `FAILED` row (`TRANSACTION_REVERTED`), and the new `TRANSACTION_CONFIRMED` event from the simulator, each with the chain, address, transaction hash, and source of its event. The seeded `DEAD` row stays terminal.
 - The seeded stale run turns `FAILED` with an `abandoned` error once the recovery job runs: `curl -s -u demo-reader:demo-reader-pw http://localhost:18080/api/v1/sync-runs/d0000000-0000-0000-0000-0000000000f1`.
 - `curl -s -u demo-reader:demo-reader-pw http://localhost:18080/actuator/metrics/asset.sync.outbox.dead.total` reports the terminal row. `/actuator/prometheus` and Swagger UI require the same credentials; health probes stay open.
 
@@ -310,7 +324,7 @@ Check the app:
 curl -s http://localhost:18081/actuator/health
 ```
 
-Compose publishes the API and PostgreSQL on `127.0.0.1` only, because the default `local` profile has no authentication and the database password is a well-known default. To reach the API from another machine, for example during a remote demo, set `ASSET_SYNC_HTTP_BIND_ADDRESS=0.0.0.0` together with a protected profile, never with `local`. The `demo` users have public passwords, so expose `demo` on a trusted network only. PostgreSQL stays on loopback either way.
+Compose publishes the API and PostgreSQL on `127.0.0.1` only, because the default `local` profile has no authentication and the database password is a well-known default. To reach the API from another machine, for example during a remote demo, set `ASSET_SYNC_HTTP_BIND_ADDRESS=0.0.0.0` together with a protected profile, never with `local`. The `demo` users have public passwords, so expose `demo` on a trusted network only. PostgreSQL stays on loopback either way. Started on the host, as with `./gradlew bootRun`, `local` and `demo` listen on `127.0.0.1` too; `SERVER_ADDRESS=0.0.0.0` opens `demo` under the same conditions, on IPv6 as well as IPv4. Compose sets `SERVER_ADDRESS=0.0.0.0` inside the container, so the published port is the one gate; a container you run yourself with `local` or `demo` needs the same, published on loopback. An empty `SERVER_ADDRESS` would bind every interface, so `local` and `demo` refuse to start with one. `demo` calls its simulator on `127.0.0.1`; with `SERVER_ADDRESS` set to one other interface, point `ASSET_SYNC_PROVIDER_BASE_URL` at that interface.
 
 ```bash
 SPRING_PROFILES_ACTIVE=demo ASSET_SYNC_HTTP_BIND_ADDRESS=0.0.0.0 ASSET_SYNC_DB_PORT=55433 ASSET_SYNC_HTTP_PORT=18081 \
@@ -339,13 +353,14 @@ Database configuration for the `local` profile:
 | `ASSET_SYNC_DB_MAX_POOL_SIZE` | `10` | Hikari max pool size |
 | `ASSET_SYNC_DB_MIN_IDLE` | `1` | Hikari minimum idle connections |
 
-The `prod` profile takes the datasource only from `ASSET_SYNC_DB_URL`, `ASSET_SYNC_DB_USER`, and `ASSET_SYNC_DB_PASSWORD`, with no defaults, and provisions its operator account from `ASSET_SYNC_ADMIN_USERNAME` and `ASSET_SYNC_ADMIN_PASSWORD`. It refuses to start on a database whose user store holds the `demo` users.
+The `prod` profile takes the datasource only from `ASSET_SYNC_DB_URL`, `ASSET_SYNC_DB_USER`, and `ASSET_SYNC_DB_PASSWORD`, with no defaults, and provisions its operator account from `ASSET_SYNC_ADMIN_USERNAME` and `ASSET_SYNC_ADMIN_PASSWORD`. It refuses to start on a database whose user store holds the `demo` users, and so does every other profile with authentication except `demo` itself, including a start without any profile. `demo`, `local`, and `test` each run alone: combined with another profile, such as `prod,demo` or `staging,local`, the process stops before the application context exists and names the profiles. The operator account cannot take a `demo` user name.
 
 Runtime configuration:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SERVER_PORT` | `8080` | HTTP port used by the Spring Boot app |
+| `SERVER_ADDRESS` | `127.0.0.1` in `local` and `demo`, all interfaces elsewhere | Interface the HTTP server listens on. On a host, `0.0.0.0` opens `demo` to a trusted network and must never open `local`; inside a container published on loopback, as compose does, `0.0.0.0` is required |
 | `ASSET_SYNC_OUTBOX_BATCH_SIZE` | `50` | Due outbox rows claimed per poll |
 | `ASSET_SYNC_OUTBOX_RETRY_BACKOFF_BASE_DELAY` | `30s` | Retry backoff base delay |
 | `ASSET_SYNC_OUTBOX_RETRY_BACKOFF_MAX_DELAY` | `15m` | Maximum retry backoff delay |
@@ -405,7 +420,7 @@ Runtime configuration:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `ASSET_SYNC_PROVIDER_TYPE` | `http` | `http` for the normalized HTTP bridge (the simulator in `demo`, an indexer in `prod`), `alchemy` for Alchemy JSON-RPC |
-| `ASSET_SYNC_PROVIDER_BASE_URL` | none in `prod` | HTTP bridge endpoint; required when the type is `http`, ignored for `alchemy`. The bridge page contract is in `docs/architecture.md` |
+| `ASSET_SYNC_PROVIDER_BASE_URL` | none in `prod` | HTTP bridge endpoint; required when the type is `http`, ignored for `alchemy`. A token for the bridge goes in its path or query; a user name or password in the URL stops startup, because the HTTP client never sends them. The bridge page contract is in `docs/architecture.md` |
 | `ASSET_SYNC_PROVIDER_CONNECT_TIMEOUT` | `2s` | Connect timeout for provider HTTP requests |
 | `ASSET_SYNC_PROVIDER_READ_TIMEOUT` | `5s` | Read timeout for provider HTTP requests |
 | `ASSET_SYNC_PROVIDER_ALCHEMY_API_KEY` | none | Alchemy API key; required for `alchemy`, never logged or shown in health or error details |
@@ -423,11 +438,14 @@ Runtime configuration:
 
 The chain-to-network mapping lives under `asset-sync.provider.alchemy.networks` in `application.yml`; `eth-sepolia` is the first and only mapped chain. Map keys contain dashes, so further chains are added in YAML or through `SPRING_APPLICATION_JSON`, not through environment variables. `max-window-blocks` bounds the block range of one page fetch, `max-rpc-calls-per-fetch` bounds its JSON-RPC calls, and the rate-limit settings size the local token bucket in front of every call.
 
-With `type=alchemy` the service validates the configuration and the registry before the sync worker starts: the key must be set, every enabled chain with enabled asset configs and active watched addresses must map to a network, every mapped network gets an `eth_blockNumber` probe with the configured credentials, and no active watched address may lack an enabled asset config. A violation, or a probe that Alchemy rejects (`401`, `403`, JSON-RPC `-32600`, or an answer that is not a block number), stops the process with a `ProviderConfigurationException` whose message names the chains or `(chain_id, asset)` pairs and the operator action, never the key. A probe that meets an outage (`5xx`, `429`, a timeout, a transport error) does not: the service starts with the `alchemyChainProvider` health component `DOWN` in the `probe-failed` state, sync runs retry with backoff, and the first successful fetch clears the state, while the REST API and outbox publishing keep working. An enabled chain without a mapping and without active watched addresses is only logged as `alchemy_preflight_unmapped_chains_skipped`, so a fresh database boots as is, although the seeded `local-evm` chain has no Alchemy network. An address registered on such a chain fails its syncs terminally, and the next start refuses the chain until the address or the chain is disabled; to rule that out, disable the chain before the rollout:
+With `type=alchemy` the service validates the configuration and the registry before the sync worker starts: the key must be set, every enabled chain with enabled asset configs and active watched addresses must map to a network, every mapped network gets an `eth_blockNumber` probe with the configured credentials, and no active watched address may lack an enabled asset config. A violation, or a probe that Alchemy rejects (`401`, `403`, JSON-RPC `-32600`, or an answer that is not a block number), stops the process with a `ProviderConfigurationException` whose message names the chains or `(chain_id, asset)` pairs and the operator action, never the key. A probe that meets an outage (`5xx`, `429`, a timeout, a transport error) does not: the service starts with the `alchemyChainProvider` health component `DOWN` in the `probe-failed` state, while the REST API and outbox publishing keep working. Sync runs retry with backoff up to `asset-sync.sync.worker.max-attempts`, five by default and about seven and a half minutes, and then fail; nothing probes again, so the first successful fetch clears the state. An enabled chain without a mapping and without active watched addresses is only logged as `alchemy_preflight_unmapped_chains_skipped`, so a fresh database boots as is, although the seeded `local-evm` chain has no Alchemy network. Registering an address on such a chain, or enabling one again, answers `404 Unsupported chain`. An address registered there before the switch to Alchemy fails its syncs terminally and stops the next start until the address or the chain is disabled. A disabled chain lets the service start, but its active addresses still fail every sync, so disable them as well; to rule both out, disable the chain and its addresses before the rollout:
 
 ```sql
 UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm';
+UPDATE watched_addresses SET status = 'DISABLED', updated_at = now() WHERE chain_id = 'local-evm' AND status = 'ACTIVE';
 ```
+
+The same rules hold for changes made while the service runs. An address whose asset config is disabled then fails only its own syncs, with provider health `UP` and the reason in the run's `last_error`, but the next start refuses it until the address is disabled or the config is enabled again.
 
 A page fetch under `alchemy` asks for the latest block and the finality frontier (the `safe` or `finalized` tag, or latest minus `finality-depth-fallback` in `depth` mode or when the tag is unavailable), then scans from the cursor's next block up to the frontier, at most `max-window-blocks` per fetch, with one `alchemy_getAssetTransfers` call per direction for the whole range. A range answered without `pageKey` is complete for every block in it, so quiet stretches cost two calls; a range that comes back paged is narrowed to the blocks before its page boundary and re-queried, and the boundary block is drained alone (`fromBlock == toBlock`) with `pageKey` followed only in memory. Events are emitted for whole blocks only, sorted by block and log index, with amounts converted from `rawContract.value` and the registry decimals; self-transfers and rows of another contract are skipped and counted in the checkpoint. The cursor is always a block boundary (`{"v":1,"p":"alchemy","nextBlock":N}`), a new watched address starts just above the frontier under `registration-safe` and at the configured block under `configured-block`, and a block that cannot be finished within the RPC and time budget is retried from the same cursor. One block holding more events for the watched address than `asset-sync.sync.pagination.page-size` is a terminal configuration error, because the page contract cannot split a block. `docs/alchemy-runbook.md` covers getting and rotating a key, the Sepolia rollout, the env-gated live smoke, what to inspect, and the failure actions.
 
@@ -437,7 +455,7 @@ Every block is read once, which sets two limits. Under `registration-safe` the s
 
 - Natural idempotency keys: watched addresses use `chainId + address + asset`; observed transactions use `chainId + txHash + eventIndex + address + asset`.
 - PostgreSQL constraints enforce uniqueness, enum-like values, non-negative amounts/counts, and foreign keys.
-- Every observed transaction and outbox event records its source, `rest:<user>` for the API or `provider:<type>` for a sync, so a status reported through the API stays distinguishable from provider data.
+- Every observed transaction and outbox event records its source, `rest:<user>` for the API or `provider:<type>` for a sync (`demo:seed` for the `demo` dataset), so a status reported through the API stays distinguishable from provider data.
 - Ingestion rejects what PostgreSQL would round or refuse: amounts must fit `numeric(38, 18)`, exponent notation included, and are stored at scale 18; addresses and transaction hashes must be well formed for their chain (`0x` hex on `eth-sepolia` and `eth-mainnet`, no whitespace, `/`, or `:` on `local-evm`, no control characters anywhere); a provider page is checked in full before its first event is written.
 - Observed transaction ingestion locks existing rows with row-level `FOR UPDATE` before evaluating transitions.
 - jOOQ uses `INSERT ... ON CONFLICT` for idempotent observed-transaction and outbox writes.
@@ -459,10 +477,10 @@ Every block is read once, which sets two limits. Under `registration-safe` the s
 - Readiness includes PostgreSQL connectivity.
 - `/actuator/info` reports the build name and version generated by the Gradle build.
 - Health component details (database, chain provider) are shown to authenticated callers in protected profiles and to everyone in `local`; anonymous probes see only the aggregate status. The disk-space indicator is off, because its details reveal the working directory's absolute path.
-- Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere; the Alchemy indicator shows the auth mode, the probed networks, and the state, never an endpoint or the key. Only availability failures (timeouts, transport errors, `5xx`, `429`, and for Alchemy rejected credentials, or an outage during the startup probe as `probe-failed`) turn it `DOWN`; invalid data for one address stays `UP` with a `lastDataError` detail.
+- Provider health indicator follows the selected provider: fake in `local`/`test`, HTTP bridge or Alchemy elsewhere; the Alchemy indicator shows the auth mode, the probed networks, and the state, never an endpoint or the key, and the bridge indicator names the kind of a transport failure, never the bridge URL. Only availability failures (timeouts, transport errors, `5xx`, `429`, and for Alchemy rejected credentials, or an outage during the startup probe as `probe-failed`) turn it `DOWN`; invalid data for one address stays `UP` with a `lastDataError` detail.
 - Structured logs include account, watched-address, transaction, sync-run, provider, and outbox identifiers.
 - Micrometer meters cover observed event ingestion, transaction transitions, immutable conflicts, sync runs and continuations, provider fetches, latency and pages, cursor leases and checkpoints, outbox batches, events, backlog, dead-letter count, scheduler tick failures, and the Alchemy adapter's JSON-RPC calls, latency, one-block fallbacks, and skipped rows.
-- `local` and `test` profiles permit all endpoints. Other profiles enable HTTP Basic for API, Swagger, and Actuator endpoints except health probes; their `401` and `403` responses use the same `ProblemDetail` format as API errors, and `401` keeps the `WWW-Authenticate: Basic` challenge. A request that the security firewall rejects before authentication, for example one with `//` or `;` in its path, gets `400` in every profile, not a challenge. The API keeps no session, so CSRF protection is off; a browser that caches Basic credentials could still be made to post to the two body-less sync endpoints, which only queues extra sync runs. Keep browsers you use for other sites logged out of the API and put the service behind a gateway when it is exposed.
+- `local` and `test` profiles permit all endpoints. Other profiles enable HTTP Basic for API, Swagger, and Actuator endpoints except health probes; their `401` and `403` responses use the same `ProblemDetail` format as API errors, and `401` keeps the `WWW-Authenticate: Basic` challenge. While PostgreSQL is unavailable, a request with credentials gets the API's `503 database-unavailable` without a challenge, because the credentials cannot be checked (`docs/failure-modes.md` section 6). A request that the security firewall rejects before authentication, for example one with `//` or `;` in its path, gets `400` in every profile, not a challenge. The API keeps no session, so CSRF protection is off; a browser that caches Basic credentials could still be made to post to the two body-less sync endpoints, which only queues extra sync runs. Keep browsers you use for other sites logged out of the API and put the service behind a gateway when it is exposed.
 
 ## Testing
 

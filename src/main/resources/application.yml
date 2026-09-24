@@ -6,6 +6,15 @@ spring:
   datasource:
     hikari:
       connection-init-sql: "SET statement_timeout TO '30s'; SET lock_timeout TO '5s'"
+      # pgjdbc timeouts in seconds. statement_timeout fires only on a server that still runs; the
+      # socket timeout also ends a read from a server that stopped answering (paused, network
+      # partition), which would otherwise hold the request thread and its connection forever. It
+      # stays above statement_timeout, so a slow query still ends with the server's own error:
+      # raise both together. A COMMIT is not bound by statement_timeout, so one that waits longer
+      # (a stalled synchronous standby or disk) is cut off too, and may still commit afterwards.
+      data-source-properties:
+        socketTimeout: 40
+        connectTimeout: 5
   liquibase:
     enabled: false
   lifecycle:
@@ -23,9 +32,12 @@ logging:
     # Surfaces the per-request correlation id (set by RequestIdFilter) on every log line.
     level: "%5p [req=%X{requestId:-}]"
   level:
-    # Provider request URLs may carry credentials (Alchemy path auth mode); keep Spring's HTTP
-    # client loggers at INFO so a DEBUG root level never prints them.
+    # Provider request URLs may carry credentials (the HTTP bridge path or query, Alchemy path auth
+    # mode). Keep the loggers that print them at INFO, so a DEBUG or TRACE root level never does:
+    # Spring's HTTP client, its URI parser, and the JDK's HttpURLConnection, which Boot bridges.
     org.springframework.web.client: INFO
+    _org.springframework.web.util: INFO
+    sun.net.www.protocol.http: INFO
 
 management:
   endpoint:
@@ -62,6 +74,10 @@ springdoc:
   swagger-ui:
     path: /swagger-ui.html
     enabled: true
+  # The API only: the demo simulator stands in for the bridge and is not part of it. The API
+  # answers in JSON, which the document states instead of springdoc's default */*.
+  paths-to-match: /api/**
+  default-produces-media-type: application/json
 
 asset-sync:
   provider:

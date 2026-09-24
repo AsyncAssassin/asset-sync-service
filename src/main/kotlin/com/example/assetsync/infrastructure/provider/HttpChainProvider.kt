@@ -8,15 +8,24 @@ import com.example.assetsync.application.sync.ChainProviderUnavailableException
 import com.example.assetsync.application.sync.ProviderDataInvalidException
 import com.example.assetsync.config.ConditionalOnHttpChainProvider
 import com.example.assetsync.config.SyncProperties
+import com.example.assetsync.config.JacksonConfiguration.Companion.MAX_JSON_STRING_LENGTH
+import com.example.assetsync.config.exceedsJsonReadLimit
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.core.JsonProcessingException
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ObjectNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import java.io.IOException
 import java.io.InputStream
 import java.math.BigDecimal
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import java.net.http.HttpTimeoutException
 import java.time.Instant
+import javax.net.ssl.SSLException
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.context.annotation.Profile
@@ -117,8 +126,9 @@ class HttpChainProvider @Autowired constructor(
             recordFailure(request = request, exception = exception)
             throw exception
         } catch (exception: RuntimeException) {
-            recordFailure(request = request, exception = exception)
-            throw ChainProviderUnavailableException(exception.message ?: "Provider request failed.", exception)
+            val failure = ChainProviderUnavailableException(failureMessage(exception))
+            recordFailure(request = request, exception = failure, causes = exception.causeChainWithoutUrls())
+            throw failure
         }
 
     fun lastFetchHealthy(): Boolean? = lastFetchHealthy
@@ -132,11 +142,18 @@ class HttpChainProvider @Autowired constructor(
         val response = try {
             objectMapper.readValue(bytes, ProviderEventsPageResponse::class.java)
         } catch (exception: JsonProcessingException) {
-            throw ProviderDataInvalidException("Provider returned malformed JSON.", exception)
+            val reason = if (exception.exceedsJsonReadLimit()) {
+                "Provider returned JSON past a size limit, such as a string over $MAX_JSON_STRING_LENGTH characters."
+            } else {
+                "Provider returned malformed JSON."
+            }
+            throw ProviderDataInvalidException(reason, exception)
         }
 
-        val events = response.events
-            ?: throw ProviderDataInvalidException("Provider response is missing required events field.")
+        val events = response.events?.let { listed ->
+            listed.filterNotNull().takeIf { it.size == listed.size }
+                ?: throw ProviderDataInvalidException("Provider response has a null element in its events field.")
+        } ?: throw ProviderDataInvalidException("Provider response is missing required events field.")
         val hasMore = response.hasMore
             ?: throw ProviderDataInvalidException("Provider response is missing required hasMore field.")
         val nextCursor = normalizeCursor(response)
@@ -164,16 +181,44 @@ class HttpChainProvider @Autowired constructor(
 
     private fun parseRetryAfter(value: String?): Instant? = ProviderHttpSupport.parseRetryAfter(value)
 
-    private fun recordFailure(request: ChainProviderEventsPageRequest, exception: RuntimeException) {
+    /**
+     * A fixed description of a failure the bridge did not report itself: a transport failure is
+     * named by the kind of the I/O error RestClient wraps, anything else by its class. The
+     * exception's own text is never used: Spring's `ResourceAccessException` quotes the request URL,
+     * whose path or query may carry the bridge credentials, and this text reaches the health
+     * details and the `lastError` of sync runs that `READ` callers see. The cause is not attached
+     * for the same reason; the WARN log gets the cause chain with every URL cut out.
+     */
+    private fun failureMessage(exception: RuntimeException): String {
+        val cause = exception.cause as? IOException
+            ?: return "Provider request failed (${exception.javaClass.simpleName})."
+        val kind = when (cause) {
+            is SocketTimeoutException, is HttpTimeoutException -> "timeout"
+            // Refused, unreachable, or an operating-system connect timeout: the text tells them apart.
+            is ConnectException -> "cannot connect"
+            is UnknownHostException -> "unknown host"
+            is SSLException -> "TLS failure"
+            else -> "I/O error"
+        }
+        return "Provider transport failure: $kind (${cause.javaClass.simpleName})."
+    }
+
+    private fun Throwable.causeChainWithoutUrls(): String =
+        generateSequence(this) { it.cause }
+            .take(MAX_CAUSE_DEPTH)
+            .joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message?.replace(URL_PATTERN, "<url>")}" }
+
+    private fun recordFailure(request: ChainProviderEventsPageRequest, exception: RuntimeException, causes: String? = null) {
         lastFetchHealthy = false
         lastError = exception.message?.take(240)
         logger.warn(
-            "http_provider_page_fetch_failed chainId={} address={} asset={} limit={} error={}",
+            "http_provider_page_fetch_failed chainId={} address={} asset={} limit={} error={} causes={}",
             request.chainId,
             request.address,
             request.asset,
             request.limit,
             lastError,
+            causes,
         )
     }
 
@@ -193,10 +238,20 @@ class HttpChainProvider @Autowired constructor(
             lastDataError,
         )
     }
+
+    private companion object {
+        const val MAX_CAUSE_DEPTH = 16
+
+        /** A URL up to the first whitespace or quote, so the quote Spring puts around it survives. */
+        val URL_PATTERN = Regex("[A-Za-z][A-Za-z0-9+.-]*://[^\\s\"'<>]+")
+    }
 }
 
+// Unknown properties are skipped as they are read instead of buffered until the known ones are
+// complete, so extra bridge fields cost neither memory nor the string cap.
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class ProviderEventsPageResponse(
-    val events: List<ProviderEvent>? = null,
+    val events: List<ProviderEvent?>? = null,
     val nextCursor: String? = null,
     val resumeCursor: String? = null,
     val hasMore: Boolean? = null,
@@ -205,6 +260,7 @@ data class ProviderEventsPageResponse(
     val metadata: ObjectNode? = null,
 )
 
+@JsonIgnoreProperties(ignoreUnknown = true)
 data class ProviderEvent(
     val txHash: String,
     val eventIndex: Int,

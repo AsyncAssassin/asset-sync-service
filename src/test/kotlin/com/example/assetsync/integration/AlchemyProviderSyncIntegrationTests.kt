@@ -7,7 +7,9 @@ import com.example.assetsync.ScriptedAlchemyChain.Transfer
 import com.example.assetsync.application.account.AccountApplicationService
 import com.example.assetsync.application.account.CreateAccountCommand
 import com.example.assetsync.application.account.RegisterWatchedAddressCommand
+import com.example.assetsync.application.account.UnsupportedChainException
 import com.example.assetsync.application.account.WatchedAddressApplicationService
+import com.example.assetsync.application.account.WatchedAddressStatus
 import com.example.assetsync.application.sync.ClaimedSyncRun
 import com.example.assetsync.application.sync.SyncApplicationService
 import com.example.assetsync.application.sync.SyncRun
@@ -26,6 +28,7 @@ import kotlin.test.assertTrue
 import org.junit.jupiter.api.AfterAll
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.jdbc.core.JdbcTemplate
@@ -284,6 +287,33 @@ class AlchemyProviderSyncIntegrationTests(
         val lastProcessedEventIndex: Int?,
         val lastFinalizedBlockHeight: Long?,
     )
+
+    @Test
+    fun `an address on a chain without an alchemy network is refused at registration and at re-enabling`() {
+        val account = accountApplicationService.createAccount(CreateAccountCommand(externalRef = "alchemy-it-${UUID.randomUUID()}"))
+
+        // The seeded local-evm chain and its USDC row are enabled, but no Alchemy network serves them.
+        assertThrows<UnsupportedChainException> {
+            watchedAddressApplicationService.registerWatchedAddress(
+                RegisterWatchedAddressCommand(accountId = account.id, chainId = "local-evm", address = "0xlocal", asset = "USDC", label = null),
+            )
+        }
+        assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM watched_addresses", Int::class.java))
+
+        // One registered under the HTTP bridge before the switch and disabled since cannot come back:
+        // it would fail every sync and stop the next start.
+        val legacyId = UUID.randomUUID()
+        jdbcTemplate.update(
+            """
+            INSERT INTO watched_addresses (id, account_id, chain_id, address, asset, label, status, created_at, updated_at)
+            VALUES (?, ?, 'local-evm', '0xlegacy-local', 'USDC', NULL, 'DISABLED', now(), now())
+            """.trimIndent(),
+            legacyId,
+            account.id,
+        )
+        assertThrows<UnsupportedChainException> { watchedAddressApplicationService.updateStatus(legacyId, WatchedAddressStatus.ACTIVE) }
+        assertEquals("DISABLED", jdbcTemplate.queryForObject("SELECT status FROM watched_addresses WHERE id = ?", String::class.java, legacyId))
+    }
 
     private fun registerWatchedAddress(): UUID {
         val account = accountApplicationService.createAccount(CreateAccountCommand(externalRef = "alchemy-it-${UUID.randomUUID()}"))

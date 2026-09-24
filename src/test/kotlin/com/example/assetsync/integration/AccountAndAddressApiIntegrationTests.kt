@@ -119,6 +119,34 @@ class AccountAndAddressApiIntegrationTests(
     }
 
     @Test
+    fun `an oversized externalRef that ends in a line break gets only its length error`() {
+        mockMvc.perform(
+            post("/api/v1/accounts")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(mapOf("externalRef" to "a".repeat(99_999) + "\n"))),
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/validation-failed"))
+            .andExpect(jsonPath("$.errors.length()").value(1))
+            .andExpect(
+                jsonPath("$.errors[0]").value("externalRef: externalRef must be at most $MAX_EXTERNAL_REF_LENGTH characters"),
+            )
+    }
+
+    @Test
+    fun `a yaml body is refused like any other content type that is not json`() {
+        mockMvc.perform(
+            post("/api/v1/accounts")
+                .contentType("application/yaml")
+                .content("externalRef: yaml-account\n"),
+        )
+            .andExpect(status().isUnsupportedMediaType)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/unsupported-media-type"))
+
+        assertEquals(0, tableCount("accounts"))
+    }
+
+    @Test
     fun `problem responses echo request id`() {
         mockMvc.perform(
             post("/api/v1/accounts")
@@ -449,6 +477,30 @@ class AccountAndAddressApiIntegrationTests(
     }
 
     @Test
+    fun `enabling an address runs the registration checks again`() {
+        val accountId = createAccount("address-status-reenable")
+        // An address whose chain was disabled after its registration: the seeded eth-mainnet is disabled.
+        val addressId = UUID.randomUUID()
+        jdbcTemplate.update(
+            """
+            INSERT INTO watched_addresses (id, account_id, chain_id, address, asset, label, status, created_at, updated_at)
+            VALUES (?, ?, 'eth-mainnet', '0x1111111111111111111111111111111111111111', 'USDC', NULL, 'ACTIVE', now(), now())
+            """.trimIndent(),
+            addressId,
+            UUID.fromString(accountId),
+        )
+
+        // Disabling needs no check: it is how such an address is taken out of the syncs.
+        patchStatus(addressId.toString(), "DISABLED")
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("DISABLED"))
+        patchStatus(addressId.toString(), "ACTIVE")
+            .andExpect(status().isNotFound)
+            .andExpect(jsonPath("$.title").value("Unsupported chain"))
+        assertEquals("DISABLED", jdbcTemplate.queryForObject("SELECT status FROM watched_addresses WHERE id = ?", String::class.java, addressId))
+    }
+
+    @Test
     fun `watched address status update rejects unknown addresses and statuses`() {
         patchStatus(UUID.randomUUID().toString(), "DISABLED")
             .andExpect(status().isNotFound)
@@ -552,7 +604,7 @@ class AccountAndAddressApiIntegrationTests(
             .andExpect(status().isNotFound)
             .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/not-found"))
             .andExpect(jsonPath("$.title").value("Unsupported chain"))
-            .andExpect(jsonPath("$.detail").value("Chain configuration was not found or is disabled."))
+            .andExpect(jsonPath("$.detail").value("The chain is not configured, is disabled, or is not served by the active provider."))
     }
 
     private fun expectAddressValidationFailure(accountId: String, body: String) {
