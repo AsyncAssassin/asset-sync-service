@@ -21,7 +21,7 @@ Conventions:
 
 Authentication:
 
-- Every profile except `local` and `test` requires HTTP Basic against the database user store: `GET` endpoints need the `READ` or `OPERATOR` role, every mutation needs `OPERATOR`. Health probes stay open.
+- Every profile except `local` and `test` requires HTTP Basic against the database user store: `GET` endpoints need the `READ` or `OPERATOR` role, every mutation needs `OPERATOR`. Health probes stay open. The store is read through a one-minute cache, so a password changed or a user removed directly in the database takes effect within a minute; changes through the service, such as the `prod` operator provisioning, apply at once.
 - The API keeps no session, so CSRF protection is off. A browser that has cached Basic credentials for the service would still attach them to a cross-site form `POST`; the only endpoints such a form can reach are the two body-less sync endpoints, and the effect is an extra sync run. Do not log into the API from a browser used for other sites, and put the service behind a gateway when it is exposed.
 - Every authenticated request verifies the BCrypt hash of the password (strength 10, about 70 ms of CPU), and nothing limits failed attempts. The gateway in front of an exposed service should rate-limit requests; token authentication (OAuth2 or JWT) is the next step beyond the MVP.
 

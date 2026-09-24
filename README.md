@@ -527,6 +527,7 @@ This service does not provide custody, signing, private key storage, wallet func
 - No tenant isolation. The `READ` and `OPERATOR` roles are global: every `READ` user sees every account, and every `OPERATOR` user can change any account's addresses and report events on any chain.
 - Watched addresses are unique per `(chain_id, address, asset)` across all accounts, so registering an address that another account already watches returns `409` and tells the caller that someone watches it. Without tenant isolation this reveals nothing new; the rule is to be revisited together with isolation.
 - Basic authentication verifies the BCrypt hash on every request (about 70 ms of CPU), and nothing limits failed attempts: expose the service only behind a gateway that rate-limits requests.
+- Users are cached for a minute, so a password changed or a user removed directly in the `users` table takes effect within a minute. During a database outage a user seen in the last ten minutes stays accepted, which keeps the metrics reachable.
 - The Alchemy rate limiter is local to each process. Instances that share one key send up to their number times the configured rate, and every `429` spends a retry attempt of the run, so run one instance per key or split the rate between them.
 - `sync_runs` has no retention: every sync request adds a row. `docs/database.md` has the SQL that deletes old finished runs.
 - The outbox publishes to the structured log only, at least once; there is no external broker, and consumers deduplicate by event id or idempotency key.

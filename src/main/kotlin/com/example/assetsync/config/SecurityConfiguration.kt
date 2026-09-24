@@ -3,6 +3,7 @@ package com.example.assetsync.config
 import com.example.assetsync.api.error.ProblemDetailAccessDeniedHandler
 import com.example.assetsync.api.error.ProblemDetailAuthenticationEntryPoint
 import jakarta.servlet.DispatcherType
+import java.time.Clock
 import javax.sql.DataSource
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -83,8 +84,9 @@ class SecurityConfiguration {
     @Profile("!local & !test")
     fun passwordEncoder(): PasswordEncoder = BCryptPasswordEncoder()
 
+    /** HTTP Basic reads this store on every request, through the cache described in [CachingUserDetailsManager]. */
     @Bean
     @Profile("!local & !test")
-    fun userDetailsManager(dataSource: DataSource): UserDetailsManager =
-        JdbcUserDetailsManager(dataSource)
+    fun userDetailsManager(dataSource: DataSource, clock: Clock): UserDetailsManager =
+        CachingUserDetailsManager(delegate = JdbcUserDetailsManager(dataSource), clock = clock)
 }

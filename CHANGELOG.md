@@ -8,8 +8,13 @@ All notable changes to this project are documented in this file. The format is b
 
 - The HTTP bridge credential can travel in a request header: `ASSET_SYNC_PROVIDER_AUTH_HEADER_NAME` (`Authorization` by default) and `ASSET_SYNC_PROVIDER_AUTH_HEADER_VALUE`, which no log line, error, or health detail quotes. Since 0.4.1 refused a user name or password in `base-url`, a token could only live in its path or query. With a credential set, a header name that is not an HTTP token or a value with a line break stops startup; an empty name means `Authorization`.
 
+### Changed
+
+- HTTP Basic reads users through a one-minute cache, so a password changed or a user removed directly in the `users` table takes effect within a minute; changes through the service apply at once.
+
 ### Fixed
 
+- During a database outage, authenticated `/actuator/metrics` and `/actuator/prometheus` requests keep answering. Every request with credentials read the user store and waited for the connection pool, and every scrape counted the outbox in the database, so Prometheus lost all metrics, including those that show the outage. Users seen in the last ten minutes now stay accepted, and the outbox gauges show their last background refresh.
 - A database failure inside an Alchemy fetch no longer counts as an Alchemy outage. It turned provider health `DOWN` and put the raw exception text, which can quote SQL, into the health `error`; the run now records `Database error (<class>).` and health keeps its state.
 - A run interrupted by a worker shutdown, or one the full worker pool could not take, is due again at once. It waited for a backoff that grew with every claim of the run, so after a deploy a long account sync waited up to 15 minutes.
 - A bridge cursor reaches the bridge byte for byte. It went into the request URL unencoded: a `+`, as in base64, arrived as a space, and a cursor in JSON failed before the request was sent, as a retryable provider outage.

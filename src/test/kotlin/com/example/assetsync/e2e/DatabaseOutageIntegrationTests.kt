@@ -27,10 +27,12 @@ import org.testcontainers.utility.DockerImageName
  * Stops PostgreSQL under two running contexts and checks what callers get: every API endpoint
  * answers `503 database-unavailable`. Under the permissive `test` chain the request reaches Spring
  * MVC and fails on its first database access: opening the transaction, a query outside one, or the
- * rollback on a connection the outage broke. Under the protected `e2e` chain HTTP Basic cannot read
- * its user store, so the answer must not blame the credentials with a `401` and a challenge. The
- * class owns its container: stopping the shared Testcontainers database would break the other test
- * classes.
+ * rollback on a connection the outage broke. Under the protected `e2e` chain a user seen shortly
+ * before the outage comes from the user-store cache, so that user's request fails the same way in
+ * MVC, and the metrics, which need no database, stay reachable. For a user the cache never held,
+ * HTTP Basic cannot read its user store, so the answer must not blame the credentials with a `401`
+ * and a challenge. The class owns its container: stopping the shared Testcontainers database would
+ * break the other test classes.
  */
 class DatabaseOutageIntegrationTests {
 
@@ -49,6 +51,7 @@ class DatabaseOutageIntegrationTests {
             val permissive = boot(postgres, "test").also(contexts::add)
             val protected = boot(postgres, "e2e").also(contexts::add)
             val credentials = createOperator(protected)
+            val unseenReader = createUser(protected, "outage-reader", "READ")
             contexts.forEach(::assertJdbcTimeouts)
             // Before the outage the operator's credentials work, and a username the user store cannot
             // hold is an ordinary bad credential, not a database failure.
@@ -72,6 +75,18 @@ class DatabaseOutageIntegrationTests {
             // The request id reaches the security-chain answer too.
             val secured = send(protected, "GET", "/api/v1/accounts/${UUID.randomUUID()}", credentials = credentials)
             assertTrue(objectMapper.readTree(secured.body()).hasNonNull("requestId"), secured.body())
+
+            // The operator authenticated before the outage, so the scrape needs no database: the
+            // user comes from the cache and the outbox gauges from their last background refresh.
+            val scrape = send(protected, "GET", "/actuator/prometheus", credentials = credentials)
+            assertEquals(200, scrape.statusCode(), scrape.body().take(500))
+            val outboxLines = scrape.body().lines().filter { it.startsWith("asset_sync_outbox_backlog") }
+            assertTrue(outboxLines.isNotEmpty(), "outbox gauge in the scrape")
+            // A user the cache never held needs the user store, which is down: 503, not a 401.
+            databaseUnavailableMismatch(
+                "e2e, reader never seen before the outage",
+                send(protected, "GET", "/api/v1/accounts/${UUID.randomUUID()}", credentials = unseenReader),
+            )?.let { mismatch -> throw AssertionError(mismatch) }
 
             // Without credentials nothing needs the database: the challenge is unchanged.
             val anonymous = send(protected, "GET", "/api/v1/accounts/${UUID.randomUUID()}")
@@ -142,12 +157,14 @@ class DatabaseOutageIntegrationTests {
         }
     }
 
-    private fun createOperator(context: ConfigurableApplicationContext): String {
+    private fun createOperator(context: ConfigurableApplicationContext): String = createUser(context, "outage-operator", "OPERATOR")
+
+    private fun createUser(context: ConfigurableApplicationContext, username: String, role: String): String {
         val encoder = context.getBean(PasswordEncoder::class.java)
         context.getBean(UserDetailsManager::class.java).createUser(
-            User.withUsername("outage-operator").password(encoder.encode("outage-pw")).roles("OPERATOR").build(),
+            User.withUsername(username).password(encoder.encode("outage-pw")).roles(role).build(),
         )
-        return basic("outage-operator", "outage-pw")
+        return basic(username, "outage-pw")
     }
 
     private fun basic(username: String, password: String): String =

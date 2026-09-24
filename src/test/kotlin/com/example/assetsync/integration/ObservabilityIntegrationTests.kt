@@ -1,6 +1,7 @@
 package com.example.assetsync.integration
 
 import com.example.assetsync.TestcontainersConfiguration
+import com.example.assetsync.application.observability.AssetSyncMetrics
 import com.example.assetsync.application.outbox.OutboxProcessingService
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
 import com.example.assetsync.application.sync.SyncApplicationService
@@ -62,6 +63,7 @@ class ObservabilityIntegrationTests(
     @Autowired private val applicationContext: ApplicationContext,
     @Autowired private val syncRunLifecycleService: SyncRunLifecycleService,
     @Autowired private val syncApplicationService: SyncApplicationService,
+    @Autowired private val assetSyncMetrics: AssetSyncMetrics,
 ) {
 
     @BeforeEach
@@ -505,8 +507,11 @@ class ObservabilityIntegrationTests(
     private fun timerCount(name: String, vararg tags: String): Long =
         meterRegistry.find(name).tags(*tags).timer()?.count() ?: 0L
 
-    private fun gaugeValue(name: String): Double =
-        requireNotNull(meterRegistry.find(name).gauge()) { "Gauge $name was not registered." }.value()
+    /** The outbox gauges show the counts of the last background refresh, so the test refreshes first. */
+    private fun gaugeValue(name: String): Double {
+        assetSyncMetrics.refreshOutboxGauges()
+        return requireNotNull(meterRegistry.find(name).gauge()) { "Gauge $name was not registered." }.value()
+    }
 
     private fun cleanDatabase() {
         jdbcTemplate.update("DELETE FROM outbox_events")

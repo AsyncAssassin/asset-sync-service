@@ -1215,6 +1215,7 @@ Metrics, as registered by `AssetSyncMetrics`:
 - `asset.sync.outbox.scheduler.ticks{result}`: counter of outbox poller ticks that ended in an exception (`FAILED`).
 - `asset.sync.outbox.backlog.total`: gauge of outbox rows in `NEW` or `FAILED`.
 - `asset.sync.outbox.dead.total`: gauge of outbox rows in `DEAD`.
+- Both outbox gauges show counts a background job refreshes every 10 seconds, so a scrape never queries the database; while the database is down they keep their last counts. Prometheus exports them without the `_total` suffix, which it reserves for counters.
 
 Health checks:
 - Spring Actuator liveness.
