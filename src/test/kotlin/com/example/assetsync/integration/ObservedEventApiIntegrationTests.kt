@@ -4,8 +4,10 @@ import com.example.assetsync.TestcontainersConfiguration
 import com.example.assetsync.api.dto.MAX_AMOUNT_LENGTH
 import com.example.assetsync.api.dto.MAX_TX_HASH_LENGTH
 import com.example.assetsync.config.JacksonConfiguration.Companion.MAX_JSON_STRING_LENGTH
+import com.example.assetsync.infrastructure.provider.ProviderEventsPageResponse
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.exc.MismatchedInputException
 import java.sql.Timestamp
 import java.time.Instant
 import java.util.UUID
@@ -17,6 +19,7 @@ import kotlin.test.assertEquals
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
 import org.springframework.boot.test.context.SpringBootTest
@@ -305,6 +308,24 @@ class ObservedEventApiIntegrationTests(
                 .andExpect(jsonPath("$.errors[0]").value(error))
                 .andExpect(jsonPath("$.detail").value(error))
         }
+    }
+
+    @Test
+    fun `a number with a fraction is refused where an integer is expected, in requests and in bridge pages`() {
+        createWatchedAddress(address = "0xobserved-fraction")
+
+        listOf("eventIndex" to 1.9, "blockHeight" to 10.7, "confirmations" to 2.5).forEach { (field, value) ->
+            val body = observedEventPayload(address = "0xobserved-fraction").apply { this[field] = value }
+            mockMvc.perform(post("/api/v1/observed-events").contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(body)))
+                .andExpect(status().isBadRequest)
+                .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/invalid-request"))
+        }
+        assertEquals(0, tableCount("observed_transactions"))
+
+        // The HTTP bridge adapter reads its pages with this mapper too.
+        val page = """{"hasMore":false,"events":[{"txHash":"0x1","eventIndex":1.5,"address":"0xa","asset":"USDC","amount":"1",""" +
+            """"blockHeight":1,"confirmations":1,"direction":"INBOUND","status":"SEEN"}]}"""
+        assertThrows<MismatchedInputException> { objectMapper.readValue(page, ProviderEventsPageResponse::class.java) }
     }
 
     @Test

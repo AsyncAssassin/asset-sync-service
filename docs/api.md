@@ -10,7 +10,7 @@ All MVP endpoints are exposed under `/api/v1`. The version is part of the URL be
 
 Conventions:
 
-- Request and response bodies use JSON; a body of any other content type, YAML included, gets `415`. A string longer than 100 000 characters in a request field fails the request with `400 invalid-request` while the body is read, before any field rule runs. Unknown fields are ignored, whatever their size.
+- Request and response bodies use JSON; a body of any other content type, YAML included, gets `415`. A string longer than 100 000 characters in a request field fails the request with `400 invalid-request` while the body is read, before any field rule runs. Unknown fields are ignored, whatever their size. A number with a fraction in an integer field, such as an `eventIndex` of `1.9`, fails the request with `400 invalid-request` instead of losing the fraction.
 - Timestamps use UTC ISO-8601 strings.
 - Identifiers use UUID strings.
 - Monetary amounts are encoded as decimal strings and stored with `numeric(38, 18)` precision.

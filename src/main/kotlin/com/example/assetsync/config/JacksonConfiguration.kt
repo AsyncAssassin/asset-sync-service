@@ -1,6 +1,7 @@
 package com.example.assetsync.config
 
 import com.fasterxml.jackson.core.exc.StreamConstraintsException
+import com.fasterxml.jackson.databind.DeserializationFeature
 import org.springframework.boot.autoconfigure.jackson.Jackson2ObjectMapperBuilderCustomizer
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -32,6 +33,15 @@ class JacksonConfiguration : WebMvcConfigurer {
                 )
             }
         }
+
+    /**
+     * A number with a fraction where an integer is expected fails the read instead of losing the
+     * fraction, which Jackson does by default: an `eventIndex` of 1.9 would be stored as 1. HTTP
+     * bridge pages are read with the same mapper, so there such a number is bad data of the address.
+     */
+    @Bean
+    fun integersStayIntegers(): Jackson2ObjectMapperBuilderCustomizer =
+        Jackson2ObjectMapperBuilderCustomizer { builder -> builder.featuresToDisable(DeserializationFeature.ACCEPT_FLOAT_AS_INT) }
 
     override fun extendMessageConverters(converters: MutableList<HttpMessageConverter<*>>) {
         converters.removeIf { it is MappingJackson2YamlHttpMessageConverter }
