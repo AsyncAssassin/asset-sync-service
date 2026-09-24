@@ -21,7 +21,7 @@ Conventions:
 
 Authentication:
 
-- Every profile except `local` and `test` requires HTTP Basic against the database user store: `GET` endpoints need the `READ` or `OPERATOR` role, every mutation needs `OPERATOR`. Health probes stay open.
+- Every profile except `local` and `test` requires HTTP Basic against the database user store: `GET` endpoints need the `READ` or `OPERATOR` role, every mutation needs `OPERATOR`. Health probes stay open. The store is read through a one-minute cache. A new password works at once everywhere, because a password that does not match the cached user makes the service read the store again; an old password, or a user removed directly in the database or on another instance, keeps working for up to a minute. A change through the service, such as the `prod` operator provisioning, applies at once on the instance that made it.
 - The API keeps no session, so CSRF protection is off. A browser that has cached Basic credentials for the service would still attach them to a cross-site form `POST`; the only endpoints such a form can reach are the two body-less sync endpoints, and the effect is an extra sync run. Do not log into the API from a browser used for other sites, and put the service behind a gateway when it is exposed.
 - Every authenticated request verifies the BCrypt hash of the password (strength 10, about 70 ms of CPU), and nothing limits failed attempts. The gateway in front of an exposed service should rate-limit requests; token authentication (OAuth2 or JWT) is the next step beyond the MVP.
 
@@ -416,7 +416,7 @@ Response shape is the same transaction object used by the list endpoint.
 
 ## 11. Start Address Sync
 
-Enqueues a durable sync run for one watched address. The POST request validates that the address exists, creates or reuses an in-flight `sync_runs` row, and returns before provider work starts. Local/test profiles use the fake provider; other profiles use the provider that `asset-sync.provider.type` selects, the HTTP bridge or Alchemy, from the background worker. Provider pagination and cursor checkpoints are internal; the public API exposes the durable run state only.
+Enqueues a durable sync run for one watched address. The POST request validates that the address exists and is active, and that its chain is enabled (an address on a disabled chain answers `404` with the title `Unsupported chain`), creates or reuses an in-flight `sync_runs` row, and returns before provider work starts. Local/test profiles use the fake provider; other profiles use the provider that `asset-sync.provider.type` selects, the HTTP bridge or Alchemy, from the background worker. Provider pagination and cursor checkpoints are internal; the public API exposes the durable run state only.
 
 Request:
 
@@ -473,7 +473,7 @@ Failure behavior:
 
 Enqueues sync for all active watched addresses under one account. The POST behavior is the same as address sync: validate account existence, create or reuse an in-flight run, and return `202 Accepted` with a pollable location.
 
-Account sync uses per-address cursors and a pass over the account's active addresses in `(created_at, id)` order. The pass keeps its keyset in the run checkpoint, so a run whose addresses do not fit one claim resumes where the previous claim stopped and completes once every address has been synced; addresses registered or disabled between claims neither shift it nor get visited twice. An address whose cursor is busy because a direct address sync owns it is deferred and revisited after the scan, and an address with provider pages left keeps the pass on it until it is drained.
+Account sync uses per-address cursors and a pass over the account's active addresses in `(created_at, id)` order. The pass keeps its keyset in the run checkpoint, so a run whose addresses do not fit one claim resumes where the previous claim stopped and completes once every address has been synced; addresses registered or disabled between claims neither shift it nor get visited twice. An address whose cursor is busy because a direct address sync owns it is deferred and revisited after the scan, an address whose provider fetch fails retryably is retried in later claims, and an address with provider pages left keeps the pass on it until it is drained.
 
 Request:
 
@@ -507,11 +507,13 @@ Location: /api/v1/sync-runs/53059d5b-4813-4d6d-9f8e-6f993744e879
 
 Behavior:
 
-- Resolve active watched addresses in bounded pages.
+- Resolve active watched addresses on enabled chains in bounded pages. An address on a disabled chain is skipped, like a disabled address.
 - For each address, acquire the per-address cursor lease and fetch bounded provider pages until the page stream is done or a configured continuation limit is reached.
 - Ingest each provider event independently and checkpoint only after the full provider page is ingested.
-- A retryable provider failure requeues the overall sync run unless max attempts has been reached.
-- A terminal failure of one address (provider data invalid, provider configuration, a database constraint) ends only that address; the pass goes on with the others. When the pass completes, a run with such failures is `FAILED` and its `lastError` reads `<n> of <m> addresses failed terminally: <addressId>: <error>; ...`, capped at the stored error length. Disable an address that keeps failing with `PATCH /api/v1/addresses/{addressId}`.
+- A retryable provider failure of one address that is no throttling, such as a timeout or a `5xx`, puts that address on a retry list, and the pass goes on with the others. The address gets the attempts and backoff of a run: `asset-sync.sync.worker.max-attempts` in all, the second after `retry-backoff-base-delay` and each later one after twice the previous delay, up to `retry-backoff-max-delay` (30 s, 1, 2, and 4 minutes by default). The retries that are due go first in each claim, and while any address waits the run's `lastError` says how many and the last error. An address whose last attempt fails too is recorded as failed with `failed <n> times: <error>`. Pages an address commits before it fails count as progress: its count starts over. None of this spends the run's `failure_attempts`.
+- Retryable failures of three addresses in a row, with no page committed between them, are a provider outage: the claim fails, the run is retried with backoff and spends one `failure_attempts` unless max attempts has been reached, and the failures of the streak do not count against their addresses. So does throttling, a `429` or a rate limit with or without `Retry-After`, which concerns every address, and so do a database failure and a lost claim or cursor lease. The retried run resumes the pass where the failed claim stopped. At most 50 addresses wait for a retry; with the list full, the scan waits at the next failing address until due retries free a place.
+- A configuration failure of the whole provider, such as rejected credentials or a redirect, fails the run at once.
+- A terminal failure of one address (provider data invalid, a configuration gap of that address, a database constraint) ends only that address; the pass goes on with the others. When the pass completes, a run with such failures is `FAILED` and its `lastError` reads `<n> of <m> addresses failed terminally: <addressId>: <error>; ...`, capped at the stored error length. Disable an address that keeps failing with `PATCH /api/v1/addresses/{addressId}`.
 - Accounts over the configured address cap are terminal `FAILED` during worker execution.
 
 ## 13. Get Sync Run

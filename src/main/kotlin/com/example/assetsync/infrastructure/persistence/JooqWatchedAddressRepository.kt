@@ -5,6 +5,7 @@ import com.example.assetsync.application.account.NewWatchedAddress
 import com.example.assetsync.application.account.WatchedAddress
 import com.example.assetsync.application.account.WatchedAddressRepository
 import com.example.assetsync.application.account.WatchedAddressStatus
+import com.example.assetsync.infrastructure.persistence.jooq.generated.tables.references.CHAIN_CONFIGS
 import com.example.assetsync.infrastructure.persistence.jooq.generated.tables.references.WATCHED_ADDRESSES
 import java.time.Instant
 import java.util.UUID
@@ -108,7 +109,27 @@ class JooqWatchedAddressRepository(
             .where(WATCHED_ADDRESSES.ID.eq(addressId))
             .fetchOne { it.toWatchedAddress() }
 
-    override fun findActiveByAccountIdAfter(
+    override fun findSyncableById(addressId: UUID): WatchedAddress? =
+        dsl
+            .select(
+                WATCHED_ADDRESSES.ID,
+                WATCHED_ADDRESSES.ACCOUNT_ID,
+                WATCHED_ADDRESSES.CHAIN_ID,
+                WATCHED_ADDRESSES.ADDRESS,
+                WATCHED_ADDRESSES.ASSET,
+                WATCHED_ADDRESSES.LABEL,
+                WATCHED_ADDRESSES.STATUS,
+                WATCHED_ADDRESSES.CREATED_AT,
+                WATCHED_ADDRESSES.UPDATED_AT,
+            )
+            .from(WATCHED_ADDRESSES)
+            .join(CHAIN_CONFIGS).on(CHAIN_CONFIGS.CHAIN_ID.eq(WATCHED_ADDRESSES.CHAIN_ID))
+            .where(WATCHED_ADDRESSES.ID.eq(addressId))
+            .and(WATCHED_ADDRESSES.STATUS.eq(WatchedAddressStatus.ACTIVE.name))
+            .and(CHAIN_CONFIGS.ENABLED.isTrue)
+            .fetchOne { it.toWatchedAddress() }
+
+    override fun findSyncableByAccountIdAfter(
         accountId: UUID,
         afterCreatedAt: Instant?,
         afterId: UUID?,
@@ -132,8 +153,10 @@ class JooqWatchedAddressRepository(
                 WATCHED_ADDRESSES.UPDATED_AT,
             )
             .from(WATCHED_ADDRESSES)
+            .join(CHAIN_CONFIGS).on(CHAIN_CONFIGS.CHAIN_ID.eq(WATCHED_ADDRESSES.CHAIN_ID))
             .where(WATCHED_ADDRESSES.ACCOUNT_ID.eq(accountId))
             .and(WATCHED_ADDRESSES.STATUS.eq(WatchedAddressStatus.ACTIVE.name))
+            .and(CHAIN_CONFIGS.ENABLED.isTrue)
             .and(afterKeyset)
             .orderBy(WATCHED_ADDRESSES.CREATED_AT.asc(), WATCHED_ADDRESSES.ID.asc())
             .limit(limit)
@@ -160,13 +183,15 @@ class JooqWatchedAddressRepository(
             .fetchOne()
             ?.toWatchedAddress()
 
-    override fun countActiveByAccountId(accountId: UUID): Int =
+    override fun countSyncableByAccountId(accountId: UUID): Int =
         requireNotNull(
             dsl
                 .selectCount()
                 .from(WATCHED_ADDRESSES)
+                .join(CHAIN_CONFIGS).on(CHAIN_CONFIGS.CHAIN_ID.eq(WATCHED_ADDRESSES.CHAIN_ID))
                 .where(WATCHED_ADDRESSES.ACCOUNT_ID.eq(accountId))
                 .and(WATCHED_ADDRESSES.STATUS.eq(WatchedAddressStatus.ACTIVE.name))
+                .and(CHAIN_CONFIGS.ENABLED.isTrue)
                 .fetchOne(0, Int::class.java),
         )
 

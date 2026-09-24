@@ -190,8 +190,9 @@ class JooqSyncRunRepository(
         lastError: String,
         nextAttemptAt: Instant,
         updatedAt: Instant,
-    ): Boolean =
-        dsl
+        runCheckpoint: ObjectNode?,
+    ): Boolean {
+        var update = dsl
             .update(SYNC_RUNS)
             .set(SYNC_RUNS.STATUS, SyncRunStatus.QUEUED.name)
             .set(SYNC_RUNS.EVENTS_SEEN, eventsSeen)
@@ -202,8 +203,13 @@ class JooqSyncRunRepository(
             .setNull(SYNC_RUNS.FINISHED_AT)
             .clearLockFields()
             .set(SYNC_RUNS.UPDATED_AT, updatedAt.toOffsetDateTime())
+        if (runCheckpoint != null) {
+            update = update.set(SYNC_RUNS.RUN_CHECKPOINT, JSONB.valueOf(runCheckpoint.toString()))
+        }
+        return update
             .whereCurrentClaim(id = id, lockedBy = lockedBy, lockToken = lockToken, attempts = attempts)
             .execute() == 1
+    }
 
     override fun requeueContinuationFenced(
         id: UUID,
@@ -218,6 +224,7 @@ class JooqSyncRunRepository(
         maxContinuationsPerRun: Int,
         maxErrorLength: Int,
         updatedAt: Instant,
+        lastError: String?,
     ): SyncRunContinuationRequeueResult {
         require(maxContinuationsPerRun >= 0) { "maxContinuationsPerRun must not be negative." }
         require(maxErrorLength > 0) { "maxErrorLength must be positive." }
@@ -236,7 +243,7 @@ class JooqSyncRunRepository(
                 SYNC_RUNS.LAST_ERROR,
                 DSL.`when`(
                     withinLimit,
-                    DSL.inline(null, SYNC_RUNS.LAST_ERROR.dataType),
+                    lastError?.let { DSL.`val`(it.take(maxErrorLength), SYNC_RUNS.LAST_ERROR) } ?: DSL.inline(null, SYNC_RUNS.LAST_ERROR.dataType),
                 ).otherwise("continuation limit exceeded".take(maxErrorLength)),
             )
             .set(SYNC_RUNS.LAST_REQUEUE_REASON, reason.name)
@@ -282,8 +289,9 @@ class JooqSyncRunRepository(
         lastError: String,
         nextAttemptAt: Instant,
         updatedAt: Instant,
-    ): Boolean =
-        dsl
+        runCheckpoint: ObjectNode?,
+    ): Boolean {
+        var update = dsl
             .update(SYNC_RUNS)
             .set(SYNC_RUNS.STATUS, SyncRunStatus.QUEUED.name)
             .set(SYNC_RUNS.EVENTS_SEEN, eventsSeen)
@@ -295,9 +303,14 @@ class JooqSyncRunRepository(
             .setNull(SYNC_RUNS.FINISHED_AT)
             .clearLockFields()
             .set(SYNC_RUNS.UPDATED_AT, updatedAt.toOffsetDateTime())
+        if (runCheckpoint != null) {
+            update = update.set(SYNC_RUNS.RUN_CHECKPOINT, JSONB.valueOf(runCheckpoint.toString()))
+        }
+        return update
             .whereCurrentClaim(id = id, lockedBy = lockedBy, lockToken = lockToken, attempts = attempts)
             .and(SYNC_RUNS.FAILURE_ATTEMPTS.eq(expectedFailureAttempts))
             .execute() == 1
+    }
 
     override fun heartbeatFenced(
         id: UUID,
@@ -422,7 +435,8 @@ class JooqSyncRunRepository(
             failureAttempts = requireNotNull(get(SYNC_RUNS.FAILURE_ATTEMPTS)),
             continuationCount = requireNotNull(get(SYNC_RUNS.CONTINUATION_COUNT)),
             runCheckpoint = get(SYNC_RUNS.RUN_CHECKPOINT).toObjectNode(),
-            lastRequeueReason = get(SYNC_RUNS.LAST_REQUEUE_REASON)?.let { SyncRunRequeueReason.valueOf(it) },
+            // A value this version does not know was written by a later one: rolled back, the run still reads.
+            lastRequeueReason = get(SYNC_RUNS.LAST_REQUEUE_REASON)?.let { reason -> SyncRunRequeueReason.entries.find { it.name == reason } },
             createdAt = requireNotNull(get(SYNC_RUNS.CREATED_AT)).toInstant(),
             updatedAt = requireNotNull(get(SYNC_RUNS.UPDATED_AT)).toInstant(),
         )

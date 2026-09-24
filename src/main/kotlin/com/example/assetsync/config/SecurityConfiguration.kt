@@ -3,12 +3,14 @@ package com.example.assetsync.config
 import com.example.assetsync.api.error.ProblemDetailAccessDeniedHandler
 import com.example.assetsync.api.error.ProblemDetailAuthenticationEntryPoint
 import jakarta.servlet.DispatcherType
+import java.time.Clock
 import javax.sql.DataSource
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Profile
 import org.springframework.core.env.Environment
 import org.springframework.http.HttpMethod
+import org.springframework.security.authentication.ProviderManager
 import org.springframework.security.config.annotation.web.builders.HttpSecurity
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity
 import org.springframework.security.config.http.SessionCreationPolicy
@@ -50,6 +52,9 @@ class SecurityConfiguration {
         authenticationEntryPoint: ProblemDetailAuthenticationEntryPoint,
         accessDeniedHandler: ProblemDetailAccessDeniedHandler,
         environment: Environment,
+        userDetailsManager: UserDetailsManager,
+        passwordEncoder: PasswordEncoder,
+        userStoreCache: UserStoreCache,
     ): SecurityFilterChain =
         http
             .csrf { it.disable() }
@@ -76,6 +81,8 @@ class SecurityConfiguration {
                 it.authenticationEntryPoint(authenticationEntryPoint)
                 it.accessDeniedHandler(accessDeniedHandler)
             }
+            // The chain's own manager, so HTTP Basic goes through the user cache and nothing else.
+            .authenticationManager(ProviderManager(UserStoreAuthenticationProvider(userDetailsManager, passwordEncoder, userStoreCache)))
             .httpBasic { it.authenticationEntryPoint(authenticationEntryPoint) }
             .build()
 
@@ -83,8 +90,13 @@ class SecurityConfiguration {
     @Profile("!local & !test")
     fun passwordEncoder(): PasswordEncoder = BCryptPasswordEncoder()
 
+    /** The users HTTP Basic has read, described in [UserStoreCache]. */
     @Bean
     @Profile("!local & !test")
-    fun userDetailsManager(dataSource: DataSource): UserDetailsManager =
-        JdbcUserDetailsManager(dataSource)
+    fun userStoreCache(clock: Clock): UserStoreCache = UserStoreCache(clock)
+
+    @Bean
+    @Profile("!local & !test")
+    fun userDetailsManager(dataSource: DataSource, userStoreCache: UserStoreCache): UserDetailsManager =
+        CachingUserDetailsManager(delegate = JdbcUserDetailsManager(dataSource), cache = userStoreCache)
 }

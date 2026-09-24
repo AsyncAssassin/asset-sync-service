@@ -33,3 +33,5 @@ databaseChangeLog:
       file: db/changelog/changes/016-add-observed-transaction-source.yaml
   - include:
       file: db/changelog/changes/017-add-provider-busy-requeue-reason.yaml
+  - include:
+      file: db/changelog/changes/018-add-address-retry-requeue-reason.yaml

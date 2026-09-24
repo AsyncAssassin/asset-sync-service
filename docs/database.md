@@ -43,6 +43,7 @@ src/main/resources/db/changelog
     015-add-asset-configs.yaml
     016-add-observed-transaction-source.yaml
     017-add-provider-busy-requeue-reason.yaml
+    018-add-address-retry-requeue-reason.yaml
 ```
 
 Changelog rules:
@@ -78,6 +79,8 @@ HAVING count(*) > 1;
 Drain, fail, or explicitly accept any legacy `STARTED` rows before enabling the worker. The worker processes only `QUEUED/RUNNING`; legacy stale-`STARTED` recovery remains separate.
 - Changeset `014` adds per-address `sync_cursors` and separates retry budget from worker claim count. Existing watched addresses receive one cursor row with null provider cursor and `{}` checkpoint. Existing `sync_runs.attempts` remains a total claim diagnostic; retry budget is backfilled into `failure_attempts`.
 - Changeset `017` adds `PROVIDER_BUSY` to the values `ck_sync_runs_last_requeue_reason` allows: a run whose next page finds the provider pool full is requeued as a continuation with that reason.
+- Changeset `018` adds `ADDRESS_RETRY` to the same check: an account run whose pass has addresses waiting to retry a retryable provider failure is requeued as a continuation with that reason.
+- Rolling back to 0.4.1 after `017` and `018`: 0.4.1 cannot read `PROVIDER_BUSY` or `ADDRESS_RETRY` and stops claiming runs while one exists, so first run `UPDATE sync_runs SET last_requeue_reason = 'CONTINUATION' WHERE last_requeue_reason IN ('PROVIDER_BUSY', 'ADDRESS_RETRY');`. 0.4.1 also ignores the retry list of an account pass, so an account run it resumes can succeed without the addresses that waited for a retry: sync such accounts again after the rollback. Later versions read a reason they do not know as none.
 - Changeset `016` adds the nullable `observed_transactions.source` (the source of the row's last lifecycle change: `rest:<user>` or `provider:<type>`) with a 128-character check added `NOT VALID` and validated at once. Existing rows keep `NULL`, which means the source was not recorded; the column is added without a default, so no row is rewritten.
 - Changeset `015` adds the `asset_configs` registry keyed by `(chain_id, asset)`, upserts the `eth-sepolia` (enabled, `required_confirmations=1`) and `eth-mainnet` (disabled, `required_confirmations=12`) chain configs, and seeds `USDC` for `local-evm` (deterministic fake contract `0x000000000000000000000000000000000000f001`, decimals 18), `eth-sepolia` (Circle contract, decimals 6, enabled), and `eth-mainnet` (Circle contract, decimals 6, disabled). All seeds use insert-or-update semantics. Registration validation protects only new rows: before pointing a real provider at an existing database, run the rollout preflight below and seed or disable whatever it returns; it must come back empty. With `asset-sync.provider.type=alchemy` the service runs the same check at startup, together with a mapping check for every enabled chain that has enabled asset configs and active watched addresses, and refuses to start while either returns rows. The seeded `local-evm` chain has no Alchemy network; without active watched addresses it is only logged, so a fresh database boots, and disabling it (`UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm'`) keeps addresses from being registered there.
 
@@ -424,8 +427,8 @@ Key columns:
 | `attempts` | `integer` | no | Worker claim attempts |
 | `failure_attempts` | `integer` | no | Retryable failure budget counter |
 | `continuation_count` | `integer` | no | Healthy continuation requeue counter |
-| `run_checkpoint` | `jsonb` | no | Run-local metadata: the account-sync pass (`accountPass`: scan keyset, scan completion, visited count, deferred busy addresses, failed addresses) |
-| `last_requeue_reason` | `text` | yes | `FAILURE`, `CONTINUATION`, `LEASE_BUSY`, or `PROVIDER_BUSY` |
+| `run_checkpoint` | `jsonb` | no | Run-local metadata: the account-sync pass (`accountPass`: scan keyset, scan completion, visited count, deferred busy addresses, addresses waiting for a retry with their failed retries, failed addresses) |
+| `last_requeue_reason` | `text` | yes | `FAILURE`, `CONTINUATION`, `LEASE_BUSY`, `PROVIDER_BUSY`, or `ADDRESS_RETRY` |
 | `next_attempt_at` | `timestamptz` | no | Earliest claim/retry time |
 | `locked_by` | `varchar(200)` | yes | Current worker owner for `RUNNING` |
 | `lock_token` | `uuid` | yes | Current claim token for fenced updates |
@@ -451,7 +454,7 @@ Constraints and indexes:
 - `check (failure_attempts >= 0)`
 - `check (continuation_count >= 0)`
 - `check (jsonb_typeof(run_checkpoint) = 'object')`
-- `check (last_requeue_reason is null or last_requeue_reason in ('FAILURE','CONTINUATION','LEASE_BUSY','PROVIDER_BUSY'))`
+- `check (last_requeue_reason is null or last_requeue_reason in ('FAILURE','CONTINUATION','LEASE_BUSY','PROVIDER_BUSY','ADDRESS_RETRY'))`
 - lock fields are required for `RUNNING` and null for non-`RUNNING`
 - terminal rows require `finished_at`; queued/running/started rows require `finished_at is null`
 
@@ -459,8 +462,9 @@ Notes:
 
 - `sync_runs` are operational records and the durable queue for async sync.
 - They do not participate in observed transaction idempotency.
-- Healthy provider pagination continuations increment `continuation_count`, not `failure_attempts`. So do a busy cursor lease (`LEASE_BUSY`) and a full provider pool (`PROVIDER_BUSY`), both retried after `asset-sync.sync.pagination.cursor-lease-retry-delay` and bounded by `max-continuations-per-run`.
-- Requeues caused by a rejected worker pool submission or by a worker shutdown carry `last_requeue_reason = FAILURE` but leave `failure_attempts` unchanged; `last_error` names the cause.
+- Healthy provider pagination continuations increment `continuation_count`, not `failure_attempts`. So do a busy cursor lease (`LEASE_BUSY`) and a full provider pool (`PROVIDER_BUSY`), both retried after `asset-sync.sync.pagination.cursor-lease-retry-delay`, and an account pass with addresses waiting to retry (`ADDRESS_RETRY`), due when the first of them is. All are bounded by `max-continuations-per-run`.
+- A retryable failure of a claim (`requeueFailure`) and a worker shutdown (`requeue`) save the account pass in `run_checkpoint` as a continuation does, so the next claim resumes where the failed one stopped.
+- Requeues caused by a rejected worker pool submission or by a worker shutdown carry `last_requeue_reason = FAILURE` but leave `failure_attempts` unchanged and are due again at once; `last_error` names the cause.
 - Retryable provider failures, 429 throttling, and expired `RUNNING` recovery increment `failure_attempts`.
 - The partial unique in-flight index intentionally excludes legacy `STARTED`.
 - No retention job removes finished runs, so every sync request adds a row for good. No other table references `sync_runs`, and a finished run is only read back by `GET /api/v1/sync-runs/{id}`, so old terminal runs can be deleted by hand:

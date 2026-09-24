@@ -216,7 +216,7 @@ How each answer is handled:
 
 `DOWN` lasts until the next successful fetch. A failure the bridge did not report itself is named by its kind, such as `Provider transport failure: timeout (SocketTimeoutException).`, never with the bridge URL. The client uses `asset-sync.provider.connect-timeout` and `read-timeout` (the longest pause between two reads), and `asset-sync.sync.provider-timeout` bounds the whole page, as described above.
 
-Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. A full provider pool (`SyncCapacityExceededException`) is the service's own capacity, not a provider failure: like a busy cursor lease, the run is requeued as a continuation (`PROVIDER_BUSY`) after `cursor-lease-retry-delay`, and an account run resumes its pass at the address that met it. Retryable provider failures, including 429 throttling, increment `failure_attempts`. Provider configuration failures (`ProviderConfigurationException`: rejected credentials, a chain without a provider network mapping, a fetch the configured provider cannot serve) are terminal like malformed pages, so they never burn the retry budget on attempts that cannot succeed.
+Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. A full provider pool (`SyncCapacityExceededException`) is the service's own capacity, not a provider failure: like a busy cursor lease, the run is requeued as a continuation (`PROVIDER_BUSY`) after `cursor-lease-retry-delay`, and an account run resumes its pass at the address that met it. Retryable provider failures, including 429 throttling, increment `failure_attempts`; in an account run, a retryable failure of one address that is no throttling puts that address on a retry list instead, and only a provider outage fails the claim (see Manual Account Sync Traversal). Provider configuration failures (`ProviderConfigurationException`: rejected credentials, a chain without a provider network mapping, a fetch the configured provider cannot serve) are terminal like malformed pages, so they never burn the retry budget on attempts that cannot succeed.
 
 ### Alchemy Provider Page Building
 
@@ -245,6 +245,10 @@ sequenceDiagram
 
     Worker->>Repo: count active account addresses (cap check)
     Worker->>DB: read run_checkpoint.accountPass
+    loop retry the addresses whose retry is due, once per claim
+        Worker->>Provider: fetch bounded page(s)
+        Worker->>Worker: last attempt spent: record the address and its error
+    end
     loop scan after the keyset (created_at, id)
         Worker->>Repo: fetch next active addresses after the keyset
         alt cursor lease acquired
@@ -253,6 +257,8 @@ sequenceDiagram
             Worker->>Cursor: checkpoint after page ingest
         else cursor lease busy
             Worker->>Worker: defer the address to the revisit list
+        else retryable provider failure
+            Worker->>Worker: defer the address to the retry list
         else terminal address failure
             Worker->>Worker: record the address and its error
         end
@@ -262,10 +268,10 @@ sequenceDiagram
         Worker->>Cursor: acquire address cursor lease
         Worker->>Provider: fetch bounded page(s)
     end
-    Worker->>DB: persist accountPass on continuation, or finish the run
+    Worker->>DB: persist accountPass on continuation or failure, or finish the run
 ```
 
-Account sync does not own a provider cursor; provider resume state remains per watched address in `sync_cursors`. The run checkpoint holds only the pass: the keyset of the last address the scan finished, whether the scan is complete, the number of addresses visited, the addresses deferred because their lease was busy (at most 100), and the addresses that failed terminally (the count and the first 20 with their errors), well below the 16 KiB limit of `run_checkpoint`. The claim budget (pages, events, duration) ends a claim between addresses; an address with pages left ends the claim without moving the keyset, so the next claim drains it first. The run completes when the scan is complete and no revisit is pending: `SUCCEEDED`, or `FAILED` with the failed addresses in `last_error`. A run queued by an earlier version carries no pass and starts a fresh one, which only replays idempotent cursors.
+Account sync does not own a provider cursor; provider resume state remains per watched address in `sync_cursors`. The pass covers the account's active addresses on enabled chains: an address on a disabled chain is skipped, like a disabled address, `POST /api/v1/addresses/{addressId}/sync` answers `404 Unsupported chain` for it, and a run of it queued before fails with `Chain <chainId> is not enabled, so its addresses are not synced.` without calling the provider. The run checkpoint holds only the pass: the keyset of the last address the scan finished, whether the scan is complete, the number of addresses visited, the addresses deferred because their lease was busy (at most 100), the addresses waiting to retry a retryable provider failure with their failed attempts and when each is due (at most 50) and the last such error, and the addresses that failed terminally (the count and the first 10 with their errors, kept to printable ASCII), below the 16 KiB limit of `run_checkpoint`. The claim budget (pages, events, duration) ends a claim between addresses; an address with pages left ends the claim without moving the keyset, so the next claim drains it first. A retryable provider failure that is no throttling, such as a timeout on a heavy address, may concern that address only, so the address waits on a retry list with the attempts and backoff of a run (`max-attempts`, `retry-backoff-base-delay` doubling up to `retry-backoff-max-delay`), and its last attempt records it as failed; pages it commits before a failure count as progress and start its count over. The retries that are due go first in each claim, so the list drains while a long scan goes on; with the list full (50), the scan waits at the next failing address. A run left waiting only for retries is requeued as `ADDRESS_RETRY`, due when the first of them is, with the waiting addresses and the last error in `last_error`. Retryable failures of three addresses in a row, with no page committed between them, are the provider's: the claim fails as a retryable failure of the run, and those failures are not counted against their addresses. Throttling, a `429` or a rate limit, fails the claim the same way at once. A failed claim and a claim interrupted by shutdown save the pass like a continuation does. The run completes when the scan is complete and no revisit or retry is pending: `SUCCEEDED`, or `FAILED` with the failed addresses in `last_error`. A run queued by an earlier version carries no pass and starts a fresh one, which only replays idempotent cursors.
 
 ### Observed Event Ingestion
 
@@ -1143,7 +1149,7 @@ Provider timeout:
 
 Process shutdown during sync:
 - The worker stops claiming, drains in-flight runs up to `worker.shutdown-timeout`, then interrupts the rest.
-- Interrupted runs return to `QUEUED` without consuming `failure_attempts`; already committed page events remain valid.
+- Interrupted runs return to `QUEUED` without consuming `failure_attempts` and are due again at once; already committed page events remain valid.
 
 App crashes after DB commit before publish:
 - Outbox poller resumes after restart and publishes pending events.
@@ -1198,7 +1204,7 @@ Metrics, as registered by `AssetSyncMetrics`:
 - `asset.sync.observed.transaction.transitions{eventType,status}`: counter of lifecycle transitions that emitted an outbox event.
 - `asset.sync.observed.transaction.immutable.conflicts`: counter of rejected immutable-field conflicts.
 - `asset.sync.sync.runs{targetType,status}`: counter of sync run state changes (`QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`).
-- `asset.sync.sync.continuations{reason,targetType}`: counter of healthy requeues (`CONTINUATION`, `LEASE_BUSY`, `PROVIDER_BUSY`) that do not consume retry budget.
+- `asset.sync.sync.continuations{reason,targetType}`: counter of healthy requeues (`CONTINUATION`, `LEASE_BUSY`, `PROVIDER_BUSY`, `ADDRESS_RETRY`) that do not consume retry budget.
 - `asset.sync.provider.fetches{targetType,status}`: counter of provider page fetches (`ATTEMPTED`, `SUCCEEDED`, `FAILED`).
 - `asset.sync.provider.fetch.duration{targetType,status}`: timer around one provider page fetch.
 - `asset.sync.provider.pages{targetType,result}`: counter of validated pages (`SUCCEEDED`, `FAILED`, `MALFORMED`).
@@ -1215,6 +1221,7 @@ Metrics, as registered by `AssetSyncMetrics`:
 - `asset.sync.outbox.scheduler.ticks{result}`: counter of outbox poller ticks that ended in an exception (`FAILED`).
 - `asset.sync.outbox.backlog.total`: gauge of outbox rows in `NEW` or `FAILED`.
 - `asset.sync.outbox.dead.total`: gauge of outbox rows in `DEAD`.
+- Both outbox gauges show counts a background job refreshes every 10 seconds, so a scrape never queries the database; while the database is down they keep their last counts. Prometheus exports them without the `_total` suffix, which it reserves for counters.
 
 Health checks:
 - Spring Actuator liveness.

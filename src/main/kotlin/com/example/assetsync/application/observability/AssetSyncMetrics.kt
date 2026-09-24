@@ -11,27 +11,44 @@ import io.micrometer.core.instrument.DistributionSummary
 import io.micrometer.core.instrument.Gauge
 import io.micrometer.core.instrument.MeterRegistry
 import io.micrometer.core.instrument.Timer
+import java.util.concurrent.atomic.AtomicReference
+import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 
 @Component
 class AssetSyncMetrics(
     private val meterRegistry: MeterRegistry,
-    outboxEventRepository: OutboxEventRepository,
+    private val outboxEventRepository: OutboxEventRepository,
 ) {
+    private val logger = LoggerFactory.getLogger(AssetSyncMetrics::class.java)
+
+    // The outbox gauges read counts refreshed in the background, so a scrape never waits for the
+    // database: with the database down, each scrape would otherwise wait for the connection pool.
+    private val outboxBacklog = AtomicReference(Double.NaN)
+    private val outboxDead = AtomicReference(Double.NaN)
 
     init {
         Gauge
-            .builder("asset.sync.outbox.backlog.total", outboxEventRepository) { repository ->
-                repository.countBacklog().toDouble()
-            }
-            .description("Total outbox events with NEW or FAILED status.")
+            .builder("asset.sync.outbox.backlog.total", outboxBacklog) { it.get() }
+            .description("Total outbox events with NEW or FAILED status, refreshed in the background.")
             .register(meterRegistry)
         Gauge
-            .builder("asset.sync.outbox.dead.total", outboxEventRepository) { repository ->
-                repository.countDead().toDouble()
-            }
-            .description("Total outbox events with DEAD status.")
+            .builder("asset.sync.outbox.dead.total", outboxDead) { it.get() }
+            .description("Total outbox events with DEAD status, refreshed in the background.")
             .register(meterRegistry)
+    }
+
+    /**
+     * Counts the outbox backlog and dead rows for the gauges; `OutboxGaugeRefreshJob` calls it every
+     * few seconds. While the database is down the gauges keep their last counts.
+     */
+    fun refreshOutboxGauges() {
+        try {
+            outboxBacklog.set(outboxEventRepository.countBacklog().toDouble())
+            outboxDead.set(outboxEventRepository.countDead().toDouble())
+        } catch (exception: RuntimeException) {
+            logger.warn("outbox_gauge_refresh_failed error={}", exception.javaClass.simpleName)
+        }
     }
 
     fun recordObservedEventIngested(result: TransitionOutcome, status: TransactionStatus) {

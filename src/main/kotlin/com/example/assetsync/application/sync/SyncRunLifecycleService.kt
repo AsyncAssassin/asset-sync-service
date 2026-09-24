@@ -2,6 +2,7 @@ package com.example.assetsync.application.sync
 
 import com.example.assetsync.application.observability.AssetSyncMetrics
 import com.example.assetsync.config.SyncProperties
+import com.fasterxml.jackson.databind.node.ObjectNode
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -162,10 +163,23 @@ class SyncRunLifecycleService(
         return marked
     }
 
+    /**
+     * Returns a run to the queue without spending its retry budget: a run interrupted by a worker
+     * shutdown or one the full worker pool could not take. Neither says anything about the run, so
+     * it is due again at once instead of after a backoff that grew with every claim. A
+     * [runCheckpoint], the progress of an account pass, replaces the stored one; without it the
+     * stored one stays.
+     */
     @Transactional
-    fun requeue(claim: ClaimedSyncRun, eventsSeen: Int, eventsChanged: Int, lastError: String): Boolean {
+    fun requeue(
+        claim: ClaimedSyncRun,
+        eventsSeen: Int,
+        eventsChanged: Int,
+        lastError: String,
+        runCheckpoint: ObjectNode? = null,
+    ): Boolean {
         val now = Instant.now(clock)
-        val nextAttemptAt = retryNextAttemptAtForClaimAttempts(now = now, attempts = claim.attempts, seed = claim.run.id)
+        val nextAttemptAt = now
         val requeued = syncRunRepository.requeueFenced(
             id = claim.run.id,
             lockedBy = claim.lockedBy,
@@ -176,6 +190,7 @@ class SyncRunLifecycleService(
             lastError = lastError.take(syncProperties.worker.maxErrorLength),
             nextAttemptAt = nextAttemptAt,
             updatedAt = now,
+            runCheckpoint = runCheckpoint,
         )
         if (requeued) {
             logger.warn(
@@ -193,6 +208,11 @@ class SyncRunLifecycleService(
         return requeued
     }
 
+    /**
+     * Requeues a run after a retryable failure, spending one of its failure attempts, or fails it
+     * once they are spent. A [runCheckpoint], the progress of an account pass, replaces the stored
+     * one, so the retry resumes where the failed claim stopped.
+     */
     @Transactional
     fun requeueFailure(
         claim: ClaimedSyncRun,
@@ -200,6 +220,7 @@ class SyncRunLifecycleService(
         eventsChanged: Int,
         lastError: String,
         retryAfter: Instant? = null,
+        runCheckpoint: ObjectNode? = null,
     ): Boolean {
         val now = Instant.now(clock)
         val expectedFailureAttempts = claim.run.failureAttempts
@@ -228,6 +249,7 @@ class SyncRunLifecycleService(
                 lastError = clippedError,
                 nextAttemptAt = nextAttemptAt,
                 updatedAt = now,
+                runCheckpoint = runCheckpoint,
             )
             if (requeued) {
                 logger.warn(
@@ -253,8 +275,9 @@ class SyncRunLifecycleService(
         eventsSeen: Int,
         eventsChanged: Int,
         reason: SyncRunRequeueReason,
-        runCheckpoint: com.fasterxml.jackson.databind.node.ObjectNode,
+        runCheckpoint: ObjectNode,
         delay: Duration,
+        lastError: String? = null,
     ): SyncRunContinuationRequeueResult {
         val now = Instant.now(clock)
         val result = syncRunRepository.requeueContinuationFenced(
@@ -270,6 +293,7 @@ class SyncRunLifecycleService(
             maxContinuationsPerRun = syncProperties.pagination.maxContinuationsPerRun,
             maxErrorLength = syncProperties.worker.maxErrorLength,
             updatedAt = now,
+            lastError = lastError,
         )
         when (result) {
             SyncRunContinuationRequeueResult.REQUEUED -> {
@@ -403,9 +427,6 @@ class SyncRunLifecycleService(
         }
         return cleared
     }
-
-    fun retryNextAttemptAtForClaimAttempts(now: Instant, attempts: Int, seed: UUID): Instant =
-        now.plus(backoffDelay(attempts = attempts, seed = seed))
 
     fun retryNextAttemptAt(now: Instant, failureAttempts: Int, seed: UUID): Instant =
         now.plus(backoffDelay(attempts = failureAttempts, seed = seed))

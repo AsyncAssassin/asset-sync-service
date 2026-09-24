@@ -42,7 +42,7 @@ class AlchemyRateLimiter(
                 Duration.ofNanos(ceil(missing / refillPerSecond * NANOS_PER_SECOND).toLong())
             }
             if (deadline != null && clock.instant().plus(wait).isAfter(deadline)) {
-                throw ChainProviderUnavailableException("Alchemy local rate limiter deadline exceeded.")
+                throw ChainProviderUnavailableException("Alchemy local rate limiter deadline exceeded.", throttled = true)
             }
             try {
                 sleeper(wait)

@@ -12,6 +12,8 @@ asset-sync:
   provider:
     base-url: http://localhost:1
   outbox:
+    gauges:
+      enabled: false
     scheduler:
       enabled: false
     retention:

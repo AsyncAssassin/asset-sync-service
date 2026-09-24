@@ -1,6 +1,7 @@
 package com.example.assetsync.infrastructure.provider.alchemy
 
 import com.example.assetsync.application.account.AssetConfigRepository
+import com.example.assetsync.application.isDatabaseFailure
 import com.example.assetsync.application.observability.AssetSyncMetrics
 import com.example.assetsync.application.sync.AddressConfigurationException
 import com.example.assetsync.application.sync.ChainProviderEventsPage
@@ -107,7 +108,11 @@ class AlchemyChainProvider(
             recordDataError(request, exception)
             throw exception
         } catch (exception: RuntimeException) {
-            recordFailure(request, exception)
+            // The service's own database failing the asset-config lookup is not an Alchemy outage:
+            // health keeps its state, and the run records the failure by its class.
+            if (!exception.isDatabaseFailure()) {
+                recordFailure(request, exception)
+            }
             throw exception
         }
 

@@ -86,10 +86,16 @@ data class ChainProviderObservedEvent(
     }
 }
 
+/**
+ * A retryable provider failure. [retryAfter] is when the provider asked to be called again;
+ * [throttled] marks a rate limit, the provider's or the service's own, which concerns every
+ * address rather than the one being fetched.
+ */
 class ChainProviderUnavailableException(
     message: String = "Provider is unavailable.",
     cause: Throwable? = null,
     val retryAfter: Instant? = null,
+    val throttled: Boolean = false,
 ) : RuntimeException(message, cause)
 
 class ProviderDataInvalidException(

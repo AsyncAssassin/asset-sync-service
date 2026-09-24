@@ -110,8 +110,8 @@ Expected behavior:
 - A request waits for a pooled connection up to the Hikari `connection-timeout`, 30 seconds by default.
 - A query already sent to a server that stopped answering ends after the 40-second JDBC socket timeout (`socketTimeout`), which sits above the 30-second `statement_timeout`; raise both together. A new connection gives up on the TCP connect after 5 seconds (`connectTimeout`).
 - A `COMMIT` is not bound by `statement_timeout`. One that waits longer than the socket timeout, behind a stalled synchronous standby or disk, answers `503` although PostgreSQL may still commit it, so a client that retries can repeat the change: a retried `POST /api/v1/accounts` with the same `externalRef` gets `409`, one without an `externalRef` creates a second account.
-- Every request with credentials reads the user store, so during the outage it waits for the connection timeout too, including authenticated `/actuator/metrics` and `/actuator/prometheus` requests; anonymous health probes do not.
-- A sync run that meets the outage records `Database error (<class>).` and is retried with backoff.
+- HTTP Basic reads the user store through a cache. A user loaded in the last minute comes from memory, and during the outage a user loaded in the last ten minutes stays accepted, never longer. Once a minute one request per such user reads the database again and waits the connection timeout before the cached user answers it; the other requests get the cached user at once. So `/actuator/metrics` and `/actuator/prometheus` keep answering for those users, except that one scrape a minute takes as long as the connection timeout, longer than a default Prometheus scrape timeout; the outbox gauges show their last background refresh. A user the cache does not hold waits for the connection timeout and gets `503`, and so does a cached user with a wrong password, so an outage does not tell which names were used lately; so does any request whose own handling needs the database. Anonymous health probes need no credentials.
+- A sync run that meets the outage records `Database error (<class>).` and is retried with backoff. That includes a failure inside an Alchemy fetch, whose asset-config lookup reads the database: it leaves the `alchemyChainProvider` health state alone instead of reporting an Alchemy outage.
 - Readiness health check fails.
 - No fake success response is returned.
 - No provider call should be started for a sync request if the initial `sync_run` cannot be created.
@@ -135,6 +135,7 @@ Expected behavior:
 - HTTP provider responses are bounded by `asset-sync.sync.pagination.max-provider-page-bytes` before JSON parsing.
 - A response that is still arriving when the deadline cancels the fetch stops being read within one `asset-sync.provider.read-timeout`, and a body over the limit or behind an error status is closed unread, so the provider thread returns to the pool; a trickling response cannot hold it for the length of its body.
 - Retryable provider failures requeue the current `sync_run` as `QUEUED` with bounded backoff.
+- In an account sync, a retryable failure of one address that is no throttling puts that address on a retry list instead: the pass goes on with the others, and the address gets the attempts and backoff of a run on its own schedule, as continuations (`ADDRESS_RETRY`) that spend no `failure_attempts`, until it syncs or its last attempt records it as failed. Pages it commits before a failure count as progress and start its count over. Three addresses failing in a row with no page committed between them fail the claim as an outage, which spends `failure_attempts` and counts against none of them, and the retried run resumes the pass. Throttling fails the claim at once, as above.
 - HTTP 429 is retryable provider backpressure, increments `failure_attempts`, and uses valid `Retry-After` values capped by the configured max backoff.
 - A fetch the full provider pool (`asset-sync.sync.provider-max-threads`) cannot take requeues the run as a continuation (`PROVIDER_BUSY`) after `cursor-lease-retry-delay`, like a busy cursor lease: the service's own capacity says nothing about the provider, so `failure_attempts` stays, and `max-continuations-per-run` bounds the retries.
 - At max attempts, the current `sync_run` is marked `FAILED` in a short fenced transaction.
@@ -322,9 +323,9 @@ Expected behavior:
 
 - The worker stops claiming new runs immediately and lets in-flight runs finish for up to `asset-sync.sync.worker.shutdown-timeout`; the web server drains HTTP requests concurrently within `spring.lifecycle.timeout-per-shutdown-phase`.
 - Runs that finish inside the window complete normally.
-- Runs still in flight afterwards are interrupted. An interrupted run is requeued as `QUEUED` with `last_requeue_reason = FAILURE` and a `last_error` naming the shutdown; `failure_attempts` is not incremented, so restarts never consume retry budget.
+- Runs still in flight afterwards are interrupted. An interrupted run is requeued as `QUEUED` with `last_requeue_reason = FAILURE` and a `last_error` naming the shutdown; `failure_attempts` is not incremented, so restarts never consume retry budget, and the run is due again at once, so the next instance takes it right after the deploy.
 - The cursor lease of an interrupted run is released before the run is requeued; if the release fails, the lease expires and recovery clears it.
-- Already committed page events remain valid; the next claim resumes from the durable checkpoint.
+- Already committed page events remain valid; the next claim resumes from the durable checkpoint. An account run keeps its pass as well, so the next claim goes on after the addresses the interrupted one finished.
 - The container stop timeout must outlast the shutdown phase. Docker Compose gives the application 40 seconds (`stop_grace_period`); with Docker's default of 10 seconds a run still in flight would be killed before it is requeued, stay `RUNNING` until recovery finds its expired lease, and lose one retry attempt.
 
 Operational signal:
