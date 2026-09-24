@@ -199,7 +199,21 @@ Response body, at most `max-provider-page-bytes`, with no string longer than 100
 - `latestBlockHeight`, `safeBlockHeight`: block high-water, optional; `safeBlockHeight` must not exceed `latestBlockHeight`.
 - `metadata`: an optional JSON object stored as the address checkpoint, at most `max-checkpoint-json-length` bytes.
 
-Status handling: `2xx` is parsed as above; `408`, `429` (honoring `Retry-After`), and `5xx` are retryable and spend the run's retry budget; `401` and `403` are terminal provider configuration failures, because the bridge refuses the service itself and every address would fail the same way; any other `4xx`, including `404` for an address the bridge does not know, malformed JSON or bytes that are not JSON text, a `null` element in `events`, and an oversized body are terminal provider data invalid for that address. A redirect (`3xx`) is not followed: it is a terminal provider configuration failure, because the operator configures `base-url` and retries cannot fix it. Only the retryable class and configuration failures turn the `httpChainProvider` health indicator `DOWN`.
+A bridge that scans block windows must return a cursor on every page. The service passes only the checkpoint of the last ingested event, and an address without events has none, so a bridge that resumed from the checkpoint alone would scan the same empty range on every sync.
+
+How each answer is handled:
+
+| Bridge answer | Class | Run | `httpChainProvider` health | `failure_attempts` |
+| --- | --- | --- | --- | --- |
+| `2xx` with a page that follows the rules above | success | continues | `UP` | — |
+| `2xx` with malformed JSON, bytes that are not JSON text, a `null` element in `events`, a body over `max-provider-page-bytes`, or a page that breaks a rule above | data of that address | `FAILED` | state kept, reason in `lastDataError` | not spent |
+| `404`, for an address the bridge does not know, and any other `4xx` not listed here | data of that address | `FAILED` | state kept, reason in `lastDataError` | not spent |
+| `401`, `403`: the bridge refuses the service itself, so every address would fail the same way | configuration | `FAILED` | `DOWN` | not spent |
+| `3xx`: not followed, because the operator configures `base-url` and retries cannot fix it | configuration | `FAILED` | `DOWN` | not spent |
+| `408`, `429` (honoring `Retry-After`), `5xx`, any other status | availability | retried with backoff | `DOWN` | spent |
+| a timeout, a refused connection, an unknown host, a TLS failure, or a body still arriving when the fetch is cancelled | availability | retried with backoff | `DOWN` | spent |
+
+`DOWN` lasts until the next successful fetch. A failure the bridge did not report itself is named by its kind, such as `Provider transport failure: timeout (SocketTimeoutException).`, never with the bridge URL. The client uses `asset-sync.provider.connect-timeout` and `read-timeout` (the longest pause between two reads), and `asset-sync.sync.provider-timeout` bounds the whole page, as described above.
 
 Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. A full provider pool (`SyncCapacityExceededException`) is the service's own capacity, not a provider failure: the run is requeued with backoff by claim count and does not increment `failure_attempts` either. Retryable provider failures, including 429 throttling, increment `failure_attempts`. Provider configuration failures (`ProviderConfigurationException`: rejected credentials, a chain without a provider network mapping, a fetch the configured provider cannot serve) are terminal like malformed pages, so they never burn the retry budget on attempts that cannot succeed.
 
