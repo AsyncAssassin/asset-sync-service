@@ -10,6 +10,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- Syncs skip an address whose chain is disabled, as they skip a disabled address: an account sync leaves it out, and `POST /api/v1/addresses/{addressId}/sync` answers `404 Unsupported chain`. Such an address failed every account sync it belonged to, so disabling a chain was not enough to take its addresses out.
 - HTTP Basic reads users through a one-minute cache, so a password changed or a user removed directly in the `users` table takes effect within a minute; changes through the service apply at once.
 
 ### Fixed

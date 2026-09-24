@@ -775,6 +775,37 @@ class SyncApiIntegrationTests(
     }
 
     @Test
+    fun `account sync skips an address whose chain is disabled, and address sync refuses it`() {
+        val accountId = createAccount()
+        registerAddress(accountId = accountId, address = "0xsync-enabled-chain")
+        // Registered while eth-mainnet was enabled; the seeded eth-mainnet chain is disabled.
+        val disabledChainAddressId = UUID.randomUUID()
+        jdbcTemplate.update(
+            """
+            INSERT INTO watched_addresses (id, account_id, chain_id, address, asset, label, status, created_at, updated_at)
+            VALUES (?, ?, 'eth-mainnet', '0x2222222222222222222222222222222222222222', 'USDC', NULL, 'ACTIVE', now(), now())
+            """.trimIndent(),
+            disabledChainAddressId,
+            UUID.fromString(accountId),
+        )
+        fakeChainProvider.setEvents(
+            chainId = "local-evm",
+            address = "0xsync-enabled-chain",
+            asset = "USDC",
+            events = listOf(providerEvent(txHash = "0xsync-enabled-chain", address = "0xsync-enabled-chain")),
+        )
+
+        val syncRunId = submitAccountSync(accountId)
+        runNextClaimedSyncs()
+
+        assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(listOf(FakeChainProviderKey("local-evm", "0xsync-enabled-chain", "USDC")), fakeChainProvider.requestedKeys())
+        mockMvc.perform(post("/api/v1/addresses/$disabledChainAddressId/sync"))
+            .andExpect(status().isNotFound)
+            .andExpect(jsonPath("$.title").value("Unsupported chain"))
+    }
+
+    @Test
     fun `account sync worker succeeds over multiple active watched addresses`() {
         val accountId = createAccount()
         registerAddress(accountId = accountId, address = "0xsync-account-one", asset = "USDC")

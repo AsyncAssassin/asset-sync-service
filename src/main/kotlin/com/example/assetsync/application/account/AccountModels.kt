@@ -115,15 +115,19 @@ interface WatchedAddressRepository {
 
     fun findActiveById(addressId: UUID): WatchedAddress?
 
+    /** An active address whose chain is enabled, the only kind a sync serves; null otherwise. */
+    fun findSyncableById(addressId: UUID): WatchedAddress?
+
     /**
-     * Active addresses of the account in `(created_at, id)` order, strictly after the keyset
-     * position when one is given, so a traversal survives addresses added or disabled meanwhile.
+     * Active addresses of the account on enabled chains in `(created_at, id)` order, strictly after
+     * the keyset position when one is given, so a traversal survives addresses added or disabled
+     * meanwhile. An address on a disabled chain is skipped like a disabled address.
      */
-    fun findActiveByAccountIdAfter(accountId: UUID, afterCreatedAt: Instant?, afterId: UUID?, limit: Int): List<WatchedAddress>
+    fun findSyncableByAccountIdAfter(accountId: UUID, afterCreatedAt: Instant?, afterId: UUID?, limit: Int): List<WatchedAddress>
 
     fun updateStatus(addressId: UUID, status: WatchedAddressStatus, updatedAt: Instant): WatchedAddress?
 
-    fun countActiveByAccountId(accountId: UUID): Int
+    fun countSyncableByAccountId(accountId: UUID): Int
 
     fun findActiveByNaturalKey(chainId: String, address: String, asset: String): WatchedAddress?
 }

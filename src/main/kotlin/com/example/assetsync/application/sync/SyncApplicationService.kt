@@ -54,8 +54,11 @@ class SyncApplicationService(
     private val logger = LoggerFactory.getLogger(SyncApplicationService::class.java)
 
     fun syncAddress(addressId: UUID): SyncRun {
-        watchedAddressRepository.findActiveById(addressId)
+        val address = watchedAddressRepository.findActiveById(addressId)
             ?: throw WatchedAddressByIdNotFoundException(addressId)
+        // Like a disabled address: an address whose chain is disabled is not synced.
+        watchedAddressRepository.findSyncableById(addressId)
+            ?: throw UnsupportedChainException(address.chainId)
         return syncRunLifecycleService.createQueued(SyncTargetType.ADDRESS, addressId)
     }
 
@@ -177,7 +180,7 @@ class SyncApplicationService(
             throw AccountNotFoundException(accountId)
         }
 
-        val activeAddressCount = watchedAddressRepository.countActiveByAccountId(accountId)
+        val activeAddressCount = watchedAddressRepository.countSyncableByAccountId(accountId)
         if (activeAddressCount > syncProperties.maxAccountSyncAddresses) {
             throw AccountSyncTooLargeException(
                 accountId = accountId,
@@ -187,7 +190,7 @@ class SyncApplicationService(
 
         val pass = AccountSyncPass.from(claim.run.runCheckpoint)
         while (!pass.scanComplete) {
-            val batch = watchedAddressRepository.findActiveByAccountIdAfter(
+            val batch = watchedAddressRepository.findSyncableByAccountIdAfter(
                 accountId = accountId,
                 afterCreatedAt = pass.scanAfterCreatedAt,
                 afterId = pass.scanAfterId,
@@ -228,10 +231,10 @@ class SyncApplicationService(
             if (claimBudgetExceeded(progress, runBudget)) {
                 return accountContinuation(pass, SyncRunRequeueReason.CONTINUATION)
             }
-            val watchedAddress = watchedAddressRepository.findActiveById(watchedAddressId)
+            val watchedAddress = watchedAddressRepository.findSyncableById(watchedAddressId)
                 ?.takeIf { it.accountId == accountId }
             if (watchedAddress == null) {
-                // Disabled or moved since it was deferred: no longer part of this account's pass.
+                // Disabled, on a chain disabled, or moved since it was deferred: no longer part of this pass.
                 pass.revisitDone(watchedAddressId)
                 continue
             }

@@ -416,7 +416,7 @@ Response shape is the same transaction object used by the list endpoint.
 
 ## 11. Start Address Sync
 
-Enqueues a durable sync run for one watched address. The POST request validates that the address exists, creates or reuses an in-flight `sync_runs` row, and returns before provider work starts. Local/test profiles use the fake provider; other profiles use the provider that `asset-sync.provider.type` selects, the HTTP bridge or Alchemy, from the background worker. Provider pagination and cursor checkpoints are internal; the public API exposes the durable run state only.
+Enqueues a durable sync run for one watched address. The POST request validates that the address exists and is active, and that its chain is enabled (an address on a disabled chain answers `404` with the title `Unsupported chain`), creates or reuses an in-flight `sync_runs` row, and returns before provider work starts. Local/test profiles use the fake provider; other profiles use the provider that `asset-sync.provider.type` selects, the HTTP bridge or Alchemy, from the background worker. Provider pagination and cursor checkpoints are internal; the public API exposes the durable run state only.
 
 Request:
 
@@ -507,7 +507,7 @@ Location: /api/v1/sync-runs/53059d5b-4813-4d6d-9f8e-6f993744e879
 
 Behavior:
 
-- Resolve active watched addresses in bounded pages.
+- Resolve active watched addresses on enabled chains in bounded pages. An address on a disabled chain is skipped, like a disabled address.
 - For each address, acquire the per-address cursor lease and fetch bounded provider pages until the page stream is done or a configured continuation limit is reached.
 - Ingest each provider event independently and checkpoint only after the full provider page is ingested.
 - A retryable provider failure requeues the overall sync run unless max attempts has been reached.
