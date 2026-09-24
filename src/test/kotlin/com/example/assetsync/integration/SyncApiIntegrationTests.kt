@@ -341,7 +341,59 @@ class SyncApiIntegrationTests(
     }
 
     @Test
-    fun `empty final page without cursor or high water is rejected without advancing checkpoint`() {
+    fun `idle final pages without cursor at an unchanged height succeed and keep the stored cursor`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-idle-same-height")
+        val addressId = watchedAddress["id"].asText()
+        // A bridge that answers "nothing new" without repeating its cursor, twice within one
+        // finality epoch: the safe block has not moved since the page that stored the cursor.
+        val idle = FakeChainProviderStep.Page(
+            FakeChainProviderPage(
+                expectedCursor = "bridge-c1",
+                events = emptyList(),
+                nextCursor = null,
+                hasMore = false,
+                latestBlockHeight = 110,
+                safeBlockHeight = 100,
+            ),
+        )
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-idle-same-height",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = listOf(providerEvent(txHash = "0xsync-idle-same-height-1", address = "0xsync-idle-same-height", blockHeight = 95)),
+                        nextCursor = "bridge-c1",
+                        hasMore = false,
+                        latestBlockHeight = 110,
+                        safeBlockHeight = 100,
+                    ),
+                ),
+                idle,
+                idle,
+            ),
+        )
+
+        val runIds = (1..3).map {
+            submitAddressSync(addressId).also { runNextClaimedSyncs() }
+        }
+
+        runIds.forEach { runId -> assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", runId)) }
+        val id = UUID.fromString(addressId)
+        assertEquals("bridge-c1", singleString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", id))
+        assertEquals(95L, singleLong("SELECT last_processed_block_height FROM sync_cursors WHERE watched_address_id = ?", id))
+        assertEquals(100L, singleLong("SELECT last_finalized_block_height FROM sync_cursors WHERE watched_address_id = ?", id))
+        assertEquals(
+            listOf(null, "bridge-c1", "bridge-c1"),
+            fakeChainProvider.requestedPageRequests().filter { it.key.address == "0xsync-idle-same-height" }.map { it.cursor },
+        )
+    }
+
+    @Test
+    fun `an empty final page without cursor or high water succeeds for a new address`() {
         val accountId = createAccount()
         val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-empty-no-progress")
         val addressId = watchedAddress["id"].asText()
@@ -365,13 +417,10 @@ class SyncApiIntegrationTests(
         val syncRunId = submitAddressSync(addressId)
         runNextClaimedSyncs()
 
-        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
-        assertTrue(
-            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId)
-                .contains("final page without a durable resume cursor or high-water checkpoint"),
-        )
-        assertEquals(0L, singleLong("SELECT version FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        // Nothing is stored yet, so the next request starts where this one did.
+        assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
         assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        assertNull(nullableLong("SELECT last_finalized_block_height FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
     }
 
     @Test

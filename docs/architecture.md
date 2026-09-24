@@ -195,7 +195,7 @@ Response body, at most `max-provider-page-bytes`, with no string longer than 100
 
 - `events` (required): objects with `txHash`, `eventIndex`, `address`, `asset`, `amount` (a JSON number or decimal string), `blockHeight`, `confirmations`, `direction` (`INBOUND` or `OUTBOUND`), and `status` (`SEEN`, `CONFIRMED`, or `REVERTED`), in non-decreasing `(blockHeight, eventIndex, txHash)` order and at most `limit` of them.
 - `hasMore` (required): whether another page follows now; `true` requires a `nextCursor` that differs from the request cursor.
-- `nextCursor` or `resumeCursor`: the opaque token for the next request; when both are sent they must be equal. A final page may omit it only when it carries events or `safeBlockHeight` / `latestBlockHeight` progress. After such a page the stored cursor is kept when the page had no events and cleared when it had some, because replaying from the old cursor would return those events behind the checkpoint.
+- `nextCursor` or `resumeCursor`: the opaque token for the next request; when both are sent they must be equal. A final page may omit it, with or without new events or heights. After such a page the stored cursor is kept when the page had no events and cleared when it had some, because replaying from the old cursor would return those events behind the checkpoint; the next request carries the stored cursor or the checkpoint either way.
 - `latestBlockHeight`, `safeBlockHeight`: block high-water, optional; `safeBlockHeight` must not exceed `latestBlockHeight`.
 - `metadata`: an optional JSON object stored as the address checkpoint, at most `max-checkpoint-json-length` bytes.
 

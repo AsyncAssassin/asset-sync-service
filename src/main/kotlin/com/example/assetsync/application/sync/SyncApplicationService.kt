@@ -647,9 +647,8 @@ class SyncApplicationService(
         if (page.hasMore && page.nextCursor == request.cursor) {
             throw ProviderDataInvalidException("Provider returned hasMore=true without cursor progress.")
         }
-        if (!page.hasMore && page.nextCursor == null && !hasDurableResumeProgressAfterPage(current = current, page = page)) {
-            throw ProviderDataInvalidException("Provider returned a final page without a durable resume cursor or high-water checkpoint.")
-        }
+        // A final page may omit its cursor: the stored one or the checkpoint resumes the next sync
+        // (resolveDurableProviderCursor), and stored heights never go backwards.
 
         val expected = ChainIdentityNormalizer.normalize(
             chainId = request.chainId,
@@ -700,15 +699,6 @@ class SyncApplicationService(
                 throw ProviderDataInvalidException("Provider returned an event behind the stored checkpoint.")
             }
         }
-    }
-
-    private fun hasDurableResumeProgressAfterPage(current: SyncCursor, page: ChainProviderEventsPage): Boolean =
-        page.events.isNotEmpty() || hasProviderHighWaterProgress(current = current, page = page)
-
-    private fun hasProviderHighWaterProgress(current: SyncCursor, page: ChainProviderEventsPage): Boolean {
-        val pageHighWater = pageDurableBlockHighWater(page) ?: return false
-        val currentHighWater = current.lastFinalizedBlockHeight
-        return currentHighWater == null || pageHighWater > currentHighWater
     }
 
     private fun resolveDurableHighWater(current: SyncCursor, page: ChainProviderEventsPage): DurableHighWater {

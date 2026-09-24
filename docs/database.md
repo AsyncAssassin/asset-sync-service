@@ -503,7 +503,7 @@ Notes:
 
 - Provider fetches never run inside the cursor lease transaction. The worker acquires the lease, fetches one page outside a DB transaction, ingests the full page, then advances the checkpoint with `locked_by + lock_token + version + locked_until >= now` fencing.
 - A cursor heartbeat extends `locked_until` while a page fetch or ingest is in progress. If the heartbeat or the pre-checkpoint lease extension fails, the worker treats the checkpoint owner as stale and does not advance.
-- `advanceCheckpointFenced` preserves high-water columns when a final empty page or cursor-only page supplies null block fields. SQL also uses `COALESCE` as defense in depth. Final empty pages without `nextCursor` are valid only when the provider supplies durable block high-water such as `safeBlockHeight` or `latestBlockHeight`.
+- `advanceCheckpointFenced` preserves high-water columns when a final empty page or cursor-only page supplies null block fields. SQL also uses `COALESCE` as defense in depth. A final page may omit `nextCursor`: the stored cursor is kept after one without events and cleared after one with events, and stored heights never go backwards.
 - A failed checkpoint advance after committed events is safe: retry starts from the old cursor and replays the page idempotently.
 - Under the Alchemy provider `provider_cursor` is `{"v":1,"p":"alchemy","nextBlock":N}` (always a block boundary, never a `pageKey` or log index) and `checkpoint` holds the scan diagnostics: provider, chain, network, asset, contract, `scan` mode and counters, `nextBlock`, latest and safe heights, finality mode and fallback flag, `initialStartBlock`, `highWaterAdjusted`, and the skip counters.
 
