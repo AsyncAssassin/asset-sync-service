@@ -180,6 +180,7 @@ interface SyncRunRepository {
         maxContinuationsPerRun: Int,
         maxErrorLength: Int,
         updatedAt: Instant,
+        lastError: String? = null,
     ): SyncRunContinuationRequeueResult
 
     /** Requeues a retryable failure; a non-null [runCheckpoint] replaces the stored one. */

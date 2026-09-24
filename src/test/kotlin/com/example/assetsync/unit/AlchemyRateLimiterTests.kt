@@ -48,6 +48,7 @@ class AlchemyRateLimiterTests {
         }
 
         assertTrue(exception.message!!.contains("rate limiter deadline exceeded"), exception.message)
+        assertTrue(exception.throttled)
         assertEquals(emptyList(), sleeps)
 
         limiter.acquire(deadline = clock.instant().plus(Duration.ofSeconds(2)))

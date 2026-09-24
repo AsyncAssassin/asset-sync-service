@@ -160,10 +160,13 @@ class HttpChainProviderHealthIndicatorTests {
 
         val retryAfter = assertNotNull(throttled.retryAfter)
         assertTrue(retryAfter.isAfter(before))
+        assertTrue(throttled.throttled)
 
         retryAfterHeader.set("not-a-date")
         val invalidRetryAfter = assertThrows<ChainProviderUnavailableException> { provider.fetchObservedEventsPage(pageRequest()) }
         assertNull(invalidRetryAfter.retryAfter)
+        // Without a usable Retry-After it is still a rate limit of the whole provider.
+        assertTrue(invalidRetryAfter.throttled)
     }
 
     @Test

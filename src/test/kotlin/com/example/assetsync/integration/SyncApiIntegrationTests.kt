@@ -1197,7 +1197,30 @@ class SyncApiIntegrationTests(
     }
 
     @Test
-    fun `events of a chain disabled after registration fail the run terminally`() {
+    fun `a requeue reason written by a later version does not stop this one from reading the run`() {
+        val accountId = createAccount()
+        val addressId = registerAddress(accountId = accountId, address = "0xsync-later-reason")["id"].asText()
+        val syncRunId = submitAddressSync(addressId)
+        // After a rollback, the database keeps values this version does not know.
+        jdbcTemplate.execute("ALTER TABLE sync_runs DROP CONSTRAINT ck_sync_runs_last_requeue_reason")
+        try {
+            jdbcTemplate.update("UPDATE sync_runs SET last_requeue_reason = 'FROM_A_LATER_VERSION' WHERE id = ?", syncRunId)
+
+            mockMvc.perform(get("/api/v1/sync-runs/$syncRunId")).andExpect(status().isOk)
+            runNextClaimedSyncs()
+
+            assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        } finally {
+            jdbcTemplate.update("UPDATE sync_runs SET last_requeue_reason = NULL WHERE last_requeue_reason = 'FROM_A_LATER_VERSION'")
+            jdbcTemplate.execute(
+                "ALTER TABLE sync_runs ADD CONSTRAINT ck_sync_runs_last_requeue_reason CHECK (last_requeue_reason IS NULL " +
+                    "OR last_requeue_reason IN ('FAILURE', 'CONTINUATION', 'LEASE_BUSY', 'PROVIDER_BUSY', 'ADDRESS_RETRY'))",
+            )
+        }
+    }
+
+    @Test
+    fun `a run queued before its chain was disabled fails without calling the provider`() {
         val accountId = createAccount()
         val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-disabled-chain")
         val addressId = watchedAddress["id"].asText()
@@ -1216,10 +1239,11 @@ class SyncApiIntegrationTests(
         assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
         assertEquals(1, singleInt("SELECT attempts FROM sync_runs WHERE id = ?", syncRunId))
         assertEquals(
-            "Chain local-evm is not enabled, so its events cannot be ingested.",
+            "Chain local-evm is not enabled, so its addresses are not synced.",
             singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId),
         )
         assertEquals(0, tableCount("observed_transactions"))
+        assertEquals(emptyList(), fakeChainProvider.requestedKeys())
     }
 
     @Test

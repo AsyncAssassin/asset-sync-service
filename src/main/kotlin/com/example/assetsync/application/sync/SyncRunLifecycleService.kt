@@ -277,6 +277,7 @@ class SyncRunLifecycleService(
         reason: SyncRunRequeueReason,
         runCheckpoint: ObjectNode,
         delay: Duration,
+        lastError: String? = null,
     ): SyncRunContinuationRequeueResult {
         val now = Instant.now(clock)
         val result = syncRunRepository.requeueContinuationFenced(
@@ -292,6 +293,7 @@ class SyncRunLifecycleService(
             maxContinuationsPerRun = syncProperties.pagination.maxContinuationsPerRun,
             maxErrorLength = syncProperties.worker.maxErrorLength,
             updatedAt = now,
+            lastError = lastError,
         )
         when (result) {
             SyncRunContinuationRequeueResult.REQUEUED -> {

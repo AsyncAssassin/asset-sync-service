@@ -112,6 +112,7 @@ class HttpChainProvider @Autowired constructor(
                                 throw ChainProviderUnavailableException(
                                     message = "Provider rate limited the request with HTTP 429.",
                                     retryAfter = parseRetryAfter(response.headers.getFirst(HttpHeaders.RETRY_AFTER)),
+                                    throttled = true,
                                 )
                             statusCode.is5xxServerError ->
                                 throw ChainProviderUnavailableException("Provider returned HTTP ${statusCode.value()}.")

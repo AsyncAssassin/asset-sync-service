@@ -178,6 +178,7 @@ class AlchemyJsonRpcClient(
                 throw ChainProviderUnavailableException(
                     message = "Alchemy rate limited the request with HTTP 429 for network $network.",
                     retryAfter = ProviderHttpSupport.parseRetryAfter(response.headers.getFirst(HttpHeaders.RETRY_AFTER)),
+                    throttled = true,
                 )
             code == HttpStatus.REQUEST_TIMEOUT.value() || status.is5xxServerError ->
                 throw ChainProviderUnavailableException("Alchemy returned HTTP $code for network $network.")
@@ -238,6 +239,10 @@ class AlchemyJsonRpcClient(
             JSON_RPC_PARSE_ERROR, JSON_RPC_METHOD_NOT_FOUND, JSON_RPC_INVALID_PARAMS -> ProviderDataInvalidException(
                 "Alchemy JSON-RPC error $code for $method on network $network.",
             )
+            JSON_RPC_RATE_LIMITED, JSON_RPC_LIMIT_EXCEEDED -> ChainProviderUnavailableException(
+                message = "Alchemy JSON-RPC error $code for $method on network $network; the request was rate limited.",
+                throttled = true,
+            )
             else -> ChainProviderUnavailableException(
                 "Alchemy JSON-RPC error ${code ?: "without a code"} for $method on network $network.",
             )
@@ -283,6 +288,10 @@ class AlchemyJsonRpcClient(
         private const val JSON_RPC_INVALID_REQUEST = -32600
         private const val JSON_RPC_METHOD_NOT_FOUND = -32601
         private const val JSON_RPC_INVALID_PARAMS = -32602
+
+        // Rate limits in a JSON-RPC envelope: Alchemy's own code, and the one other nodes use.
+        private const val JSON_RPC_RATE_LIMITED = 429
+        private const val JSON_RPC_LIMIT_EXCEEDED = -32005
         private val HEX_QUANTITY = Regex("^0x[0-9a-fA-F]{1,15}$")
     }
 }

@@ -224,6 +224,7 @@ class JooqSyncRunRepository(
         maxContinuationsPerRun: Int,
         maxErrorLength: Int,
         updatedAt: Instant,
+        lastError: String?,
     ): SyncRunContinuationRequeueResult {
         require(maxContinuationsPerRun >= 0) { "maxContinuationsPerRun must not be negative." }
         require(maxErrorLength > 0) { "maxErrorLength must be positive." }
@@ -242,7 +243,7 @@ class JooqSyncRunRepository(
                 SYNC_RUNS.LAST_ERROR,
                 DSL.`when`(
                     withinLimit,
-                    DSL.inline(null, SYNC_RUNS.LAST_ERROR.dataType),
+                    lastError?.let { DSL.`val`(it.take(maxErrorLength), SYNC_RUNS.LAST_ERROR) } ?: DSL.inline(null, SYNC_RUNS.LAST_ERROR.dataType),
                 ).otherwise("continuation limit exceeded".take(maxErrorLength)),
             )
             .set(SYNC_RUNS.LAST_REQUEUE_REASON, reason.name)
@@ -434,7 +435,8 @@ class JooqSyncRunRepository(
             failureAttempts = requireNotNull(get(SYNC_RUNS.FAILURE_ATTEMPTS)),
             continuationCount = requireNotNull(get(SYNC_RUNS.CONTINUATION_COUNT)),
             runCheckpoint = get(SYNC_RUNS.RUN_CHECKPOINT).toObjectNode(),
-            lastRequeueReason = get(SYNC_RUNS.LAST_REQUEUE_REASON)?.let { SyncRunRequeueReason.valueOf(it) },
+            // A value this version does not know was written by a later one: rolled back, the run still reads.
+            lastRequeueReason = get(SYNC_RUNS.LAST_REQUEUE_REASON)?.let { reason -> SyncRunRequeueReason.entries.find { it.name == reason } },
             createdAt = requireNotNull(get(SYNC_RUNS.CREATED_AT)).toInstant(),
             updatedAt = requireNotNull(get(SYNC_RUNS.UPDATED_AT)).toInstant(),
         )

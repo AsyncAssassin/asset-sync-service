@@ -3,49 +3,56 @@ package com.example.assetsync.unit
 import com.example.assetsync.application.account.WatchedAddress
 import com.example.assetsync.application.account.WatchedAddressStatus
 import com.example.assetsync.application.sync.AccountSyncPass
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * The account pass as the run checkpoint carries it from claim to claim: retries keep their
- * counts, and the checkpoint fits the 16 KiB of `run_checkpoint` with every list full.
+ * The account pass as the run checkpoint carries it from claim to claim: each address waits for
+ * its retry on its own schedule, keeps its count across claims, and the checkpoint fits the 16 KiB
+ * of `run_checkpoint` with every list full.
  */
 class AccountSyncPassTests {
 
+    private val start = Instant.parse("2026-09-24T12:00:00Z")
+    private val backoff = { failedAttempts: Int -> start.plus(Duration.ofSeconds(30L * failedAttempts)) }
+
     @Test
-    fun `an address deferred to a retry is retried by the next claim, and its third failed retry records it`() {
+    fun `an address waits for its retry, keeps its count across claims, and its last attempt records it`() {
         val stuck = UUID.randomUUID()
-        val other = UUID.randomUUID()
         val pass = AccountSyncPass.from(null)
-        pass.deferRetry(stuck)
-        pass.deferRetry(other)
-        assertEquals(emptyList(), pass.dueRetries(), "the claim that deferred them does not retry them")
+        pass.deferRetry(stuck, start)
+        assertEquals(listOf(stuck), pass.dueRetries(start))
+
+        pass.countFailedAttempt(stuck, TIMEOUT, maxAttempts = 3, retryAt = backoff)
+        assertEquals(emptyList(), pass.dueRetries(start.plusSeconds(29)), "it waits for its backoff")
+        assertEquals(start.plusSeconds(30), pass.nextRetryAt())
 
         val next = AccountSyncPass.from(pass.toCheckpoint())
-        assertEquals(listOf(stuck, other), next.dueRetries())
-        next.retryFailed(stuck, TIMEOUT)
-        next.retryFailed(stuck, TIMEOUT)
+        assertEquals(listOf(stuck), next.dueRetries(start.plusSeconds(30)))
+        next.countFailedAttempt(stuck, TIMEOUT, maxAttempts = 3, retryAt = backoff)
+        assertFalse(next.hasFailures)
+        assertEquals("1 address waits for a retry after a retryable provider failure, the last: $TIMEOUT", next.retrySummary())
 
-        val last = AccountSyncPass.from(next.toCheckpoint())
-        assertFalse(last.hasFailures)
-        last.retryFailed(stuck, TIMEOUT)
-
-        assertEquals(listOf(other), last.dueRetries())
-        assertTrue(last.failureSummary().endsWith("$stuck: still failing after 3 retries: $TIMEOUT"), last.failureSummary())
+        next.countFailedAttempt(stuck, TIMEOUT, maxAttempts = 3, retryAt = backoff)
+        assertFalse(next.hasPendingRetries)
+        assertNull(next.retrySummary())
+        assertTrue(next.failureSummary().endsWith("$stuck: failed 3 times: $TIMEOUT"), next.failureSummary())
     }
 
     @Test
-    fun `a retry that syncs pages starts its count over`() {
+    fun `a retry that commits pages starts its count over`() {
         val address = UUID.randomUUID()
         val pass = AccountSyncPass.from(null)
-        pass.deferRetry(address)
-        repeat(2) { pass.retryFailed(address, TIMEOUT) }
-        pass.retryProgressed(address)
-        repeat(2) { pass.retryFailed(address, TIMEOUT) }
+        pass.deferRetry(address, start)
+        repeat(2) { pass.countFailedAttempt(address, TIMEOUT, maxAttempts = 3, retryAt = backoff) }
+        pass.retryProgressed(address, start.plusSeconds(100))
+        repeat(2) { pass.countFailedAttempt(address, TIMEOUT, maxAttempts = 3, retryAt = backoff) }
 
         assertFalse(pass.hasFailures)
         assertTrue(pass.hasPendingRetries)
@@ -54,9 +61,9 @@ class AccountSyncPassTests {
     @Test
     fun `the retry list is capped`() {
         val pass = AccountSyncPass.from(null)
-        repeat(AccountSyncPass.MAX_RETRIES) { assertTrue(pass.deferRetry(UUID.randomUUID())) }
+        repeat(AccountSyncPass.MAX_RETRIES) { assertTrue(pass.deferRetry(UUID.randomUUID(), start)) }
 
-        assertFalse(pass.deferRetry(UUID.randomUUID()))
+        assertFalse(pass.deferRetry(UUID.randomUUID(), start))
     }
 
     @Test
@@ -74,9 +81,14 @@ class AccountSyncPassTests {
         val pass = AccountSyncPass.from(null)
         pass.advancePast(watchedAddress())
         repeat(AccountSyncPass.MAX_REVISITS) { pass.deferBusy(UUID.randomUUID()) }
-        repeat(AccountSyncPass.MAX_RETRIES) { pass.deferRetry(UUID.randomUUID()) }
         // Quotes and backslashes take two bytes each in JSON, the most a kept character can take.
-        repeat(AccountSyncPass.MAX_RECORDED_FAILURES + 1) { pass.recordFailure(UUID.randomUUID(), "\"\\".repeat(100)) }
+        val longest = "\"\\".repeat(100)
+        repeat(AccountSyncPass.MAX_RETRIES) {
+            val address = UUID.randomUUID()
+            pass.deferRetry(address, start)
+            pass.countFailedAttempt(address, longest, maxAttempts = Int.MAX_VALUE, retryAt = { Instant.MAX.minusSeconds(1) })
+        }
+        repeat(AccountSyncPass.MAX_RECORDED_FAILURES + 1) { pass.recordFailure(UUID.randomUUID(), longest) }
 
         val compact = pass.toCheckpoint().toString()
         // PostgreSQL prints jsonb with a space after every ':' and ','.

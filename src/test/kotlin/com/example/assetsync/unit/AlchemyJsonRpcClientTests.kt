@@ -98,6 +98,7 @@ class AlchemyJsonRpcClientTests {
         val retryAfter = assertNotNull(throttled.retryAfter)
         assertTrue(retryAfter.isAfter(before))
         assertTrue(throttled.message!!.contains("HTTP 429"), throttled.message)
+        assertTrue(throttled.throttled)
 
         stub.retryAfter = null
         listOf(408, 500, 502, 503).forEach { status ->
@@ -132,10 +133,14 @@ class AlchemyJsonRpcClientTests {
         stub.responseBody = """{"jsonrpc":"2.0","id":1,"error":{"code":429,"message":"capacity exceeded"}}"""
         val throughput = assertThrows<ChainProviderUnavailableException> { client().blockNumber("eth-sepolia") }
         assertTrue(throughput.message!!.contains("JSON-RPC error 429"), throughput.message)
+        assertTrue(throughput.throttled)
+        stub.responseBody = """{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"limit exceeded"}}"""
+        assertTrue(assertThrows<ChainProviderUnavailableException> { client().blockNumber("eth-sepolia") }.throttled)
 
         stub.responseBody = """{"jsonrpc":"2.0","id":1,"error":{"message":"no code"}}"""
         val withoutCode = assertThrows<ChainProviderUnavailableException> { client().blockNumber("eth-sepolia") }
         assertTrue(withoutCode.message!!.contains("without a code"), withoutCode.message)
+        assertFalse(withoutCode.throttled)
     }
 
     @Test
