@@ -108,7 +108,7 @@ Content-Type: application/json
 Validation:
 
 - `externalRef` is optional.
-- If provided, `externalRef` must be non-blank after trimming.
+- If provided, `externalRef` must be non-blank after trimming and must not contain control characters other than tabs and line breaks.
 - Duplicate `externalRef` values are rejected with `409 Conflict`.
 - `externalRef = null` creates a new anonymous account on every request; deployments should quota or authenticate callers before exposing that mode.
 
@@ -183,7 +183,8 @@ Validation:
 - `address` is required and must be non-blank.
 - `address` must be well formed for the chain once normalized: `0x` followed by 40 hex digits, in any casing, on `eth-sepolia` and `eth-mainnet`; no whitespace, `/`, or `:` on `local-evm`, which keeps accepting synthetic identifiers such as `0xdemoaddr`; no control characters on any chain. A malformed address returns `400` with `invalid-request` and the `chainId`, after the chain and asset checks.
 - `asset` is required and must be non-blank.
-- `label` is optional; if provided, it must be non-blank after trimming.
+- `chainId` and `asset` must not contain control characters (U+0000 to U+001F and U+007F).
+- `label` is optional; if provided, it must be non-blank after trimming and must not contain control characters other than tabs and line breaks.
 - Duplicate canonical `chainId + address + asset` registrations are rejected with `409 Conflict`.
 
 Address normalization is chain-specific. For the EVM chains `local-evm`, `eth-sepolia`, and `eth-mainnet`, address and transaction-hash identity is lower-case and asset identity is upper-case before uniqueness checks and format rules. Other chains currently trim and preserve exact strings until their policies are defined.
@@ -331,7 +332,7 @@ HTTP/1.1 200 OK
 
 Validation:
 
-- `chainId`, `txHash`, `address`, and `asset` are required and must be non-blank.
+- `chainId`, `txHash`, `address`, and `asset` are required and must be non-blank. `chainId`, `address`, and `asset` must not contain control characters (U+0000 to U+001F and U+007F).
 - `txHash` follows the address format rules of its chain, with 64 hex digits instead of 40 on `eth-sepolia` and `eth-mainnet`; a malformed hash returns `400` with `invalid-request`.
 - `eventIndex` is required and must be `>= 0`.
 - `amount` is required, must parse as a non-negative decimal, exponent notation such as `1e2` included, and must fit `numeric(38, 18)`: at most 20 integer and 18 fraction digits. It is stored at scale 18. A value longer than 80 characters is refused by its length alone, before it is parsed.

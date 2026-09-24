@@ -15,6 +15,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- A control character in `externalRef`, `label`, `chainId`, `asset`, or an ingested `address` fails validation with a `400 validation-failed` that names the field; `externalRef` and `label` may still hold tabs and line breaks. A NUL byte used to reach PostgreSQL, which cannot store it, and came back as `400 database-constraint-violation` with a WARN line.
 - A number with a fraction in an integer field fails the request with `400 invalid-request`. Jackson dropped the fraction, so an `eventIndex` of `1.9` was stored as `1`. A bridge page with such a number is now bad data of that address.
 - A validation error names the field it is about: `amount: amount must be a non-negative decimal string that fits numeric(38,18)` instead of `amountValid: …`, and the same for `direction` and `status`.
 - `HEAD` and `OPTIONS` on the API need the `READ` role, like `GET`; they needed `OPERATOR`. The OpenAPI document declares its `403` from the same set of methods, and says that `401` and `403` do not occur in `local` and `test`.
