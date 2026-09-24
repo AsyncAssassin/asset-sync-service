@@ -105,6 +105,10 @@ class HttpChainProvider @Autowired constructor(
                     }
                     .exchange { _, response ->
                         val statusCode = response.statusCode
+                        if (!statusCode.is2xxSuccessful) {
+                            // Its body is never read, and Spring's close() would drain it first.
+                            ProviderHttpSupport.closeUnread { response.body }
+                        }
                         when {
                             statusCode.is2xxSuccessful -> parseSuccessfulResponse(request = request, body = response.body)
                             statusCode.value() == HttpStatus.REQUEST_TIMEOUT.value() ->
@@ -201,9 +205,12 @@ class HttpChainProvider @Autowired constructor(
     }
 
     private fun readBounded(body: InputStream, maxBytes: Int): ByteArray =
-        ProviderHttpSupport.readBounded(body, maxBytes) {
-            ProviderDataInvalidException("Provider response exceeded the configured byte limit.")
-        }
+        ProviderHttpSupport.readBounded(
+            body = body,
+            maxBytes = maxBytes,
+            onOverflow = { ProviderDataInvalidException("Provider response exceeded the configured byte limit.") },
+            onCancelled = { ChainProviderUnavailableException("Provider fetch was cancelled while its response was being read.") },
+        )
 
     private fun parseRetryAfter(value: String?): Instant? = ProviderHttpSupport.parseRetryAfter(value)
 

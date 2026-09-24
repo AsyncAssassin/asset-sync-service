@@ -133,6 +133,7 @@ Expected behavior:
 - Provider call is outside a database transaction and outside the request thread.
 - `asset-sync.sync.provider-timeout` is the deadline for one provider page fetch.
 - HTTP provider responses are bounded by `asset-sync.sync.pagination.max-provider-page-bytes` before JSON parsing.
+- A response that is still arriving when the deadline cancels the fetch stops being read within one `asset-sync.provider.read-timeout`, and a body over the limit or behind an error status is closed unread, so the provider thread returns to the pool; a trickling response cannot hold it for the length of its body.
 - Retryable provider failures requeue the current `sync_run` as `QUEUED` with bounded backoff.
 - HTTP 429 is retryable provider backpressure, increments `failure_attempts`, and uses valid `Retry-After` values capped by the configured max backoff.
 - At max attempts, the current `sync_run` is marked `FAILED` in a short fenced transaction.

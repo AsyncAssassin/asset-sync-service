@@ -161,6 +161,10 @@ class AlchemyJsonRpcClient(
     ): JsonNode {
         val status = response.statusCode
         val code = status.value()
+        if (!status.is2xxSuccessful) {
+            // Its body is never read, and Spring's close() would drain it first.
+            ProviderHttpSupport.closeUnread { response.body }
+        }
         return when {
             status.is2xxSuccessful -> parseResult(network = network, method = method, body = response.body, allowNullResult = allowNullResult)
             code == HttpStatus.UNAUTHORIZED.value() || code == HttpStatus.FORBIDDEN.value() ->
@@ -186,9 +190,16 @@ class AlchemyJsonRpcClient(
     }
 
     private fun parseResult(network: String, method: String, body: InputStream, allowNullResult: Boolean): JsonNode {
-        val bytes = ProviderHttpSupport.readBounded(body, maxResponseBytes) {
-            ProviderDataInvalidException("Alchemy response for $method on network $network exceeded the configured byte limit.")
-        }
+        val bytes = ProviderHttpSupport.readBounded(
+            body = body,
+            maxBytes = maxResponseBytes,
+            onOverflow = {
+                ProviderDataInvalidException("Alchemy response for $method on network $network exceeded the configured byte limit.")
+            },
+            onCancelled = {
+                ChainProviderUnavailableException("Alchemy fetch was cancelled while the $method response was being read on network $network.")
+            },
+        )
         val node = try {
             objectMapper.readTree(bytes)
         } catch (exception: JsonProcessingException) {

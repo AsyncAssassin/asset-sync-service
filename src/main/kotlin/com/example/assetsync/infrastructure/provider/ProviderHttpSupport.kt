@@ -47,21 +47,56 @@ internal object ProviderHttpSupport {
         return parsed?.takeIf { it.isAfter(now) }
     }
 
-    /** Reads at most [maxBytes]; the first byte beyond it throws [onOverflow] without buffering the rest. */
-    fun readBounded(body: InputStream, maxBytes: Int, onOverflow: () -> RuntimeException): ByteArray {
+    /**
+     * Reads at most [maxBytes] of [body]. The first byte beyond the limit throws [onOverflow]
+     * without buffering the rest. An interrupted thread throws [onCancelled]: that is how the
+     * provider timeout (`Future.cancel(true)`) reaches a read in progress, because a blocked socket
+     * read ignores the interrupt but returns within one read timeout, or at once while a slow body
+     * keeps trickling.
+     *
+     * On any failure the body is closed here, unread. Spring's `close()` of the response drains
+     * the rest first, so otherwise a failed read of an oversized, slow, or endless body would keep
+     * the provider thread reading after the fetch had given up.
+     */
+    fun readBounded(
+        body: InputStream,
+        maxBytes: Int,
+        onOverflow: () -> RuntimeException,
+        onCancelled: () -> RuntimeException,
+    ): ByteArray {
         val buffer = ByteArray(BUFFER_SIZE)
         val output = ByteArrayOutputStream(minOf(maxBytes, BUFFER_SIZE))
         var total = 0
-        while (true) {
-            val read = body.read(buffer)
-            if (read < 0) {
-                return output.toByteArray()
+        try {
+            while (true) {
+                if (Thread.currentThread().isInterrupted) {
+                    throw onCancelled()
+                }
+                val read = body.read(buffer)
+                if (read < 0) {
+                    return output.toByteArray()
+                }
+                total += read
+                if (total > maxBytes) {
+                    throw onOverflow()
+                }
+                output.write(buffer, 0, read)
             }
-            total += read
-            if (total > maxBytes) {
-                throw onOverflow()
-            }
-            output.write(buffer, 0, read)
+        } catch (exception: Exception) {
+            closeUnread(body)
+            throw exception
         }
+    }
+
+    /**
+     * Closes the body of a response that will not be read, such as an error status, so that
+     * Spring's `close()` has nothing left to drain; see [readBounded].
+     */
+    fun closeUnread(body: () -> InputStream) {
+        runCatching { body().close() }
+    }
+
+    private fun closeUnread(body: InputStream) {
+        runCatching { body.close() }
     }
 }
