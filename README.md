@@ -367,6 +367,8 @@ Runtime configuration:
 | `ASSET_SYNC_OUTBOX_PROCESSING_LEASE` | `5m` | Outbox processing lease stored in `next_attempt_at` |
 | `ASSET_SYNC_OUTBOX_MAX_ATTEMPTS` | `10` | Attempts before an outbox row becomes `DEAD` |
 | `ASSET_SYNC_OUTBOX_MAX_ERROR_LENGTH` | `1024` | Stored publisher error limit |
+| `ASSET_SYNC_OUTBOX_GAUGES_ENABLED` | `true` | Enables the background refresh of the outbox backlog and dead-row gauges |
+| `ASSET_SYNC_OUTBOX_GAUGES_FIXED_DELAY` | `10s` | Delay between gauge refreshes |
 | `ASSET_SYNC_OUTBOX_SCHEDULER_ENABLED` | `true` | Enables the scheduled outbox poller |
 | `ASSET_SYNC_OUTBOX_SCHEDULER_FIXED_DELAY` | `5s` | Delay between poller runs |
 | `ASSET_SYNC_OUTBOX_SCHEDULER_INITIAL_DELAY` | `10s` | Initial delay before first poll |

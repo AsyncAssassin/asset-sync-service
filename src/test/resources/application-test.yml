@@ -10,6 +10,8 @@ spring:
 
 asset-sync:
   outbox:
+    gauges:
+      enabled: false
     scheduler:
       enabled: false
     retention:

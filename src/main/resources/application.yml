@@ -172,6 +172,10 @@ asset-sync:
       batch-size: ${ASSET_SYNC_OUTBOX_RETENTION_BATCH_SIZE:1000}
       fixed-delay: ${ASSET_SYNC_OUTBOX_RETENTION_FIXED_DELAY:1h}
       initial-delay: ${ASSET_SYNC_OUTBOX_RETENTION_INITIAL_DELAY:5m}
+    gauges:
+      # Background refresh of asset.sync.outbox.backlog.total and asset.sync.outbox.dead.total.
+      enabled: ${ASSET_SYNC_OUTBOX_GAUGES_ENABLED:true}
+      fixed-delay: ${ASSET_SYNC_OUTBOX_GAUGES_FIXED_DELAY:10s}
     scheduler:
       enabled: ${ASSET_SYNC_OUTBOX_SCHEDULER_ENABLED:true}
       fixed-delay: ${ASSET_SYNC_OUTBOX_SCHEDULER_FIXED_DELAY:5s}

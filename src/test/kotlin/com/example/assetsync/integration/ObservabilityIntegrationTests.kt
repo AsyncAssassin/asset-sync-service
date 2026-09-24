@@ -8,6 +8,7 @@ import com.example.assetsync.application.sync.SyncApplicationService
 import com.example.assetsync.application.sync.SyncRunLifecycleService
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
+import com.example.assetsync.infrastructure.outbox.OutboxGaugeRefreshJob
 import com.example.assetsync.infrastructure.outbox.OutboxPublisherJob
 import com.example.assetsync.infrastructure.provider.FakeChainProvider
 import com.example.assetsync.infrastructure.provider.FakeChainProviderHealthIndicator
@@ -78,6 +79,11 @@ class ObservabilityIntegrationTests(
         publisher.reset()
         fakeChainProvider.clear()
         cleanDatabase()
+    }
+
+    @Test
+    fun `the outbox gauges are refreshed on demand here, with the background job off like the other database jobs`() {
+        assertEquals(0, applicationContext.getBeanNamesForType(OutboxGaugeRefreshJob::class.java).size)
     }
 
     @Test
