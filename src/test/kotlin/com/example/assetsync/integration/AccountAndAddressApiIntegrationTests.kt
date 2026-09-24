@@ -513,6 +513,8 @@ class AccountAndAddressApiIntegrationTests(
                 .andExpect(status().isBadRequest)
                 .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/validation-failed"))
         }
+        patchStatus(addressId, "PAUSED")
+            .andExpect(jsonPath("$.errors[0]").value("status: status must be ACTIVE or DISABLED"))
         assertEquals("ACTIVE", jdbcTemplate.queryForObject("SELECT status FROM watched_addresses WHERE id = ?", String::class.java, UUID.fromString(addressId)))
     }
 

@@ -290,6 +290,24 @@ class ObservedEventApiIntegrationTests(
     }
 
     @Test
+    fun `a value that fails its check is reported under its own field`() {
+        createWatchedAddress(address = "0xobserved-field-names")
+
+        listOf(
+            observedEventBody(address = "0xobserved-field-names", amount = "-1.00") to
+                "amount: amount must be a non-negative decimal string that fits numeric(38,18)",
+            observedEventBody(address = "0xobserved-field-names", direction = "SIDEWAYS") to "direction: direction must be INBOUND or OUTBOUND",
+            observedEventBody(address = "0xobserved-field-names", statusValue = "PENDING") to "status: status must be SEEN, CONFIRMED, or REVERTED",
+        ).forEach { (body, error) ->
+            mockMvc.perform(post("/api/v1/observed-events").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isBadRequest)
+                .andExpect(jsonPath("$.errors.length()").value(1))
+                .andExpect(jsonPath("$.errors[0]").value(error))
+                .andExpect(jsonPath("$.detail").value(error))
+        }
+    }
+
+    @Test
     fun `omitted required numeric fields return bad request`() {
         createWatchedAddress(address = "0xobserved-omitted-numeric")
 
