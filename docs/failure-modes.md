@@ -136,6 +136,7 @@ Expected behavior:
 - A response that is still arriving when the deadline cancels the fetch stops being read within one `asset-sync.provider.read-timeout`, and a body over the limit or behind an error status is closed unread, so the provider thread returns to the pool; a trickling response cannot hold it for the length of its body.
 - Retryable provider failures requeue the current `sync_run` as `QUEUED` with bounded backoff.
 - HTTP 429 is retryable provider backpressure, increments `failure_attempts`, and uses valid `Retry-After` values capped by the configured max backoff.
+- A fetch the full provider pool (`asset-sync.sync.provider-max-threads`) cannot take requeues the run with backoff and does not increment `failure_attempts`: the service's own capacity says nothing about the provider.
 - At max attempts, the current `sync_run` is marked `FAILED` in a short fenced transaction.
 - Events already committed before the timeout remain valid.
 - The cursor checkpoint is not advanced for the failed page.

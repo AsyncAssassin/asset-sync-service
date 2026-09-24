@@ -5,6 +5,7 @@ import com.example.assetsync.api.dto.MAX_TX_HASH_LENGTH
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
 import com.example.assetsync.application.sync.SyncCursorRepository
 import com.example.assetsync.application.sync.SyncApplicationService
+import com.example.assetsync.application.sync.SyncCapacityExceededException
 import com.example.assetsync.application.sync.SyncRunLifecycleService
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
@@ -800,6 +801,31 @@ class SyncApiIntegrationTests(
         assertEquals(1, singleInt("SELECT events_changed FROM sync_runs WHERE id = ?", syncRunId))
         assertEquals(1, tableCount("observed_transactions"))
         assertEquals(1, tableCount("outbox_events"))
+    }
+
+    @Test
+    fun `a full provider pool requeues the run without spending its retry budget`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-pool-full")
+        val addressId = watchedAddress["id"].asText()
+        // The same exception fetchProviderPageWithTimeout throws when the pool rejects the fetch.
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-pool-full",
+            asset = "USDC",
+            steps = listOf(FakeChainProviderStep.ThrowableFailure(SyncCapacityExceededException(2))),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("QUEUED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(1, singleInt("SELECT attempts FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(0, singleInt("SELECT failure_attempts FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(
+            "Sync capacity exceeded: at most 2 concurrent provider fetches.",
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId),
+        )
     }
 
     @Test

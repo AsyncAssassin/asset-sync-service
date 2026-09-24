@@ -898,6 +898,15 @@ class SyncApplicationService(
                     eventsChanged = progress.eventsChanged,
                     lastError = error,
                 )
+            } else if (throwable is SyncCapacityExceededException) {
+                // The service's own provider pool was full, which says nothing about the provider:
+                // back off without spending the retry budget, like a full worker pool.
+                syncRunLifecycleService.requeue(
+                    claim = claim,
+                    eventsSeen = progress.eventsSeen,
+                    eventsChanged = progress.eventsChanged,
+                    lastError = error,
+                )
             } else {
                 syncRunLifecycleService.requeueFailure(
                     claim = claim,

@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- A sync that finds the provider pool full is requeued without spending its retry budget, like one that finds the worker pool full. It spent a `failure_attempts` each time and failed after five, although the service's own capacity says nothing about the provider.
 - A bridge page that holds one event twice with another direction or amount, as a transfer of the address to itself sent as two rows, fails with a message that names the event before anything is written. The first row was stored and the second failed as a conflict with stored fields, so every later sync of the address failed the same way. An exact repeat stays harmless.
 - A bridge that answers `401` or `403` fails the run at once as a configuration error and turns provider health `DOWN`, as Alchemy does. It counted as bad data of one address: every address failed while health stayed `UP`, the regression 0.4.0 brought to monitoring. A `404` stays the error of that one address.
 - A bridge page that ends a sync without a cursor, without new events, and at an unchanged safe block succeeds. It failed terminally with `Provider returned a final page without a durable resume cursor or high-water checkpoint`, even when the address had a stored cursor, so two syncs of one address within a finality epoch were enough. The stored cursor or the checkpoint resumes the next sync, as it did before the rule existed.
