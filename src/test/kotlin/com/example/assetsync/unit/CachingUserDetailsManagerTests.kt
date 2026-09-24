@@ -3,9 +3,13 @@ package com.example.assetsync.unit
 import com.example.assetsync.MutableClock
 import com.example.assetsync.config.CachingUserDetailsManager
 import java.time.Duration
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 import org.junit.jupiter.api.assertThrows
 import org.springframework.dao.DataAccessResourceFailureException
 import org.springframework.security.core.CredentialsContainer
@@ -81,6 +85,30 @@ class CachingUserDetailsManagerTests {
     }
 
     @Test
+    fun `while one request reads a user again, the others get the cached copy instead of waiting for the database`() {
+        manager.loadUserByUsername("operator")
+        clock.advance(Duration.ofSeconds(61))
+        val reading = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        store.onLoad = {
+            if (store.loads == 2) {
+                reading.countDown()
+                release.await(5, TimeUnit.SECONDS)
+            }
+        }
+
+        val first = CompletableFuture.supplyAsync { manager.loadUserByUsername("operator") }
+        assertTrue(reading.await(5, TimeUnit.SECONDS))
+        assertEquals("{noop}operator-pw", manager.loadUserByUsername("operator").password)
+        assertEquals(2, store.loads, "only the first request reads the database")
+
+        release.countDown()
+        assertEquals("{noop}operator-pw", first.get(5, TimeUnit.SECONDS).password)
+        manager.loadUserByUsername("operator")
+        assertEquals(2, store.loads, "the user read again is fresh for another minute")
+    }
+
+    @Test
     fun `an outage is no reason to accept a user the cache never held, and other failures are not hidden`() {
         store.failure = DataAccessResourceFailureException("Connection refused")
         assertThrows<DataAccessResourceFailureException> { manager.loadUserByUsername("operator") }
@@ -104,11 +132,18 @@ class CachingUserDetailsManagerTests {
     private class CountingStore : InMemoryUserDetailsManager(
         User.withUsername("operator").password("{noop}operator-pw").roles("OPERATOR").build(),
     ) {
+        @Volatile
         var loads = 0
+
+        @Volatile
         var failure: RuntimeException? = null
+
+        @Volatile
+        var onLoad: () -> Unit = {}
 
         override fun loadUserByUsername(username: String): UserDetails {
             loads += 1
+            onLoad()
             failure?.let { throw it }
             return super.loadUserByUsername(username)
         }

@@ -5,6 +5,7 @@ import java.time.Clock
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import org.slf4j.LoggerFactory
 import org.springframework.security.core.userdetails.User
 import org.springframework.security.core.userdetails.UserDetails
@@ -18,9 +19,10 @@ import org.springframework.security.provisioning.UserDetailsManager
  * A user loaded within [freshFor] comes from memory; an older one is read again, so a password
  * changed or a user removed directly in the database takes effect within that time, and a write
  * through this manager takes effect at once. When the database cannot serve that read, a user loaded
- * within [keepOnOutageFor] is served as it was and the next read waits another [freshFor]: during an
- * outage, requests with credentials do not each wait for the connection pool, and the metrics stay
- * reachable. Only users the store found are cached, so the cache holds the real accounts.
+ * within [keepOnOutageFor] is served as it was and the next read waits another [freshFor]. One
+ * request at a time reads a cached user again; the others meanwhile get the cached copy. So during
+ * an outage, requests with credentials do not each wait for the connection pool, and the metrics
+ * stay reachable. Only users the store found are cached, so the cache holds the real accounts.
  *
  * Callers always get a copy: Spring Security erases the password of the authenticated principal,
  * which would otherwise erase the cached one.
@@ -32,7 +34,10 @@ class CachingUserDetailsManager(
     private val keepOnOutageFor: Duration = DEFAULT_KEEP_ON_OUTAGE_FOR,
 ) : UserDetailsManager {
 
-    private class Entry(val user: UserDetails, val loadedAt: Instant, @Volatile var checkedAt: Instant)
+    private class Entry(val user: UserDetails, val loadedAt: Instant, @Volatile var checkedAt: Instant) {
+        /** Set while one request reads this user from the database again. */
+        val rereading = AtomicBoolean(false)
+    }
 
     private val logger = LoggerFactory.getLogger(CachingUserDetailsManager::class.java)
     private val cache = ConcurrentHashMap<String, Entry>()
@@ -43,25 +48,35 @@ class CachingUserDetailsManager(
         if (cached != null && now.isBefore(cached.checkedAt.plus(freshFor))) {
             return copyOf(cached.user)
         }
-        val loaded = try {
-            delegate.loadUserByUsername(username)
-        } catch (exception: UsernameNotFoundException) {
-            cache.remove(username)
-            throw exception
-        } catch (exception: RuntimeException) {
-            if (cached == null || !exception.isDatabaseFailure() || !now.isBefore(cached.loadedAt.plus(keepOnOutageFor))) {
-                throw exception
-            }
-            cached.checkedAt = now
-            logger.warn(
-                "user_store_unavailable_serving_cached_user loadedAt={} error={}",
-                cached.loadedAt,
-                exception.javaClass.simpleName,
-            )
-            return copyOf(cached.user)
+        // A cached user that may still stand in for the database: while one request reads it again,
+        // which during an outage waits up to the pool's connection timeout, the others use it.
+        val fallback = cached?.takeIf { now.isBefore(it.loadedAt.plus(keepOnOutageFor)) }
+        if (fallback != null && !fallback.rereading.compareAndSet(false, true)) {
+            return copyOf(fallback.user)
         }
-        cache[username] = Entry(user = copyOf(loaded), loadedAt = now, checkedAt = now)
-        return loaded
+        try {
+            val loaded = try {
+                delegate.loadUserByUsername(username)
+            } catch (exception: UsernameNotFoundException) {
+                cache.remove(username)
+                throw exception
+            } catch (exception: RuntimeException) {
+                if (fallback == null || !exception.isDatabaseFailure()) {
+                    throw exception
+                }
+                fallback.checkedAt = clock.instant()
+                logger.warn(
+                    "user_store_unavailable_serving_cached_user loadedAt={} error={}",
+                    fallback.loadedAt,
+                    exception.javaClass.simpleName,
+                )
+                return copyOf(fallback.user)
+            }
+            cache[username] = Entry(user = copyOf(loaded), loadedAt = now, checkedAt = now)
+            return loaded
+        } finally {
+            fallback?.rereading?.set(false)
+        }
     }
 
     override fun createUser(user: UserDetails) {
