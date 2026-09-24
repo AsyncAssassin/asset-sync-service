@@ -8,7 +8,6 @@ import com.example.assetsync.application.sync.ChainProviderEventsPageRequest
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
 import com.example.assetsync.application.sync.ChainProviderPort
 import com.example.assetsync.application.sync.ChainProviderUnavailableException
-import com.example.assetsync.application.sync.ProviderConfigurationException
 import com.example.assetsync.application.sync.ProviderDataInvalidException
 import com.example.assetsync.config.AlchemyAuthMode
 import com.example.assetsync.config.AlchemyFinalityMode
@@ -59,8 +58,12 @@ class AlchemyChainProvider(
 
     override val providerName: String = "alchemy"
 
-    /** Only chains mapped to an Alchemy network; the seeded `local-evm` has none. */
-    override fun supportsChain(chainId: String): Boolean = properties.networkFor(chainId) != null
+    /**
+     * Only chains mapped to an Alchemy network, which the seeded `local-evm` is not, and under
+     * `configured-block` only those with a start block: a sync there could not pick its first block.
+     */
+    override fun supportsChain(chainId: String): Boolean =
+        properties.networkFor(chainId)?.let { properties.startMode != AlchemyStartMode.CONFIGURED_BLOCK || it.startBlock != null } == true
 
     private val logger = LoggerFactory.getLogger(AlchemyChainProvider::class.java)
     private val scrubber = AlchemySecretScrubber(properties.apiKey)
@@ -99,7 +102,8 @@ class AlchemyChainProvider(
             recordDataError(request, exception)
             throw exception
         } catch (exception: AddressConfigurationException) {
-            // So does a configuration gap of one address: its chain or asset, or a block it cannot page.
+            // So does a configuration gap of one address: its chain's mapping or start block, its
+            // asset, or a block it cannot page.
             recordDataError(request, exception)
             throw exception
         } catch (exception: RuntimeException) {
@@ -114,8 +118,9 @@ class AlchemyChainProvider(
     fun lastDataError(): String? = lastDataError
 
     private fun recordDataError(request: ChainProviderEventsPageRequest, exception: RuntimeException) {
-        lastDataError = scrubber.scrub(exception.message).take(MAX_ERROR_LENGTH)
-        logFailure(request, lastDataError)
+        val error = scrubber.scrub(exception.message).take(MAX_ERROR_LENGTH)
+        lastDataError = error
+        logFailure(request, error)
     }
 
     private fun recordFailure(request: ChainProviderEventsPageRequest, exception: RuntimeException) {
@@ -180,12 +185,12 @@ class AlchemyChainProvider(
             network = properties.networkFor(request.chainId)?.network
                 ?: throw AddressConfigurationException(
                     "No Alchemy network is mapped for chain ${request.chainId}; add " +
-                        "${AlchemyProviderProperties.PREFIX}.networks.${request.chainId}.network or disable the chain.",
+                        "${AlchemyProviderProperties.PREFIX}.networks.${request.chainId}.network or disable the address.",
                 )
             identity = ChainIdentityNormalizer.normalize(chainId = request.chainId, address = request.address, asset = request.asset)
             assetConfig = assetConfigRepository.findEnabledByChainIdAndAsset(identity.chainId, identity.asset)
                 ?: throw AddressConfigurationException(
-                    "No enabled asset config for (${identity.chainId}, ${identity.asset}); the registry preflight should have caught this.",
+                    "No enabled asset config for (${identity.chainId}, ${identity.asset}); enable it or disable the address.",
                 )
             if (assetConfig.tokenStandard != AlchemyRolloutRules.SUPPORTED_TOKEN_STANDARD) {
                 throw ProviderDataInvalidException(
@@ -288,7 +293,7 @@ class AlchemyChainProvider(
                 block = when (properties.startMode) {
                     AlchemyStartMode.REGISTRATION_SAFE -> safeBlockHeight + 1
                     AlchemyStartMode.CONFIGURED_BLOCK -> properties.networkFor(request.chainId)?.startBlock
-                        ?: throw ProviderConfigurationException(
+                        ?: throw AddressConfigurationException(
                             "start-mode=configured-block requires ${AlchemyProviderProperties.PREFIX}.networks.${request.chainId}.start-block.",
                         )
                 }

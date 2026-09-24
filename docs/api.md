@@ -178,7 +178,7 @@ No `Location` header is returned because the MVP does not expose a canonical wat
 Validation:
 
 - `accountId` must reference an existing account.
-- `chainId` must reference an enabled chain configuration that the active provider serves; under `type=alchemy` that is a chain mapped to an Alchemy network. Otherwise the answer is `404` with the title `Unsupported chain`.
+- `chainId` must reference an enabled chain configuration that the active provider serves; under `type=alchemy` that is a chain mapped to an Alchemy network, and under `start-mode=configured-block` one with a start block. Otherwise the answer is `404` with the title `Unsupported chain`.
 - `asset` must be registered and enabled for that chain in the asset registry; unknown or disabled assets return `404` with the title `Unsupported asset`. The seeded registry covers `USDC` on `local-evm` and `eth-sepolia`; `eth-mainnet` is seeded disabled.
 - `address` is required and must be non-blank.
 - `address` must be well formed for the chain once normalized: `0x` followed by 40 hex digits, in any casing, on `eth-sepolia` and `eth-mainnet`; no whitespace, `/`, or `:` on `local-evm`, which keeps accepting synthetic identifiers such as `0xdemoaddr`; no control characters on any chain. A malformed address returns `400` with `invalid-request` and the `chainId`, after the chain and asset checks.
@@ -251,6 +251,7 @@ Behavior:
 
 - `status` is required and must be `ACTIVE` or `DISABLED`; any other value returns `400` with `validation-failed`.
 - An unknown address id returns `404` with `not-found`.
+- Enabling an address runs the chain and asset checks of registration again, so it cannot bring back an address the registry or the active provider no longer serves: a disabled chain or one the provider does not serve returns `404` with the title `Unsupported chain`, an asset without an enabled config `404` with `Unsupported asset`, and the address stays `DISABLED`.
 - Setting the current status again returns the address unchanged.
 - A disabled address is skipped by account sync, refused by `POST /api/v1/addresses/{addressId}/sync` with `404`, and does not accept observed events. Enabling it again resumes sync from its stored cursor.
 - This is the way to take an address that keeps failing terminally out of account syncs; see Start Account Sync.

@@ -34,16 +34,7 @@ class WatchedAddressApplicationService(
             address = command.address,
             asset = command.asset,
         )
-        chainConfigRepository.findEnabledByChainId(identity.chainId) ?: throw UnsupportedChainException(identity.chainId)
-        // An address on a chain the provider cannot serve would fail every sync, and under Alchemy
-        // stop the next start; it is refused like a chain that is not configured.
-        if (!chainProviderPort.supportsChain(identity.chainId)) {
-            throw UnsupportedChainException(identity.chainId)
-        }
-        // The registry is the global supported-asset contract: every profile and provider type goes
-        // through it, and local/test/demo flows rely on the seeded `local-evm` USDC row.
-        assetConfigRepository.findEnabledByChainIdAndAsset(chainId = identity.chainId, asset = identity.asset)
-            ?: throw UnsupportedAssetException(chainId = identity.chainId, asset = identity.asset)
+        requireServable(chainId = identity.chainId, asset = identity.asset)
         ChainIdentityNormalizer.addressViolation(identity.chainId, identity.address)?.let { violation ->
             throw InvalidWatchedAddressException(chainId = identity.chainId, message = violation)
         }
@@ -67,7 +58,9 @@ class WatchedAddressApplicationService(
     /**
      * Enables or disables a watched address. A disabled address is skipped by account sync and
      * refused by address sync and event ingestion; enabling it again resumes from its stored cursor.
-     * Setting the current status again changes nothing.
+     * Enabling passes the registration checks of chain, provider, and asset again, so it cannot bring
+     * back an address the registry or the active provider no longer serves. Setting the current
+     * status again changes nothing.
      */
     @Transactional
     fun updateStatus(addressId: UUID, status: WatchedAddressStatus): WatchedAddress {
@@ -76,8 +69,24 @@ class WatchedAddressApplicationService(
         if (current.status == status) {
             return current
         }
+        if (status == WatchedAddressStatus.ACTIVE) {
+            requireServable(chainId = current.chainId, asset = current.asset)
+        }
         return watchedAddressRepository.updateStatus(addressId = addressId, status = status, updatedAt = Instant.now(clock))
             ?: throw UnknownWatchedAddressException(addressId)
+    }
+
+    private fun requireServable(chainId: String, asset: String) {
+        chainConfigRepository.findEnabledByChainId(chainId) ?: throw UnsupportedChainException(chainId)
+        // An address on a chain the provider cannot serve would fail every sync, and under Alchemy
+        // stop the next start; it is refused like a chain that is not configured.
+        if (!chainProviderPort.supportsChain(chainId)) {
+            throw UnsupportedChainException(chainId)
+        }
+        // The registry is the global supported-asset contract: every profile and provider type goes
+        // through it, and local/test/demo flows rely on the seeded `local-evm` USDC row.
+        assetConfigRepository.findEnabledByChainIdAndAsset(chainId = chainId, asset = asset)
+            ?: throw UnsupportedAssetException(chainId = chainId, asset = asset)
     }
 
     @Transactional(readOnly = true)

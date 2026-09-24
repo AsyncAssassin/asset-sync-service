@@ -26,25 +26,37 @@ data class AlchemyCursor(val nextBlock: Long) {
         const val MAX_LENGTH = 256
         private val ALLOWED_FIELDS = setOf("v", "p", "nextBlock")
 
-        /** A cursor from the HTTP bridge or the demo simulator means nothing here; see the runbook. */
+        /**
+         * A cursor from the HTTP bridge or the demo simulator means nothing here. Clearing only
+         * `provider_cursor` keeps the address's event high-water, so the next sync never re-reads
+         * blocks whose events the other provider already stored; see the runbook.
+         */
         private const val FOREIGN_CURSOR_ACTION =
-            "; clear the address's sync_cursors row to start it under Alchemy (docs/alchemy-runbook.md, section 6)"
+            ", so another provider wrote it; clear its provider_cursor (docs/alchemy-runbook.md, section 6)"
 
         fun decode(raw: String?, objectMapper: ObjectMapper): AlchemyCursor? {
             if (raw == null) {
                 return null
             }
+            // Every token this adapter writes is a short JSON object marked "p":"alchemy", so a token
+            // of any other shape was written by another provider.
             if (raw.length > MAX_LENGTH) {
-                throw invalid("is longer than $MAX_LENGTH characters")
+                throw foreign("is longer than $MAX_LENGTH characters")
             }
             val node = try {
                 objectMapper.readTree(raw)
             } catch (exception: JsonProcessingException) {
-                throw invalid("is not valid JSON, so another provider wrote it$FOREIGN_CURSOR_ACTION")
+                throw foreign("is not valid JSON")
             }
             if (node == null || !node.isObject) {
-                throw invalid("is not a JSON object")
+                throw foreign("is not a JSON object")
             }
+            val provider = node.get("p")?.takeIf { it.isTextual }?.asText()
+                ?: throw foreign("has no provider marker")
+            if (provider != PROVIDER) {
+                throw foreign("belongs to provider '$provider'")
+            }
+            // Marked as ours but damaged: the runbook never clears an Alchemy cursor, so no hint here.
             val unsupported = node.fieldNames().asSequence().filterNot { it in ALLOWED_FIELDS }.toList()
             if (unsupported.isNotEmpty()) {
                 throw invalid("carries unsupported fields $unsupported")
@@ -54,11 +66,6 @@ data class AlchemyCursor(val nextBlock: Long) {
             if (version != VERSION) {
                 throw invalid("has unsupported version $version")
             }
-            val provider = node.get("p")?.takeIf { it.isTextual }?.asText()
-                ?: throw invalid("has no provider marker")
-            if (provider != PROVIDER) {
-                throw invalid("belongs to provider '$provider'$FOREIGN_CURSOR_ACTION")
-            }
             val nextBlock = node.get("nextBlock")?.takeIf { it.isIntegralNumber && it.canConvertToLong() }?.asLong()
                 ?: throw invalid("has no integer nextBlock")
             if (nextBlock < 0) {
@@ -66,6 +73,8 @@ data class AlchemyCursor(val nextBlock: Long) {
             }
             return AlchemyCursor(nextBlock)
         }
+
+        private fun foreign(reason: String): ProviderDataInvalidException = invalid(reason + FOREIGN_CURSOR_ACTION)
 
         private fun invalid(reason: String): ProviderDataInvalidException =
             ProviderDataInvalidException("Alchemy provider cursor $reason.")

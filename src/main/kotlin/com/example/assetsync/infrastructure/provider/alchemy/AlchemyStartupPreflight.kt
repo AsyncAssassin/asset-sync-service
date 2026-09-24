@@ -85,9 +85,10 @@ object AlchemyRolloutRules {
 
     /**
      * Enabled chains without a network mapping and without active watched addresses, such as the
-     * seeded `local-evm` on a fresh database. Nothing needs them yet, so startup only warns; an
-     * address registered there later fails its syncs terminally, and the next startup refuses the
-     * chain through [violations] until it is mapped or the address or the chain is disabled.
+     * seeded `local-evm` on a fresh database. Nothing needs them yet, so startup only warns, and
+     * registration and re-enabling refuse addresses there. An address enabled there by SQL fails
+     * its syncs terminally, and the next startup refuses the chain through [violations] until it is
+     * mapped or the address or the chain is disabled.
      */
     fun unmappedIdleChains(properties: AlchemyProviderProperties, requiredChains: List<AlchemyRequiredChain>): List<String> =
         requiredChains
@@ -130,7 +131,7 @@ class AlchemyStartupPreflight(
         if (idleChains.isNotEmpty()) {
             logger.warn(
                 "alchemy_preflight_unmapped_chains_skipped chains={} reason=no_active_watched_addresses " +
-                    "action=\"map or disable the chains before registering addresses on them\"",
+                    "action=\"map the chains to use them under Alchemy, or disable them\"",
                 idleChains,
             )
         }

@@ -9,6 +9,7 @@ import com.example.assetsync.application.account.CreateAccountCommand
 import com.example.assetsync.application.account.RegisterWatchedAddressCommand
 import com.example.assetsync.application.account.UnsupportedChainException
 import com.example.assetsync.application.account.WatchedAddressApplicationService
+import com.example.assetsync.application.account.WatchedAddressStatus
 import com.example.assetsync.application.sync.ClaimedSyncRun
 import com.example.assetsync.application.sync.SyncApplicationService
 import com.example.assetsync.application.sync.SyncRun
@@ -288,7 +289,7 @@ class AlchemyProviderSyncIntegrationTests(
     )
 
     @Test
-    fun `an address on a chain without an alchemy network is refused at registration`() {
+    fun `an address on a chain without an alchemy network is refused at registration and at re-enabling`() {
         val account = accountApplicationService.createAccount(CreateAccountCommand(externalRef = "alchemy-it-${UUID.randomUUID()}"))
 
         // The seeded local-evm chain and its USDC row are enabled, but no Alchemy network serves them.
@@ -298,6 +299,20 @@ class AlchemyProviderSyncIntegrationTests(
             )
         }
         assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM watched_addresses", Int::class.java))
+
+        // One registered under the HTTP bridge before the switch and disabled since cannot come back:
+        // it would fail every sync and stop the next start.
+        val legacyId = UUID.randomUUID()
+        jdbcTemplate.update(
+            """
+            INSERT INTO watched_addresses (id, account_id, chain_id, address, asset, label, status, created_at, updated_at)
+            VALUES (?, ?, 'local-evm', '0xlegacy-local', 'USDC', NULL, 'DISABLED', now(), now())
+            """.trimIndent(),
+            legacyId,
+            account.id,
+        )
+        assertThrows<UnsupportedChainException> { watchedAddressApplicationService.updateStatus(legacyId, WatchedAddressStatus.ACTIVE) }
+        assertEquals("DISABLED", jdbcTemplate.queryForObject("SELECT status FROM watched_addresses WHERE id = ?", String::class.java, legacyId))
     }
 
     private fun registerWatchedAddress(): UUID {

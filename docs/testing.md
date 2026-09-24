@@ -74,7 +74,7 @@ Required cases:
 | Confirmation | `SEEN -> CONFIRMED` updates row and creates one `TRANSACTION_CONFIRMED` event |
 | Reorg | `CONFIRMED -> REVERTED` updates row and creates one `TRANSACTION_REVERTED` event |
 | Duplicate reorg | no duplicate outbox event |
-| Alchemy address gaps | registration on a chain without an Alchemy network is refused with `404`; a chain or asset gap of one address, or a block larger than a page, fails that address with health `UP` and `lastDataError`; a cursor another provider wrote names the fix |
+| Alchemy address gaps | registration on a chain without an Alchemy network, or without a start block under `configured-block`, is refused with `404`, and so is enabling such an address again; a chain, start-block, or asset gap of one address, or a block larger than a page, fails that address with health `UP` and `lastDataError`, while a key rejected at fetch time turns health `DOWN`; a cursor another provider wrote names the fix whatever its shape, and a damaged Alchemy cursor is never called foreign |
 | Atomicity | rollback prevents observed transaction and outbox writes from splitting |
 | Retry race | concurrent duplicate processing results in one canonical row |
 | Outbox poller | `FOR UPDATE SKIP LOCKED` prevents duplicate claims across pollers |

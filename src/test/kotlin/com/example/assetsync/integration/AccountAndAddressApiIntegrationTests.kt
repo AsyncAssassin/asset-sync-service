@@ -477,6 +477,30 @@ class AccountAndAddressApiIntegrationTests(
     }
 
     @Test
+    fun `enabling an address runs the registration checks again`() {
+        val accountId = createAccount("address-status-reenable")
+        // An address whose chain was disabled after its registration: the seeded eth-mainnet is disabled.
+        val addressId = UUID.randomUUID()
+        jdbcTemplate.update(
+            """
+            INSERT INTO watched_addresses (id, account_id, chain_id, address, asset, label, status, created_at, updated_at)
+            VALUES (?, ?, 'eth-mainnet', '0x1111111111111111111111111111111111111111', 'USDC', NULL, 'ACTIVE', now(), now())
+            """.trimIndent(),
+            addressId,
+            UUID.fromString(accountId),
+        )
+
+        // Disabling needs no check: it is how such an address is taken out of the syncs.
+        patchStatus(addressId.toString(), "DISABLED")
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("DISABLED"))
+        patchStatus(addressId.toString(), "ACTIVE")
+            .andExpect(status().isNotFound)
+            .andExpect(jsonPath("$.title").value("Unsupported chain"))
+        assertEquals("DISABLED", jdbcTemplate.queryForObject("SELECT status FROM watched_addresses WHERE id = ?", String::class.java, addressId))
+    }
+
+    @Test
     fun `watched address status update rejects unknown addresses and statuses`() {
         patchStatus(UUID.randomUUID().toString(), "DISABLED")
             .andExpect(status().isNotFound)

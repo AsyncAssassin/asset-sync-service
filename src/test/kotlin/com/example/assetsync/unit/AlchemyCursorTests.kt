@@ -5,6 +5,7 @@ import com.example.assetsync.infrastructure.provider.alchemy.AlchemyCursor
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.assertThrows
@@ -44,11 +45,27 @@ class AlchemyCursorTests {
     }
 
     @Test
-    fun `a cursor another provider wrote says so and names the fix`() {
-        val fix = "clear the address's sync_cursors row to start it under Alchemy (docs/alchemy-runbook.md, section 6)"
-        // The demo simulator's opaque token and a JSON cursor with another provider's marker.
-        assertInvalid("sim:0123456789abcdef", "is not valid JSON, so another provider wrote it; $fix")
-        assertInvalid("""{"v":1,"p":"http","nextBlock":1}""", "belongs to provider 'http'; $fix")
+    fun `a cursor another provider wrote says so and names the fix, whatever its shape`() {
+        val fix = "so another provider wrote it; clear its provider_cursor (docs/alchemy-runbook.md, section 6)"
+        // The demo simulator's opaque token, and HTTP bridge tokens of any shape: a bare number, a
+        // JSON object of their own, one longer than any token this adapter writes.
+        assertInvalid("sim:0123456789abcdef", "is not valid JSON, $fix")
+        assertInvalid("19000000", "is not a JSON object, $fix")
+        assertInvalid("""{"offset":42}""", "has no provider marker, $fix")
+        assertInvalid("""{"v":1,"p":"http","nextBlock":1,"page":2}""", "belongs to provider 'http', $fix")
+        assertInvalid("b".repeat(300), "is longer than 256 characters, $fix")
+    }
+
+    @Test
+    fun `a damaged alchemy cursor is never called foreign`() {
+        listOf(
+            """{"v":2,"p":"alchemy","nextBlock":1}""",
+            """{"v":1,"p":"alchemy","nextBlock":1,"pageKey":"abc"}""",
+            """{"v":1,"p":"alchemy","nextBlock":-1}""",
+        ).forEach { raw ->
+            val exception = assertThrows<ProviderDataInvalidException> { AlchemyCursor.decode(raw, objectMapper) }
+            assertFalse(exception.message!!.contains("another provider"), "for $raw: ${exception.message}")
+        }
     }
 
     @Test
