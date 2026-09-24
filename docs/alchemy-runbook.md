@@ -37,6 +37,8 @@ A fresh database needs no operator step. The seeded `local-evm` chain is enabled
 UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm';
 ```
 
+The `demo` profile refuses `type=alchemy` at startup: it seeds an active `local-evm` address for its simulator, which would stop every later start at this preflight.
+
 On an existing database also run the rollout preflight query from `docs/database.md` (section 2, changeset 015): every active watched address on an enabled chain must have an enabled asset config, otherwise the startup preflight reports the `(chain_id, asset)` pairs and refuses to start. `eth-sepolia` with `required_confirmations=1` and its enabled `USDC` row (`0x1c7d4b196cb0c7b01d743fbc6116a902379c7238`, 6 decimals) are seeded by the migrations.
 
 ## 4. Live Smoke On Sepolia

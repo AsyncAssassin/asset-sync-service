@@ -10,7 +10,7 @@ All MVP endpoints are exposed under `/api/v1`. The version is part of the URL be
 
 Conventions:
 
-- Request and response bodies use JSON; a body of any other content type, YAML included, gets `415`. A string longer than 100 000 characters in a request field fails the request with `400 invalid-request` while the body is read, before any field rule runs. Unknown fields are ignored, whatever their size.
+- Request and response bodies use JSON; a body of any other content type, YAML included, gets `415`. A string longer than 100 000 characters in a request field fails the request with `400 invalid-request` while the body is read, before any field rule runs. Unknown fields are ignored, whatever their size. A number with a fraction in an integer field, such as an `eventIndex` of `1.9`, fails the request with `400 invalid-request` instead of losing the fraction. A whole number written as a float, such as `1.0` or `1e3`, is read as that integer.
 - Timestamps use UTC ISO-8601 strings.
 - Identifiers use UUID strings.
 - Monetary amounts are encoded as decimal strings and stored with `numeric(38, 18)` precision.
@@ -21,7 +21,7 @@ Conventions:
 
 Authentication:
 
-- Every profile except `local` and `test` requires HTTP Basic against the database user store: `GET` endpoints need the `READ` or `OPERATOR` role, every mutation needs `OPERATOR`. Health probes stay open. The store is read through a one-minute cache. A new password works at once everywhere, because a password that does not match the cached user makes the service read the store again; an old password, or a user removed directly in the database or on another instance, keeps working for up to a minute. A change through the service, such as the `prod` operator provisioning, applies at once on the instance that made it.
+- Every profile except `local` and `test` requires HTTP Basic against the database user store: `GET`, `HEAD`, and `OPTIONS` requests need the `READ` or `OPERATOR` role, and every other method needs `OPERATOR`. Health probes stay open. The store is read through a one-minute cache. A new password works at once everywhere, because a password that does not match the cached user makes the service read the store again; an old password, or a user removed directly in the database or on another instance, keeps working for up to a minute. A change through the service, such as the `prod` operator provisioning, applies at once on the instance that made it.
 - The API keeps no session, so CSRF protection is off. A browser that has cached Basic credentials for the service would still attach them to a cross-site form `POST`; the only endpoints such a form can reach are the two body-less sync endpoints, and the effect is an extra sync run. Do not log into the API from a browser used for other sites, and put the service behind a gateway when it is exposed.
 - Every authenticated request verifies the BCrypt hash of the password (strength 10, about 70 ms of CPU), and nothing limits failed attempts. The gateway in front of an exposed service should rate-limit requests; token authentication (OAuth2 or JWT) is the next step beyond the MVP.
 
@@ -108,7 +108,7 @@ Content-Type: application/json
 Validation:
 
 - `externalRef` is optional.
-- If provided, `externalRef` must be non-blank after trimming.
+- If provided, `externalRef` must be non-blank after trimming and must not contain control characters other than tabs and line breaks.
 - Duplicate `externalRef` values are rejected with `409 Conflict`.
 - `externalRef = null` creates a new anonymous account on every request; deployments should quota or authenticate callers before exposing that mode.
 
@@ -179,11 +179,12 @@ Validation:
 
 - `accountId` must reference an existing account.
 - `chainId` must reference an enabled chain configuration that the active provider serves; under `type=alchemy` that is a chain mapped to an Alchemy network, and under `start-mode=configured-block` one with a start block. Otherwise the answer is `404` with the title `Unsupported chain`.
-- `asset` must be registered and enabled for that chain in the asset registry; unknown or disabled assets return `404` with the title `Unsupported asset`. The seeded registry covers `USDC` on `local-evm` and `eth-sepolia`; `eth-mainnet` is seeded disabled.
+- `asset` must be registered and enabled for that chain in the asset registry; unknown or disabled assets return `404` with the title `Unsupported asset`. The seeded registry covers `USDC` on `local-evm` and `eth-sepolia`; `eth-mainnet` is seeded disabled. Disabling an asset config refuses new registrations and re-enabling. An address registered before keeps accepting `POST /api/v1/observed-events` and keeps syncing through the HTTP bridge. Under Alchemy its sync fails, because the adapter needs the enabled config, and the next start stops at the startup preflight while such an active address exists. To stop an address, disable it.
 - `address` is required and must be non-blank.
 - `address` must be well formed for the chain once normalized: `0x` followed by 40 hex digits, in any casing, on `eth-sepolia` and `eth-mainnet`; no whitespace, `/`, or `:` on `local-evm`, which keeps accepting synthetic identifiers such as `0xdemoaddr`; no control characters on any chain. A malformed address returns `400` with `invalid-request` and the `chainId`, after the chain and asset checks.
 - `asset` is required and must be non-blank.
-- `label` is optional; if provided, it must be non-blank after trimming.
+- `chainId` and `asset` must not contain control characters, U+0000 to U+001F and U+007F to U+009F, once surrounding whitespace is trimmed.
+- `label` is optional; if provided, it must be non-blank after trimming and must not contain control characters other than tabs and line breaks.
 - Duplicate canonical `chainId + address + asset` registrations are rejected with `409 Conflict`.
 
 Address normalization is chain-specific. For the EVM chains `local-evm`, `eth-sepolia`, and `eth-mainnet`, address and transaction-hash identity is lower-case and asset identity is upper-case before uniqueness checks and format rules. Other chains currently trim and preserve exact strings until their policies are defined.
@@ -331,7 +332,7 @@ HTTP/1.1 200 OK
 
 Validation:
 
-- `chainId`, `txHash`, `address`, and `asset` are required and must be non-blank.
+- `chainId`, `txHash`, `address`, and `asset` are required and must be non-blank. `chainId`, `address`, and `asset` must not contain control characters, U+0000 to U+001F and U+007F to U+009F, once surrounding whitespace is trimmed.
 - `txHash` follows the address format rules of its chain, with 64 hex digits instead of 40 on `eth-sepolia` and `eth-mainnet`; a malformed hash returns `400` with `invalid-request`.
 - `eventIndex` is required and must be `>= 0`.
 - `amount` is required, must parse as a non-negative decimal, exponent notation such as `1e2` included, and must fit `numeric(38, 18)`: at most 20 integer and 18 fraction digits. It is stored at scale 18. A value longer than 80 characters is refused by its length alone, before it is parsed.
@@ -467,6 +468,7 @@ Failure behavior:
 - HTTP 429 throttling is retryable provider backpressure. A valid `Retry-After` value influences the next attempt delay.
 - Every HTTP bridge request carries the address's durable checkpoint as `fromBlockHeight` and `fromEventIndex`, so a bridge that returned a final page without a cursor resumes from there instead of from the start of its history. See the HTTP bridge page contract in `docs/architecture.md`.
 - Events committed before a provider failure remain valid.
+- An address disabled while its run syncs it, or whose chain is disabled meanwhile, stops at the page being fetched, which is not ingested, and fails the run with that reason: `Watched address was disabled during the sync.` or `Chain <chainId> is not enabled, so its addresses are not synced.`; the provider is not blamed.
 - The API must not report provider completion from POST; clients poll `GET /api/v1/sync-runs/{id}`.
 
 ## 12. Start Account Sync
@@ -513,6 +515,7 @@ Behavior:
 - A retryable provider failure of one address that is no throttling, such as a timeout or a `5xx`, puts that address on a retry list, and the pass goes on with the others. The address gets the attempts and backoff of a run: `asset-sync.sync.worker.max-attempts` in all, the second after `retry-backoff-base-delay` and each later one after twice the previous delay, up to `retry-backoff-max-delay` (30 s, 1, 2, and 4 minutes by default). The retries that are due go first in each claim, and while any address waits the run's `lastError` says how many and the last error. An address whose last attempt fails too is recorded as failed with `failed <n> times: <error>`. Pages an address commits before it fails count as progress: its count starts over. None of this spends the run's `failure_attempts`.
 - Retryable failures of three addresses in a row, with no page committed between them, are a provider outage: the claim fails, the run is retried with backoff and spends one `failure_attempts` unless max attempts has been reached, and the failures of the streak do not count against their addresses. So does throttling, a `429` or a rate limit with or without `Retry-After`, which concerns every address, and so do a database failure and a lost claim or cursor lease. The retried run resumes the pass where the failed claim stopped. At most 50 addresses wait for a retry; with the list full, the scan waits at the next failing address until due retries free a place.
 - A configuration failure of the whole provider, such as rejected credentials or a redirect, fails the run at once.
+- An address disabled, or whose chain is disabled, after the pass read it leaves the pass without an error: before its fetch the scan skips it, and during its fetch the page is dropped.
 - A terminal failure of one address (provider data invalid, a configuration gap of that address, a database constraint) ends only that address; the pass goes on with the others. When the pass completes, a run with such failures is `FAILED` and its `lastError` reads `<n> of <m> addresses failed terminally: <addressId>: <error>; ...`, capped at the stored error length. Disable an address that keeps failing with `PATCH /api/v1/addresses/{addressId}`.
 - Accounts over the configured address cap are terminal `FAILED` during worker execution.
 

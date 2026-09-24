@@ -25,6 +25,9 @@ object ChainIdentityNormalizer {
      */
     val HEX_IDENTITY_CHAIN_IDS: Set<String> = setOf("eth-sepolia", "eth-mainnet")
 
+    /** The longest address or transaction hash the database stores (changeset 006). */
+    const val MAX_IDENTITY_LENGTH = 128
+
     private val HEX_ADDRESS = Regex("^0x[0-9a-f]{40}$")
     private val HEX_TX_HASH = Regex("^0x[0-9a-f]{64}$")
 
@@ -89,6 +92,7 @@ object ChainIdentityNormalizer {
     ): String? =
         when {
             value.isBlank() -> "$field must not be blank."
+            value.length > MAX_IDENTITY_LENGTH -> "$field must be at most $MAX_IDENTITY_LENGTH characters."
             value.any { it.isISOControl() } -> "$field must not contain control characters."
             chainId in HEX_IDENTITY_CHAIN_IDS && !hexPattern.matches(value) ->
                 "$field must be 0x followed by $hexDigits hex digits on $chainId."

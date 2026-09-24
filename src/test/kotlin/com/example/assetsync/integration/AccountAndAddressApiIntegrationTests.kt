@@ -134,6 +134,29 @@ class AccountAndAddressApiIntegrationTests(
     }
 
     @Test
+    fun `a control character fails validation instead of reaching the database`() {
+        mockMvc.perform(
+            post("/api/v1/accounts")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(mapOf("externalRef" to "ref\u0000one"))),
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/validation-failed"))
+            .andExpect(jsonPath("$.errors[0]").value("externalRef: externalRef must not contain control characters other than tabs and line breaks"))
+
+        val accountId = createAccount("control-characters")
+        mockMvc.perform(
+            post("/api/v1/accounts/$accountId/addresses")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(mapOf("chainId" to "local-evm", "address" to "0xcontrol", "asset" to "US\u0000DC"))),
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/validation-failed"))
+            .andExpect(jsonPath("$.errors[0]").value("asset: asset must not contain control characters"))
+        assertEquals(0, jdbcTemplate.queryForObject("SELECT count(*) FROM watched_addresses", Int::class.java))
+    }
+
+    @Test
     fun `a yaml body is refused like any other content type that is not json`() {
         mockMvc.perform(
             post("/api/v1/accounts")
@@ -513,6 +536,8 @@ class AccountAndAddressApiIntegrationTests(
                 .andExpect(status().isBadRequest)
                 .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/validation-failed"))
         }
+        patchStatus(addressId, "PAUSED")
+            .andExpect(jsonPath("$.errors[0]").value("status: status must be ACTIVE or DISABLED"))
         assertEquals("ACTIVE", jdbcTemplate.queryForObject("SELECT status FROM watched_addresses WHERE id = ?", String::class.java, UUID.fromString(addressId)))
     }
 

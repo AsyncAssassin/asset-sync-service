@@ -114,11 +114,18 @@ class RealBootE2ETests(
             )
             .let { assertEquals(HttpStatus.CREATED, it.statusCode); it.body!!["id"] as String }
 
-        // 4) Reader may read but must NOT mutate (role slice).
+        // 4) Reader may read but must NOT mutate (role slice). HEAD and OPTIONS only read, like GET.
         assertEquals(
             HttpStatus.OK,
             reader().getForEntity("/api/v1/accounts/$accountId", String::class.java).statusCode,
         )
+        listOf(HttpMethod.HEAD, HttpMethod.OPTIONS).forEach { method ->
+            assertEquals(
+                HttpStatus.OK,
+                reader().exchange("/api/v1/accounts/$accountId", method, null, String::class.java).statusCode,
+                "$method as READ",
+            )
+        }
         val forbidden = reader().postForEntity("/api/v1/addresses/$addressId/sync", HttpEntity<Void>(HttpHeaders()), String::class.java)
         assertEquals(HttpStatus.FORBIDDEN, forbidden.statusCode)
         assertTrue(forbidden.headers.contentType?.isCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON) == true, "403 must be a ProblemDetail")

@@ -82,9 +82,11 @@ class ChainIdentityNormalizerTests {
     }
 
     @Test
-    fun `other chains refuse only control characters`() {
+    fun `other chains refuse only control characters and identities too long to store`() {
         assertNull(ChainIdentityNormalizer.addressViolation("solana-devnet", "0:0xcollision"))
         assertNull(ChainIdentityNormalizer.txHashViolation("solana-devnet", "Sig Nature/1"))
+        assertNull(ChainIdentityNormalizer.txHashViolation("solana-devnet", "s".repeat(128)))
+        assertEquals("txHash must be at most 128 characters.", ChainIdentityNormalizer.txHashViolation("solana-devnet", "s".repeat(129)))
         assertEquals(
             "txHash must not contain control characters.",
             ChainIdentityNormalizer.txHashViolation("solana-devnet", "forged\r\nline"),

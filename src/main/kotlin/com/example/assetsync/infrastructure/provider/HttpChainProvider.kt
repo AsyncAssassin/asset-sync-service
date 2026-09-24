@@ -8,14 +8,15 @@ import com.example.assetsync.application.sync.ChainProviderUnavailableException
 import com.example.assetsync.application.sync.ProviderConfigurationException
 import com.example.assetsync.application.sync.ProviderDataInvalidException
 import com.example.assetsync.config.ConditionalOnHttpChainProvider
-import com.example.assetsync.config.SyncProperties
 import com.example.assetsync.config.JacksonConfiguration.Companion.MAX_JSON_STRING_LENGTH
+import com.example.assetsync.config.SyncProperties
 import com.example.assetsync.config.exceedsJsonReadLimit
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.core.JsonProcessingException
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.exc.MismatchedInputException
 import com.fasterxml.jackson.databind.node.ObjectNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import java.io.IOException
@@ -170,15 +171,24 @@ class HttpChainProvider @Autowired constructor(
 
     fun lastDataError(): String? = lastDataError
 
+    /** Where in the page the value was, such as `events[0].eventIndex`: the contract's own names, never page content. */
+    private fun MismatchedInputException.pagePath(): String =
+        path.joinToString(separator = "") { reference -> reference.fieldName?.let { ".$it" } ?: "[${reference.index}]" }
+            .removePrefix(".")
+            .ifEmpty { "the top level" }
+
     private fun parseSuccessfulResponse(request: ChainProviderEventsPageRequest, body: InputStream): ChainProviderEventsPage {
         val bytes = readBounded(body, syncProperties.pagination.maxProviderPageBytes)
         val response = try {
             objectMapper.readValue(bytes, ProviderEventsPageResponse::class.java)
         } catch (exception: JsonProcessingException) {
-            val reason = if (exception.exceedsJsonReadLimit()) {
-                "Provider returned JSON past a size limit, such as a string over $MAX_JSON_STRING_LENGTH characters."
-            } else {
-                "Provider returned malformed JSON."
+            val reason = when {
+                exception.exceedsJsonReadLimit() ->
+                    "Provider returned JSON past a size limit, such as a string over $MAX_JSON_STRING_LENGTH characters."
+                // Well-formed JSON with a value the page contract does not allow, such as a fraction in eventIndex.
+                exception is MismatchedInputException ->
+                    "Provider returned a page with a value of the wrong type at ${exception.pagePath()}."
+                else -> "Provider returned malformed JSON."
             }
             throw ProviderDataInvalidException(reason, exception)
         } catch (exception: IOException) {

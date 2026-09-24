@@ -61,6 +61,12 @@ internal class AccountSyncPass private constructor(
         visited += 1
     }
 
+    /** Moves the scan past [address] without counting it: it left the pass before it was synced. */
+    fun skipPast(address: WatchedAddress) {
+        afterCreatedAt = address.createdAt
+        afterId = address.id
+    }
+
     /** Defers a busy address to the revisit phase; false once the revisit list is full. */
     fun deferBusy(watchedAddressId: UUID): Boolean {
         if (revisit.size >= MAX_REVISITS) {

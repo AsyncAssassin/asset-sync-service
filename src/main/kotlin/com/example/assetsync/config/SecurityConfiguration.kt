@@ -20,6 +20,12 @@ import org.springframework.security.provisioning.JdbcUserDetailsManager
 import org.springframework.security.provisioning.UserDetailsManager
 import org.springframework.security.web.SecurityFilterChain
 
+/**
+ * The methods that only read the API, which `READ` may call like `OPERATOR`; every other method on
+ * the API needs `OPERATOR`. The OpenAPI document declares its 403 from the same set.
+ */
+val API_READ_METHODS: Set<HttpMethod> = setOf(HttpMethod.GET, HttpMethod.HEAD, HttpMethod.OPTIONS)
+
 @Configuration
 @EnableWebSecurity
 class SecurityConfiguration {
@@ -70,9 +76,9 @@ class SecurityConfiguration {
                 if (environment.matchesProfiles("demo")) {
                     it.requestMatchers("/simulator/**").permitAll()
                 }
+                API_READ_METHODS.forEach { method -> it.requestMatchers(method, "/api/**").hasAnyRole("READ", "OPERATOR") }
                 it
-                    .requestMatchers(HttpMethod.GET, "/api/**").hasAnyRole("READ", "OPERATOR")
-                    // Any mutating method (POST/PUT/PATCH/DELETE) on the API requires OPERATOR.
+                    // Any other method on the API (POST/PUT/PATCH/DELETE) changes state and requires OPERATOR.
                     .requestMatchers("/api/**").hasRole("OPERATOR")
                     .requestMatchers("/actuator/**").hasAnyRole("READ", "OPERATOR")
                     .anyRequest().authenticated()

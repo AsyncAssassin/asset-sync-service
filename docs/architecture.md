@@ -121,6 +121,7 @@ sequenceDiagram
     participant Client
     participant API as AccountController
     participant App as AccountApplicationService
+    participant Addresses as WatchedAddressApplicationService
     participant Repo as jOOQ Repositories
     participant DB as PostgreSQL
 
@@ -130,16 +131,16 @@ sequenceDiagram
     Repo->>DB: INSERT accounts
     DB-->>Repo: account row
     Repo-->>App: Account
-    App-->>API: AccountResponse
+    App-->>API: Account
     API-->>Client: 201 Created
 
     Client->>API: POST /api/v1/accounts/{id}/addresses
-    API->>App: registerWatchedAddress(command)
-    App->>Repo: insert watched address
+    API->>Addresses: registerWatchedAddress(command)
+    Addresses->>Repo: insert watched address
     Repo->>DB: INSERT watched_addresses
     DB-->>Repo: watched address row
-    Repo-->>App: WatchedAddress
-    App-->>API: WatchedAddressResponse
+    Repo-->>Addresses: WatchedAddress
+    Addresses-->>API: WatchedAddress
     API-->>Client: 201 Created
 ```
 
@@ -153,7 +154,7 @@ sequenceDiagram
     participant Worker as SyncRunWorkerJob
     participant Cursor as SyncCursorRepository
     participant Provider as ActiveChainProvider
-    participant Ingest as ObservedTransactionIngestionService
+    participant Ingest as ObservedEventApplicationService
     participant DB as PostgreSQL
 
     Client->>API: POST /api/v1/addresses/{addressId}/sync
@@ -197,6 +198,7 @@ Response body, at most `max-provider-page-bytes`, with no string longer than 100
 - `hasMore` (required): whether another page follows now; `true` requires a `nextCursor` that differs from the request cursor.
 - `nextCursor` or `resumeCursor`: the opaque token for the next request; when both are sent they must be equal. A final page may omit it, with or without new events or heights. After such a page the stored cursor is kept when the page had no events and cleared when it had some, because replaying from the old cursor would return those events behind the checkpoint; the next request carries the stored cursor or the checkpoint either way.
 - `latestBlockHeight`, `safeBlockHeight`: block high-water, optional; `safeBlockHeight` must not exceed `latestBlockHeight`.
+- `eventIndex`, `blockHeight`, `confirmations`, and the two heights are integers: a whole number written as a float, such as `18500000.0`, is read as one, and a fraction fails the page with an error that names the field.
 - `metadata`: an optional JSON object stored as the address checkpoint, at most `max-checkpoint-json-length` bytes.
 
 A bridge that scans block windows must return a cursor on every page. The service passes only the checkpoint of the last ingested event, and an address without events has none, so a bridge that resumed from the checkpoint alone would scan the same empty range on every sync.
@@ -271,7 +273,7 @@ sequenceDiagram
     Worker->>DB: persist accountPass on continuation or failure, or finish the run
 ```
 
-Account sync does not own a provider cursor; provider resume state remains per watched address in `sync_cursors`. The pass covers the account's active addresses on enabled chains: an address on a disabled chain is skipped, like a disabled address, `POST /api/v1/addresses/{addressId}/sync` answers `404 Unsupported chain` for it, and a run of it queued before fails with `Chain <chainId> is not enabled, so its addresses are not synced.` without calling the provider. The run checkpoint holds only the pass: the keyset of the last address the scan finished, whether the scan is complete, the number of addresses visited, the addresses deferred because their lease was busy (at most 100), the addresses waiting to retry a retryable provider failure with their failed attempts and when each is due (at most 50) and the last such error, and the addresses that failed terminally (the count and the first 10 with their errors, kept to printable ASCII), below the 16 KiB limit of `run_checkpoint`. The claim budget (pages, events, duration) ends a claim between addresses; an address with pages left ends the claim without moving the keyset, so the next claim drains it first. A retryable provider failure that is no throttling, such as a timeout on a heavy address, may concern that address only, so the address waits on a retry list with the attempts and backoff of a run (`max-attempts`, `retry-backoff-base-delay` doubling up to `retry-backoff-max-delay`), and its last attempt records it as failed; pages it commits before a failure count as progress and start its count over. The retries that are due go first in each claim, so the list drains while a long scan goes on; with the list full (50), the scan waits at the next failing address. A run left waiting only for retries is requeued as `ADDRESS_RETRY`, due when the first of them is, with the waiting addresses and the last error in `last_error`. Retryable failures of three addresses in a row, with no page committed between them, are the provider's: the claim fails as a retryable failure of the run, and those failures are not counted against their addresses. Throttling, a `429` or a rate limit, fails the claim the same way at once. A failed claim and a claim interrupted by shutdown save the pass like a continuation does. The run completes when the scan is complete and no revisit or retry is pending: `SUCCEEDED`, or `FAILED` with the failed addresses in `last_error`. A run queued by an earlier version carries no pass and starts a fresh one, which only replays idempotent cursors.
+Account sync does not own a provider cursor; provider resume state remains per watched address in `sync_cursors`. The pass covers the account's active addresses on enabled chains: an address on a disabled chain is skipped, like a disabled address. For such an address `POST /api/v1/addresses/{addressId}/sync` answers `404 Unsupported chain`, and a run of it queued before fails with `Chain <chainId> is not enabled, so its addresses are not synced.` without calling the provider. An address disabled, or whose chain is, after the pass read it leaves the pass without an error: the scan skips it before its fetch, and a page fetched meanwhile is dropped. The run checkpoint holds only the pass: the keyset of the last address the scan finished, whether the scan is complete, the number of addresses visited, the addresses deferred because their lease was busy (at most 100), the addresses waiting to retry a retryable provider failure with their failed attempts and when each is due (at most 50) and the last such error, and the addresses that failed terminally (the count and the first 10 with their errors, kept to printable ASCII), below the 16 KiB limit of `run_checkpoint`. The claim budget (pages, events, duration) ends a claim between addresses; an address with pages left ends the claim without moving the keyset, so the next claim drains it first. A retryable provider failure that is no throttling, such as a timeout on a heavy address, may concern that address only, so the address waits on a retry list with the attempts and backoff of a run (`max-attempts`, `retry-backoff-base-delay` doubling up to `retry-backoff-max-delay`), and its last attempt records it as failed; pages it commits before a failure count as progress and start its count over. The retries that are due go first in each claim, so the list drains while a long scan goes on; with the list full (50), the scan waits at the next failing address. A run left waiting only for retries is requeued as `ADDRESS_RETRY`, due when the first of them is, with the waiting addresses and the last error in `last_error`. Retryable failures of three addresses in a row, with no page committed between them, are the provider's: the claim fails as a retryable failure of the run, and those failures are not counted against their addresses. Throttling, a `429` or a rate limit, fails the claim the same way at once. A failed claim and a claim interrupted by shutdown save the pass like a continuation does. The run completes when the scan is complete and no revisit or retry is pending: `SUCCEEDED`, or `FAILED` with the failed addresses in `last_error`. A run queued by an earlier version carries no pass and starts a fresh one, which only replays idempotent cursors.
 
 ### Observed Event Ingestion
 
@@ -279,7 +281,7 @@ Account sync does not own a provider cursor; provider resume state remains per w
 sequenceDiagram
     participant Client
     participant API as ObservedEventController
-    participant Ingest as ObservedTransactionIngestionService
+    participant Ingest as ObservedEventApplicationService
     participant Domain as TransactionStateMachine
     participant Repo as jOOQ Repositories
     participant DB as PostgreSQL
@@ -296,7 +298,7 @@ sequenceDiagram
     Repo->>DB: INSERT/UPDATE observed_transactions
     Ingest->>Repo: insert outbox event if state changed
     Repo->>DB: INSERT outbox_events ON CONFLICT DO NOTHING
-    Ingest-->>API: IngestionResponse
+    Ingest-->>API: ObservedEventIngestionResult
     API-->>Client: 200 OK or 201 Created
 ```
 
@@ -305,7 +307,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Provider
-    participant Ingest as ObservedTransactionIngestionService
+    participant Ingest as ObservedEventApplicationService
     participant Domain as TransactionStateMachine
     participant DB as PostgreSQL
 
@@ -323,7 +325,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Provider
-    participant Ingest as ObservedTransactionIngestionService
+    participant Ingest as ObservedEventApplicationService
     participant Domain as TransactionStateMachine
     participant DB as PostgreSQL
 
@@ -341,7 +343,7 @@ sequenceDiagram
 sequenceDiagram
     participant Poller as OutboxPublisherJob
     participant DB as PostgreSQL
-    participant Publisher as LocalPublisherAdapter
+    participant Publisher as LocalStructuredLogOutboxEventPublisher
 
     Poller->>DB: SELECT due NEW/FAILED rows FOR UPDATE SKIP LOCKED
     Poller->>DB: set next_attempt_at = leaseUntil and commit
@@ -363,7 +365,7 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant Provider
-    participant Ingest as ObservedTransactionIngestionService
+    participant Ingest as ObservedEventApplicationService
     participant Domain as TransactionStateMachine
     participant DB as PostgreSQL
 
@@ -386,18 +388,21 @@ com.example.assetsync
     error
   application
     account
+    observability
+    outbox
     sync
     transaction
-    outbox
   domain
     model
     policy
     state
   infrastructure
+    outbox
     persistence
     provider
-    outbox
-    observability
+      alchemy
+      simulator
+    sync
   config
 ```
 
@@ -439,7 +444,7 @@ OutboxEvent:
 - Durable integration event created inside the same database transaction as the observed transaction change.
 
 SyncRun:
-- Durable queue and diagnostic record for manual or scheduled sync execution.
+- Durable queue and diagnostic record for sync execution. Runs are created by the two sync endpoints, and under `demo` one stale run is seeded for recovery to find; nothing schedules a sync.
 - Not a source of truth for transaction state.
 
 ### Enums
@@ -519,7 +524,7 @@ Constraints and indexes:
 
 Rationale:
 - Confirmation thresholds are configuration, not code constants.
-- The table is seeded by Liquibase for local chains supported by the MVP.
+- Liquibase seeds `local-evm` (changeset 005) and `eth-sepolia`, enabled, and `eth-mainnet`, disabled (changeset 015).
 
 ### `asset_configs`
 
@@ -1188,7 +1193,7 @@ API tests:
 
 Logs:
 - Use structured log messages in production-like configuration.
-- `X-Request-Id` is echoed to clients, attached to `ProblemDetail`, stored in MDC for request logs, and copied into sync provider executor tasks. Executor threads restore their previous MDC state after each task to avoid leaking request ids between syncs.
+- `X-Request-Id` is echoed to clients, attached to `ProblemDetail`, and stored in MDC for request logs. A sync runs later on a worker thread, outside the request that queued it, so its log lines have no request id: the service's own sync lines name the sync run in their text, and a provider's lines name the chain, address, and asset. The worker's MDC is copied into each provider fetch task, and executor threads restore their previous MDC state after each task.
 - Include correlation and domain fields where available:
   - `syncRunId`
   - `accountId`
@@ -1203,7 +1208,7 @@ Metrics, as registered by `AssetSyncMetrics`:
 - `asset.sync.observed.events.ingested{result,status}`: counter per ingestion outcome (`CREATED`, `UPDATED`, `NO_CHANGE`, `CONFLICT`) and resulting status.
 - `asset.sync.observed.transaction.transitions{eventType,status}`: counter of lifecycle transitions that emitted an outbox event.
 - `asset.sync.observed.transaction.immutable.conflicts`: counter of rejected immutable-field conflicts.
-- `asset.sync.sync.runs{targetType,status}`: counter of sync run state changes (`QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`).
+- `asset.sync.sync.runs{targetType,status}`: counter of sync run events: a run created (`QUEUED`), a claim of a run (`RUNNING`, once per claim, so a run requeued five times counts six), and a run finished (`SUCCEEDED`, `FAILED`), a run failed at max attempts, by recovery, or by the continuation limit included. A requeue back to `QUEUED` is not counted; continuations are in `asset.sync.sync.continuations`.
 - `asset.sync.sync.continuations{reason,targetType}`: counter of healthy requeues (`CONTINUATION`, `LEASE_BUSY`, `PROVIDER_BUSY`, `ADDRESS_RETRY`) that do not consume retry budget.
 - `asset.sync.provider.fetches{targetType,status}`: counter of provider page fetches (`ATTEMPTED`, `SUCCEEDED`, `FAILED`).
 - `asset.sync.provider.fetch.duration{targetType,status}`: timer around one provider page fetch.

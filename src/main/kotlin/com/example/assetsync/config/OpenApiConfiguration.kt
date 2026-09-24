@@ -2,7 +2,6 @@ package com.example.assetsync.config
 
 import io.swagger.v3.oas.models.Components
 import io.swagger.v3.oas.models.OpenAPI
-import io.swagger.v3.oas.models.PathItem
 import io.swagger.v3.oas.models.info.Info
 import io.swagger.v3.oas.models.media.ArraySchema
 import io.swagger.v3.oas.models.media.Content
@@ -24,15 +23,21 @@ private const val PROBLEM_DETAIL_SCHEMA = "ProblemDetail"
 
 /**
  * An error every API operation shares, declared once under `components.responses`. [mutatingOnly]
- * marks the 403: `READ` may call every GET, so only the operations that change state need
- * `OPERATOR`. The operation-specific errors (404, 409, 415, 429) are in docs/api.md section 14.
+ * marks the 403: `READ` may call the methods in [API_READ_METHODS], so only the operations that
+ * change state need `OPERATOR`. The operation-specific errors (404, 409, 415, 429) are in
+ * docs/api.md section 14.
  */
 private class SharedProblem(val status: String, val name: String, val description: String, val mutatingOnly: Boolean = false)
 
 private val SHARED_PROBLEMS = listOf(
     SharedProblem("400", "BadRequest", "The request is invalid: malformed JSON, a field or parameter that breaks its rules, or failed validation, listed in `errors`."),
-    SharedProblem("401", "Unauthorized", "HTTP Basic credentials are missing or wrong."),
-    SharedProblem("403", "Forbidden", "The caller's role may not call this operation; it needs OPERATOR.", mutatingOnly = true),
+    SharedProblem("401", "Unauthorized", "HTTP Basic credentials are missing or wrong. Not in the local and test profiles, which check no credentials."),
+    SharedProblem(
+        "403",
+        "Forbidden",
+        "The caller's role may not call this operation; it needs OPERATOR. Not in the local and test profiles, which check no credentials.",
+        mutatingOnly = true,
+    ),
     SharedProblem("500", "InternalError", "An unexpected failure; the detail is generic and the exception goes to the log."),
     SharedProblem("503", "DatabaseUnavailable", "The database could not serve the request, the credential check included."),
 )
@@ -84,7 +89,7 @@ class OpenApiConfiguration {
             openApi.paths.orEmpty().values.forEach { path ->
                 path.readOperationsMap().forEach { (method, operation) ->
                     SHARED_PROBLEMS
-                        .filter { !it.mutatingOnly || method != PathItem.HttpMethod.GET }
+                        .filter { !it.mutatingOnly || API_READ_METHODS.none { read -> read.name() == method.name } }
                         .forEach { operation.responses.putIfAbsent(it.status, ApiResponse().`$ref`(it.name)) }
                 }
             }

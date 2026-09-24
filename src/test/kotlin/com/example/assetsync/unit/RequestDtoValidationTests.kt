@@ -110,5 +110,40 @@ class RequestDtoValidationTests {
         assertEquals(listOf("amount"), validator.validate(event.copy(amount = " ")).paths())
     }
 
+    @Test
+    fun `a control character is refused in an identifier, and in free text unless it is a tab or a line break`() {
+        listOf(
+            event.copy(chainId = "local\u0000evm") to "chainId",
+            event.copy(address = "0xab\u001fc") to "address",
+            event.copy(asset = "US\u007fDC") to "asset",
+        ).forEach { (request, field) ->
+            assertEquals(
+                listOf(field to "$field must not contain control characters"),
+                validator.validate(request).map { it.propertyPath.toString() to it.message },
+            )
+        }
+        val address = RegisterWatchedAddressRequest(chainId = "local-evm", address = "0xabc123", asset = "USDC")
+        assertEquals(listOf("chainId"), validator.validate(address.copy(chainId = "local\tevm")).paths())
+        assertEquals(listOf("label"), validator.validate(address.copy(label = "wallet\u0000")).paths())
+        assertEquals(listOf("externalRef"), validator.validate(CreateAccountRequest(externalRef = "ref\u0007")).paths())
+        assertTrue(validator.validate(address.copy(label = "first line\r\n\tsecond")).isEmpty())
+
+        val long = assertTimeoutPreemptively(Duration.ofSeconds(1)) {
+            validator.validate(event.copy(address = "a".repeat(99_999) + "\u0000")).map { it.message }.toSet()
+        }
+        assertEquals(setOf("address must be at most 128 characters", "address must not contain control characters"), long)
+    }
+
+    @Test
+    fun `control characters are checked as the service stores the value, trimmed, and include the C1 range`() {
+        val address = RegisterWatchedAddressRequest(chainId = "local-evm", address = "0xabc123", asset = "USDC")
+        // Surrounding whitespace is trimmed before storage, so it stays accepted.
+        assertTrue(validator.validate(address.copy(asset = "USDC\r\n", chainId = "\tlocal-evm")).isEmpty())
+        assertTrue(validator.validate(event.copy(address = "0xabc123\n")).isEmpty())
+        // U+0085 and U+009B are control characters too, as the chain identity rules count them.
+        assertEquals(listOf("label"), validator.validate(address.copy(label = "wallet\u0085x")).paths())
+        assertEquals(listOf("externalRef"), validator.validate(CreateAccountRequest(externalRef = "ref\u009Bx")).paths())
+    }
+
     private fun <T> Set<ConstraintViolation<T>>.paths(): List<String> = map { it.propertyPath.toString() }
 }

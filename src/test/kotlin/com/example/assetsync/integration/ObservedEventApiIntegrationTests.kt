@@ -4,8 +4,10 @@ import com.example.assetsync.TestcontainersConfiguration
 import com.example.assetsync.api.dto.MAX_AMOUNT_LENGTH
 import com.example.assetsync.api.dto.MAX_TX_HASH_LENGTH
 import com.example.assetsync.config.JacksonConfiguration.Companion.MAX_JSON_STRING_LENGTH
+import com.example.assetsync.infrastructure.provider.ProviderEventsPageResponse
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.exc.MismatchedInputException
 import java.sql.Timestamp
 import java.time.Instant
 import java.util.UUID
@@ -17,6 +19,7 @@ import kotlin.test.assertEquals
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc
 import org.springframework.boot.test.context.SpringBootTest
@@ -290,6 +293,57 @@ class ObservedEventApiIntegrationTests(
     }
 
     @Test
+    fun `a value that fails its check is reported under its own field`() {
+        createWatchedAddress(address = "0xobserved-field-names")
+
+        listOf(
+            observedEventBody(address = "0xobserved-field-names", amount = "-1.00") to
+                "amount: amount must be a non-negative decimal string that fits numeric(38,18)",
+            observedEventBody(address = "0xobserved-field-names", direction = "SIDEWAYS") to "direction: direction must be INBOUND or OUTBOUND",
+            observedEventBody(address = "0xobserved-field-names", statusValue = "PENDING") to "status: status must be SEEN, CONFIRMED, or REVERTED",
+        ).forEach { (body, error) ->
+            mockMvc.perform(post("/api/v1/observed-events").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isBadRequest)
+                .andExpect(jsonPath("$.errors.length()").value(1))
+                .andExpect(jsonPath("$.errors[0]").value(error))
+                .andExpect(jsonPath("$.detail").value(error))
+        }
+    }
+
+    @Test
+    fun `a number with a fraction is refused where an integer is expected, in requests and in bridge pages`() {
+        createWatchedAddress(address = "0xobserved-fraction")
+
+        listOf("eventIndex" to 1.9, "blockHeight" to 10.7, "confirmations" to 2.5).forEach { (field, value) ->
+            val body = observedEventPayload(address = "0xobserved-fraction").apply { this[field] = value }
+            mockMvc.perform(post("/api/v1/observed-events").contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(body)))
+                .andExpect(status().isBadRequest)
+                .andExpect(jsonPath("$.type").value("https://asset-sync-service/errors/invalid-request"))
+        }
+        assertEquals(0, tableCount("observed_transactions"))
+
+        // A whole number written as a float is that integer.
+        val whole = observedEventPayload(address = "0xobserved-fraction").apply {
+            this["eventIndex"] = 2.0
+            this["blockHeight"] = 1e3
+        }
+        mockMvc.perform(post("/api/v1/observed-events").contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(whole)))
+            .andExpect(status().isCreated)
+        assertEquals(2, singleInt("SELECT event_index FROM observed_transactions"))
+        assertEquals(1000L, singleLong("SELECT block_height FROM observed_transactions"))
+
+        // The HTTP bridge adapter reads its pages with this mapper too.
+        fun page(eventIndex: String) =
+            """{"hasMore":false,"events":[{"txHash":"0x1","eventIndex":$eventIndex,"address":"0xa","asset":"USDC","amount":"1",""" +
+                """"blockHeight":1.85E7,"confirmations":1,"direction":"INBOUND","status":"SEEN"}],"latestBlockHeight":18500000.0}"""
+        assertThrows<MismatchedInputException> { objectMapper.readValue(page("1.5"), ProviderEventsPageResponse::class.java) }
+        val read = objectMapper.readValue(page("2.0"), ProviderEventsPageResponse::class.java)
+        assertEquals(2, read.events!!.single()!!.eventIndex)
+        assertEquals(18_500_000L, read.events!!.single()!!.blockHeight)
+        assertEquals(18_500_000L, read.latestBlockHeight)
+    }
+
+    @Test
     fun `omitted required numeric fields return bad request`() {
         createWatchedAddress(address = "0xobserved-omitted-numeric")
 
@@ -560,6 +614,54 @@ class ObservedEventApiIntegrationTests(
             assertEquals(setOf("CREATED", "NO_CHANGE"), outcomes.map { it.second }.toSet())
             assertEquals(1, tableCount("observed_transactions"))
             assertEquals(1, tableCount("outbox_events"))
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `concurrent confirmations of one transaction create one confirmed outbox event`() {
+        createWatchedAddress(address = "0xobserved-concurrent-confirm")
+        postObservedEvent(address = "0xobserved-concurrent-confirm", confirmations = 1).andExpect(status().isCreated)
+
+        assertOneTransitionUnderConcurrency(address = "0xobserved-concurrent-confirm", statusValue = "CONFIRMED")
+
+        assertEquals("CONFIRMED", singleString("SELECT status FROM observed_transactions"))
+        assertEquals(1, eventCount("TRANSACTION_CONFIRMED"))
+    }
+
+    @Test
+    fun `concurrent reorgs of one transaction create one reverted outbox event`() {
+        createWatchedAddress(address = "0xobserved-concurrent-reorg")
+        postObservedEvent(address = "0xobserved-concurrent-reorg", confirmations = 3).andExpect(status().isCreated)
+
+        assertOneTransitionUnderConcurrency(address = "0xobserved-concurrent-reorg", statusValue = "REVERTED")
+
+        assertEquals("REVERTED", singleString("SELECT status FROM observed_transactions"))
+        assertEquals(1, eventCount("TRANSACTION_REVERTED"))
+    }
+
+    /** Four requests report the same change at once: the row lock lets one change the row and the rest find it done. */
+    private fun assertOneTransitionUnderConcurrency(address: String, statusValue: String) {
+        val executor = Executors.newFixedThreadPool(4)
+        val start = CountDownLatch(1)
+        try {
+            val futures = (1..4).map {
+                executor.submit(
+                    Callable {
+                        start.await()
+                        val result = mockMvc.perform(
+                            post("/api/v1/observed-events")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(observedEventBody(address = address, confirmations = 1, statusValue = statusValue)),
+                        ).andReturn()
+                        objectMapper.readTree(result.response.contentAsString)["result"].asText()
+                    },
+                )
+            }
+            start.countDown()
+
+            assertEquals(listOf("NO_CHANGE", "NO_CHANGE", "NO_CHANGE", "UPDATED"), futures.map { it.get(10, TimeUnit.SECONDS) }.sorted())
         } finally {
             executor.shutdownNow()
         }

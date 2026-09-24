@@ -24,6 +24,7 @@ private const val NON_BLANK_PATTERN = "(?s).*\\S.*"
 data class CreateAccountRequest(
     @field:Pattern(regexp = NON_BLANK_PATTERN, message = "externalRef must be non-blank when provided")
     @field:Size(max = MAX_EXTERNAL_REF_LENGTH, message = "externalRef must be at most $MAX_EXTERNAL_REF_LENGTH characters")
+    @field:NoControlCharacters(message = "externalRef must not contain control characters other than tabs and line breaks", allowLineBreaks = true)
     val externalRef: String? = null,
 )
 
@@ -39,15 +40,19 @@ data class AccountResponse(
 data class RegisterWatchedAddressRequest(
     @field:NotBlank(message = "chainId is required")
     @field:Size(max = MAX_CHAIN_ID_LENGTH, message = "chainId must be at most $MAX_CHAIN_ID_LENGTH characters")
+    @field:NoControlCharacters(message = "chainId must not contain control characters")
     val chainId: String = "",
     @field:NotBlank(message = "address is required")
+    // The chain's address rules refuse control characters, with the chain in the error.
     @field:Size(max = MAX_ADDRESS_LENGTH, message = "address must be at most $MAX_ADDRESS_LENGTH characters")
     val address: String = "",
     @field:NotBlank(message = "asset is required")
     @field:Size(max = MAX_ASSET_LENGTH, message = "asset must be at most $MAX_ASSET_LENGTH characters")
+    @field:NoControlCharacters(message = "asset must not contain control characters")
     val asset: String = "",
     @field:Pattern(regexp = NON_BLANK_PATTERN, message = "label must be non-blank when provided")
     @field:Size(max = MAX_LABEL_LENGTH, message = "label must be at most $MAX_LABEL_LENGTH characters")
+    @field:NoControlCharacters(message = "label must not contain control characters other than tabs and line breaks", allowLineBreaks = true)
     val label: String? = null,
 )
 

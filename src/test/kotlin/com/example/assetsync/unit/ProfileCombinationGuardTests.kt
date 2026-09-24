@@ -7,6 +7,8 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
+import org.springframework.boot.SpringApplication
 import org.springframework.context.annotation.Profile
 import org.springframework.core.annotation.AnnotationUtils
 import org.springframework.core.env.Profiles
@@ -50,6 +52,22 @@ class ProfileCombinationGuardTests {
             assertNotNull(violation, "$profiles must be refused")
             assertTrue(violation.startsWith("The profiles $profiles cannot be combined"), violation)
         }
+    }
+
+    @Test
+    fun `demo refuses the alchemy provider, whose preflight its seeded local-evm address would fail`() {
+        listOf("alchemy", "ALCHEMY").forEach { type ->
+            val violation = ProfileCombinationGuard.providerViolation(listOf("demo"), type)
+            assertNotNull(violation, type)
+            assertTrue(violation.startsWith("The demo profile cannot run with asset-sync.provider.type=alchemy"), violation)
+        }
+        assertNull(ProfileCombinationGuard.providerViolation(listOf("demo"), "http"))
+        assertNull(ProfileCombinationGuard.providerViolation(listOf("demo"), null))
+        assertNull(ProfileCombinationGuard.providerViolation(listOf("prod"), "alchemy"))
+
+        val environment = MockEnvironment().withProperty("asset-sync.provider.type", "alchemy").apply { setActiveProfiles("demo") }
+        val refused = assertThrows<IllegalStateException> { ProfileCombinationGuard().postProcessEnvironment(environment, SpringApplication()) }
+        assertTrue(refused.message!!.contains("Run Alchemy under prod"), refused.message)
     }
 
     @Test

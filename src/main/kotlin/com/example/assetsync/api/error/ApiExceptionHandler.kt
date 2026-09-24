@@ -436,8 +436,15 @@ class ApiExceptionHandler {
         return respond(ProblemDetails.internalError(request))
     }
 
-    private fun FieldError.toErrorMessage(): String =
-        "$field: ${defaultMessage ?: "invalid value"}"
+    /**
+     * A failed validation as `field: message`. A check that looks at a field as a whole, such as
+     * whether `amount` parses, is an `@AssertTrue` property named after the field (`isAmountValid`,
+     * read as `amountValid`), so it is reported under the field it checks.
+     */
+    private fun FieldError.toErrorMessage(): String {
+        val name = if (code == "AssertTrue") field.removeSuffix("Valid") else field
+        return "$name: ${defaultMessage ?: "invalid value"}"
+    }
 
     private fun respond(problem: ProblemDetail): ResponseEntity<ProblemDetail> =
         ResponseEntity.status(problem.status).body(problem)
