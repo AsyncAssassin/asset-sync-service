@@ -3,6 +3,21 @@ package com.example.assetsync.domain.model
 import java.math.BigDecimal
 import java.util.UUID
 
+/**
+ * A value of an observed transaction that the domain model refuses, such as a blank transaction
+ * hash or a negative amount: bad data from whoever reported the transaction. A broken invariant of
+ * the service's own logic stays a plain [IllegalArgumentException], so it is never taken for bad
+ * provider data.
+ */
+class DomainInvariantException(message: String) : IllegalArgumentException(message)
+
+/** Like [require], for a value the domain model refuses: throws [DomainInvariantException]. */
+private inline fun requireValid(value: Boolean, lazyMessage: () -> String) {
+    if (!value) {
+        throw DomainInvariantException(lazyMessage())
+    }
+}
+
 enum class TransactionStatus {
     SEEN,
     CONFIRMED,
@@ -45,11 +60,11 @@ data class ObservedTransactionNaturalKey(
     val asset: String,
 ) {
     init {
-        require(chainId.isNotBlank()) { "chainId must not be blank." }
-        require(txHash.isNotBlank()) { "txHash must not be blank." }
-        require(eventIndex >= 0) { "eventIndex must be non-negative." }
-        require(address.isNotBlank()) { "address must not be blank." }
-        require(asset.isNotBlank()) { "asset must not be blank." }
+        requireValid(chainId.isNotBlank()) { "chainId must not be blank." }
+        requireValid(txHash.isNotBlank()) { "txHash must not be blank." }
+        requireValid(eventIndex >= 0) { "eventIndex must be non-negative." }
+        requireValid(address.isNotBlank()) { "address must not be blank." }
+        requireValid(asset.isNotBlank()) { "asset must not be blank." }
     }
 }
 
@@ -70,7 +85,7 @@ data class TransactionImmutableFields(
     val amount: BigDecimal,
 ) {
     init {
-        require(amount.signum() >= 0) { "amount must be non-negative." }
+        requireValid(amount.signum() >= 0) { "amount must be non-negative." }
     }
 
     fun conflictingFields(other: TransactionImmutableFields): Set<ImmutableTransactionField> =
@@ -105,8 +120,8 @@ data class TransactionLifecycleState(
     val status: TransactionStatus,
 ) {
     init {
-        require(blockHeight >= 0) { "blockHeight must be non-negative." }
-        require(confirmations >= 0) { "confirmations must be non-negative." }
+        requireValid(blockHeight >= 0) { "blockHeight must be non-negative." }
+        requireValid(confirmations >= 0) { "confirmations must be non-negative." }
     }
 }
 
@@ -280,12 +295,12 @@ private fun validateObservedTransactionFields(
     blockHeight: Long,
     confirmations: Int,
 ) {
-    require(chainId.isNotBlank()) { "chainId must not be blank." }
-    require(txHash.isNotBlank()) { "txHash must not be blank." }
-    require(eventIndex >= 0) { "eventIndex must be non-negative." }
-    require(address.isNotBlank()) { "address must not be blank." }
-    require(asset.isNotBlank()) { "asset must not be blank." }
-    require(amount.signum() >= 0) { "amount must be non-negative." }
-    require(blockHeight >= 0) { "blockHeight must be non-negative." }
-    require(confirmations >= 0) { "confirmations must be non-negative." }
+    requireValid(chainId.isNotBlank()) { "chainId must not be blank." }
+    requireValid(txHash.isNotBlank()) { "txHash must not be blank." }
+    requireValid(eventIndex >= 0) { "eventIndex must be non-negative." }
+    requireValid(address.isNotBlank()) { "address must not be blank." }
+    requireValid(asset.isNotBlank()) { "asset must not be blank." }
+    requireValid(amount.signum() >= 0) { "amount must be non-negative." }
+    requireValid(blockHeight >= 0) { "blockHeight must be non-negative." }
+    requireValid(confirmations >= 0) { "confirmations must be non-negative." }
 }

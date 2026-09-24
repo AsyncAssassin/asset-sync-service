@@ -13,6 +13,7 @@ import com.example.assetsync.application.transaction.ObservedTransactionConflict
 import com.example.assetsync.application.transaction.WatchedAddressNotFoundException
 import com.example.assetsync.config.SyncHeartbeatScheduler
 import com.example.assetsync.config.SyncProperties
+import com.example.assetsync.domain.model.DomainInvariantException
 import com.example.assetsync.domain.model.TransitionOutcome
 import com.example.assetsync.domain.policy.AmountPolicy
 import com.example.assetsync.domain.policy.ChainIdentityNormalizer
@@ -728,7 +729,7 @@ class SyncApplicationService(
                 )
             } catch (exception: InvalidObservedEventRequestException) {
                 throw ProviderDataInvalidException("Provider returned an invalid event: ${exception.message}", exception)
-            } catch (exception: IllegalArgumentException) {
+            } catch (exception: DomainInvariantException) {
                 throw ProviderDataInvalidException("Provider returned an event that breaks a domain invariant: ${exception.message}", exception)
             } catch (exception: UnsupportedChainException) {
                 throw AddressConfigurationException("Chain ${exception.chainId} is not enabled, so its events cannot be ingested.", exception)

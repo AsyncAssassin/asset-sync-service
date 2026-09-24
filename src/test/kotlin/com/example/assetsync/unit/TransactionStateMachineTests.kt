@@ -2,6 +2,7 @@ package com.example.assetsync.unit
 
 import com.example.assetsync.domain.model.CurrentTransactionSnapshot
 import com.example.assetsync.domain.model.Direction
+import com.example.assetsync.domain.model.DomainInvariantException
 import com.example.assetsync.domain.model.ImmutableTransactionField
 import com.example.assetsync.domain.model.IncomingObservedTransaction
 import com.example.assetsync.domain.model.OutboxEventType
@@ -14,6 +15,7 @@ import java.math.BigDecimal
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNull
@@ -576,6 +578,19 @@ class TransactionStateMachineTests {
         )
     }
 
+
+    @Test
+    fun `a value the model refuses breaks a domain invariant, a broken rule of the service's own logic does not`() {
+        val blankHash = assertFailsWith<DomainInvariantException> { incoming(txHash = " ") }
+        assertEquals("txHash must not be blank.", blankHash.message)
+        assertFailsWith<DomainInvariantException> { incoming(blockHeight = -1) }
+        assertFailsWith<DomainInvariantException> { incoming(amount = BigDecimal("-1")) }
+
+        val ownLogic = assertFailsWith<IllegalArgumentException> {
+            outboxIdempotencyKey(transactionId = UUID.randomUUID(), status = TransactionStatus.SEEN, version = -1)
+        }
+        assertFalse(ownLogic is DomainInvariantException, "ingest must not blame the provider for it")
+    }
     private fun assertTransition(
         result: TransactionTransitionResult,
         outcome: TransitionOutcome,
