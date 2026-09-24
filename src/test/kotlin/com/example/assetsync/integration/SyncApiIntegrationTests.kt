@@ -1222,28 +1222,44 @@ class SyncApiIntegrationTests(
     }
 
     @Test
-    fun `an address disabled while its run syncs it fails the run with that reason`() {
+    fun `a page whose cursor or metadata the database cannot store fails before any of its events is written`() {
         val accountId = createAccount()
-        val addressId = registerAddress(accountId = accountId, address = "0xsync-disabled-mid-page")["id"].asText()
-        fakeChainProvider.setScript(
-            chainId = "local-evm",
-            address = "0xsync-disabled-mid-page",
-            asset = "USDC",
-            steps = listOf(
-                FakeChainProviderStep.Action {
-                    jdbcTemplate.update("UPDATE watched_addresses SET status = 'DISABLED' WHERE id = ?", UUID.fromString(addressId))
-                },
-                FakeChainProviderStep.Event(providerEvent(txHash = "0xsync-disabled-mid-page-1", address = "0xsync-disabled-mid-page")),
-            ),
-        )
+        val addressId = registerAddress(accountId = accountId, address = "0xsync-unstorable")["id"].asText()
+        val event = providerEvent(txHash = "0xsync-unstorable-1", address = "0xsync-unstorable")
+        val manyEntries = objectMapper.createObjectNode().apply { (0 until 1400).forEach { put("k%04d".format(it), 0) } }
+        listOf(
+            Triple("c\u0000", null, "a cursor with a NUL character"),
+            Triple("final", objectMapper.createObjectNode().put("k", "\u0000"), "metadata holds a NUL character"),
+            // 14 001 bytes as compact JSON, 16 800 as PostgreSQL prints the jsonb, over the 16 384 of the column check.
+            Triple("final", manyEntries, "metadata exceeded the configured maximum"),
+        ).forEach { (cursor, metadata, expectedError) ->
+            fakeChainProvider.setScript(
+                chainId = "local-evm",
+                address = "0xsync-unstorable",
+                asset = "USDC",
+                steps = listOf(
+                    FakeChainProviderStep.Page(
+                        FakeChainProviderPage(
+                            expectedCursor = null,
+                            events = listOf(event),
+                            nextCursor = cursor,
+                            hasMore = false,
+                            latestBlockHeight = 100,
+                            safeBlockHeight = 100,
+                            metadata = metadata,
+                        ),
+                    ),
+                ),
+            )
 
-        val syncRunId = submitAddressSync(addressId)
-        runNextClaimedSyncs()
+            val syncRunId = submitAddressSync(addressId)
+            runNextClaimedSyncs()
 
-        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
-        assertEquals("Watched address was disabled during the sync.", singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId))
-        assertEquals(1, singleInt("SELECT attempts FROM sync_runs WHERE id = ?", syncRunId))
-        assertEquals(0, tableCount("observed_transactions"))
+            assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId), expectedError)
+            val lastError = singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId)
+            assertTrue(lastError.contains(expectedError), "last_error for $expectedError: $lastError")
+            assertEquals(0, tableCount("observed_transactions"))
+        }
     }
 
     @Test

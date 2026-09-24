@@ -406,7 +406,7 @@ Runtime configuration:
 | `ASSET_SYNC_PAGINATION_CURSOR_LEASE_RETRY_DELAY` | `5s` | Requeue delay when an address's cursor lease is busy |
 | `ASSET_SYNC_PAGINATION_CONTINUATION_REQUEUE_DELAY` | `1s` | Requeue delay for a healthy continuation |
 | `ASSET_SYNC_PAGINATION_MAX_CURSOR_LENGTH` | `4096` | Longest provider cursor accepted in a page |
-| `ASSET_SYNC_PAGINATION_MAX_CHECKPOINT_JSON_LENGTH` | `16384` | Largest page checkpoint metadata accepted, in bytes |
+| `ASSET_SYNC_PAGINATION_MAX_CHECKPOINT_JSON_LENGTH` | `16384` | Largest page checkpoint metadata accepted, in bytes as PostgreSQL stores it |
 | `ASSET_SYNC_RECOVERY_ENABLED` | `true` | Enables the recovery job for expired leases and stale runs |
 | `ASSET_SYNC_RECOVERY_BATCH_SIZE` | `100` | Rows handled per recovery tick |
 | `ASSET_SYNC_RECOVERY_FIXED_DELAY` | `1m` | Delay between recovery ticks; a run left `RUNNING` by a crashed worker is requeued on the first tick after its lease expires |

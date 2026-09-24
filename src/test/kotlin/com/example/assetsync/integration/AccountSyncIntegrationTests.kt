@@ -410,9 +410,7 @@ class AccountSyncIntegrationTests(
         val leavingAddressId = registerAddress(accountId, "0xleave-disabled")
         registerAddress(accountId, "0xleave-three")
         scriptOneEvent("0xleave-one")
-        scriptDisabledWhileFetched("0xleave-disabled") {
-            jdbcTemplate.update("UPDATE watched_addresses SET status = 'DISABLED' WHERE id = ?", UUID.fromString(leavingAddressId))
-        }
+        scriptDisabledWhileFetched("0xleave-disabled") { disable(leavingAddressId) }
         scriptOneEvent("0xleave-three")
 
         val syncRunId = submitAccountSync(accountId)
@@ -438,6 +436,107 @@ class AccountSyncIntegrationTests(
 
         assertEquals("SUCCEEDED", runStatus(syncRunId))
         assertEquals(0, tableCount("observed_transactions"))
+    }
+
+    @Test
+    fun `an address disabled while its run syncs it fails the run with that reason`() {
+        val addressId = registerAddress(createAccount(), "0xleave-run")
+        scriptDisabledWhileFetched("0xleave-run") { disable(addressId) }
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaim()
+
+        assertEquals("FAILED", runStatus(syncRunId))
+        assertEquals("Watched address was disabled during the sync.", singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(0, tableCount("observed_transactions"))
+    }
+
+    @Test
+    fun `an address disabled while an empty page is fetched fails its run with that reason as well`() {
+        val addressId = registerAddress(createAccount(), "0xleave-empty")
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xleave-empty",
+            asset = "USDC",
+            steps = listOf(FakeChainProviderStep.Action { disable(addressId) }),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaim()
+
+        assertEquals("FAILED", runStatus(syncRunId))
+        assertEquals("Watched address was disabled during the sync.", singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId))
+    }
+
+    @Test
+    fun `an active address whose stored identity was never normalized fails visibly instead of leaving the pass`() {
+        val accountId = createAccount()
+        registerAddress(accountId, "0xlegacy-ok")
+        scriptOneEvent("0xlegacy-ok")
+        // Stored before its chain's identity rules existed: the provider's event normalizes to another address.
+        val legacyId = UUID.randomUUID()
+        jdbcTemplate.update(
+            "INSERT INTO watched_addresses (id, account_id, chain_id, address, asset, status, created_at, updated_at) " +
+                "VALUES (?, ?, 'local-evm', '0xLegacy-Mixed', 'USDC', 'ACTIVE', ?, ?)",
+            legacyId,
+            UUID.fromString(accountId),
+            Timestamp.from(Instant.now()),
+            Timestamp.from(Instant.now()),
+        )
+        scriptOneEvent("0xLegacy-Mixed")
+
+        val syncRunId = submitAccountSync(accountId)
+        runNextClaim()
+
+        assertEquals("FAILED", runStatus(syncRunId))
+        assertEquals(
+            "1 of 2 addresses failed terminally: $legacyId: Provider returned an event for an address that is not watched.",
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId),
+        )
+    }
+
+    @Test
+    fun `an address disabled after its batch was read is skipped without a fetch`() {
+        val accountId = createAccount()
+        registerAddress(accountId, "0xskip-first")
+        val secondId = registerAddress(accountId, "0xskip-second")
+        // While the first address is fetched, the second, read in the same batch, is disabled.
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xskip-first",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Action { disable(secondId) },
+                FakeChainProviderStep.Event(providerEvent(txHash = "0xskip-first-1", address = "0xskip-first")),
+            ),
+        )
+        scriptOneEvent("0xskip-second")
+
+        val syncRunId = submitAccountSync(accountId)
+        runNextClaim()
+
+        assertEquals("SUCCEEDED", runStatus(syncRunId))
+        assertEquals(listOf(key("0xskip-first")), fakeChainProvider.requestedKeys())
+    }
+
+    @Test
+    fun `an address that leaves the pass neither breaks nor extends a failure streak`() {
+        val accountId = createAccount()
+        registerAddress(accountId, "0xstreak-one")
+        registerAddress(accountId, "0xstreak-two")
+        val leavingId = registerAddress(accountId, "0xstreak-leaving")
+        registerAddress(accountId, "0xstreak-three")
+        scriptTimeout("0xstreak-one")
+        scriptTimeout("0xstreak-two")
+        scriptDisabledWhileFetched("0xstreak-leaving") { disable(leavingId) }
+        scriptTimeout("0xstreak-three")
+
+        val syncRunId = submitAccountSync(accountId)
+        runNextClaim()
+
+        // The address that left committed no page, so the three failures around it are one streak: an outage.
+        assertEquals("FAILURE", lastRequeueReason(syncRunId))
+        assertEquals(1, singleInt("SELECT failure_attempts FROM sync_runs WHERE id = ?", syncRunId))
     }
 
     /** An address the provider fails on every fetch, as with a timeout that no retry fixes. */
@@ -510,6 +609,19 @@ class AccountSyncIntegrationTests(
                 .andExpect(status().isCreated)
                 .andReturn().response.contentAsString,
         )["id"].asText()
+
+    private fun submitAddressSync(addressId: String): UUID =
+        UUID.fromString(
+            objectMapper.readTree(
+                mockMvc.perform(post("/api/v1/addresses/$addressId/sync"))
+                    .andExpect(status().isAccepted)
+                    .andReturn().response.contentAsString,
+            )["id"].asText(),
+        )
+
+    private fun disable(addressId: String) {
+        jdbcTemplate.update("UPDATE watched_addresses SET status = 'DISABLED' WHERE id = ?", UUID.fromString(addressId))
+    }
 
     private fun submitAccountSync(accountId: String): UUID =
         UUID.fromString(

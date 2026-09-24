@@ -17,7 +17,6 @@ import com.example.assetsync.domain.model.DomainInvariantException
 import com.example.assetsync.domain.model.TransitionOutcome
 import com.example.assetsync.domain.policy.AmountPolicy
 import com.example.assetsync.domain.policy.ChainIdentityNormalizer
-import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ObjectNode
 import java.time.Clock
 import java.time.Duration
@@ -49,7 +48,6 @@ class SyncApplicationService(
     private val syncProviderExecutor: ExecutorService,
     private val syncHeartbeatScheduler: SyncHeartbeatScheduler,
     private val syncProperties: SyncProperties,
-    private val objectMapper: ObjectMapper,
     private val clock: Clock,
 ) {
     private val logger = LoggerFactory.getLogger(SyncApplicationService::class.java)
@@ -146,7 +144,7 @@ class SyncApplicationService(
             ?: throw WatchedAddressByIdNotFoundException(claim.run.targetId)
         // Like a disabled address, an address whose chain is disabled is not synced, however long ago its run was queued.
         watchedAddressRepository.findSyncableById(watchedAddress.id)
-            ?: throw AddressConfigurationException("Chain ${watchedAddress.chainId} is not enabled, so its addresses are not synced.")
+            ?: throw WatchedAddressLeftSyncException(watchedAddress.id, chainNotSynced(watchedAddress.chainId))
         return when (processAddressWithinClaim(claim = claim, watchedAddress = watchedAddress, progress = progress, runBudget = runBudget)) {
             AddressSyncOutcome.Done -> SyncClaimOutcome.Done
             AddressSyncOutcome.LeaseBusy -> SyncClaimOutcome.Continuation(
@@ -242,10 +240,8 @@ class SyncApplicationService(
                     } else {
                         outages.failed(watchedAddressId, outcome)
                     }
-                AccountAddressOutcome.LeftPass -> {
-                    outages.progressed()
-                    pass.retryDone(watchedAddressId)
-                }
+                // It committed no page, so the streak neither grows nor breaks.
+                AccountAddressOutcome.LeftPass -> pass.retryDone(watchedAddressId)
             }
         }
 
@@ -263,6 +259,11 @@ class SyncApplicationService(
             for (watchedAddress in batch) {
                 if (claimBudgetExceeded(progress, runBudget)) {
                     return accountContinuation(pass, outages, SyncRunRequeueReason.CONTINUATION)
+                }
+                // Disabled, or on a chain disabled, since the batch was read: no longer part of this pass.
+                if (watchedAddressRepository.findSyncableById(watchedAddress.id) == null) {
+                    pass.skipPast(watchedAddress)
+                    continue
                 }
                 val pagesBefore = progress.accountPagesThisClaim
                 when (val outcome = processAccountAddress(claim, watchedAddress, progress, runBudget)) {
@@ -300,10 +301,7 @@ class SyncApplicationService(
                             outages.failed(watchedAddress.id, outcome)
                         }
                     }
-                    AccountAddressOutcome.LeftPass -> {
-                        outages.progressed()
-                        pass.advancePast(watchedAddress)
-                    }
+                    AccountAddressOutcome.LeftPass -> pass.skipPast(watchedAddress)
                 }
             }
         }
@@ -346,10 +344,7 @@ class SyncApplicationService(
                         outages.failed(watchedAddressId, outcome)
                     }
                 }
-                AccountAddressOutcome.LeftPass -> {
-                    outages.progressed()
-                    pass.revisitDone(watchedAddressId)
-                }
+                AccountAddressOutcome.LeftPass -> pass.revisitDone(watchedAddressId)
             }
         }
 
@@ -361,6 +356,19 @@ class SyncApplicationService(
             else -> SyncClaimOutcome.Done
         }
     }
+
+    /**
+     * Why [watchedAddress] no longer takes part in syncs, or null while it does: the address was
+     * disabled, or its chain was.
+     */
+    private fun leftSyncReason(watchedAddress: WatchedAddress): String? =
+        when {
+            watchedAddressRepository.findSyncableById(watchedAddress.id) != null -> null
+            watchedAddressRepository.findActiveById(watchedAddress.id) == null -> "Watched address was disabled during the sync."
+            else -> chainNotSynced(watchedAddress.chainId)
+        }
+
+    private fun chainNotSynced(chainId: String): String = "Chain $chainId is not enabled, so its addresses are not synced."
 
     /** An address deferred earlier, as long as it still belongs to the pass: syncable and of this account. */
     private fun deferredPassAddress(accountId: UUID, watchedAddressId: UUID): WatchedAddress? =
@@ -549,6 +557,8 @@ class SyncApplicationService(
                     return AddressSyncOutcome.ProviderBusy
                 }
 
+                // Disabled, or its chain was, while the page was fetched: the run stops before ingesting it.
+                leftSyncReason(watchedAddress)?.let { throw WatchedAddressLeftSyncException(watchedAddress.id, it) }
                 cursorHeartbeat.throwIfFailed()
                 val pageChanges = ingestWholePage(watchedAddress, page.events, progress)
                 addressEventsSeenThisClaim += page.events.size
@@ -767,8 +777,10 @@ class SyncApplicationService(
             val result = try {
                 observedEventApplicationService.ingest(event.toIngestCommand(source = "provider:${chainProviderPort.providerName}"))
             } catch (exception: WatchedAddressNotFoundException) {
-                // validatePage matched every event to the watched address, so it was disabled since.
-                throw WatchedAddressLeftSyncException(watchedAddress.id, "Watched address was disabled during the sync.", exception)
+                // validatePage matched every event to the watched address, so it most likely left the syncs just now.
+                // An address still syncable, such as one whose stored identity predates normalization, stays a data error.
+                leftSyncReason(watchedAddress)?.let { throw WatchedAddressLeftSyncException(watchedAddress.id, it, exception) }
+                throw ProviderDataInvalidException("Provider returned an event for an address that is not watched.", exception)
             } catch (exception: ObservedTransactionConflictException) {
                 // The natural key has no direction: a transfer of the address to itself sent as two
                 // rows on either side of a page boundary ends here, after the first row was stored.
@@ -784,11 +796,7 @@ class SyncApplicationService(
             } catch (exception: DomainInvariantException) {
                 throw ProviderDataInvalidException("Provider returned an event that breaks a domain invariant: ${exception.message}", exception)
             } catch (exception: UnsupportedChainException) {
-                throw WatchedAddressLeftSyncException(
-                    watchedAddress.id,
-                    "Chain ${exception.chainId} is not enabled, so its events cannot be ingested.",
-                    exception,
-                )
+                throw WatchedAddressLeftSyncException(watchedAddress.id, chainNotSynced(exception.chainId), exception)
             }
             if (result.result == TransitionOutcome.CREATED || result.result == TransitionOutcome.UPDATED) {
                 changed += 1
@@ -811,12 +819,20 @@ class SyncApplicationService(
         if (page.events.size > request.limit || page.events.size > pagination.pageSize) {
             throw ProviderDataInvalidException("Provider returned more events than the requested page limit.")
         }
-        if ((page.nextCursor?.length ?: 0) > pagination.maxCursorLength) {
-            throw ProviderDataInvalidException("Provider returned a cursor longer than the configured maximum.")
+        page.nextCursor?.let { cursor ->
+            if (cursor.length > pagination.maxCursorLength) {
+                throw ProviderDataInvalidException("Provider returned a cursor longer than the configured maximum.")
+            }
+            if ('\u0000' in cursor) {
+                throw ProviderDataInvalidException("Provider returned a cursor with a NUL character, which the database cannot store.")
+            }
         }
+        // Checked as PostgreSQL stores it, so the checkpoint write after the page's events cannot fail on it.
         page.metadata?.let { metadata ->
-            val size = objectMapper.writeValueAsBytes(metadata).size
-            if (size > pagination.maxCheckpointJsonLength) {
+            if (JsonbText.containsNul(metadata)) {
+                throw ProviderDataInvalidException("Provider checkpoint metadata holds a NUL character, which the database cannot store.")
+            }
+            if (JsonbText.byteLength(metadata) > pagination.maxCheckpointJsonLength) {
                 throw ProviderDataInvalidException("Provider checkpoint metadata exceeded the configured maximum.")
             }
         }
@@ -1347,7 +1363,7 @@ class CursorCheckpointAdvanceStaleException(
 class WatchedAddressLeftSyncException(
     val watchedAddressId: UUID,
     message: String,
-    cause: Throwable,
+    cause: Throwable? = null,
 ) : RuntimeException(message, cause)
 
 class SyncRunClaimLostException(

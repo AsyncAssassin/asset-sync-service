@@ -159,6 +159,7 @@ Scenario:
 - The HTTP provider omits required `events` or `hasMore`.
 - The provider returns too many events, an oversized cursor/body/checkpoint, a page field string over 100 000 characters, `hasMore=true` without cursor progress, wrong address/asset, or invalid high-water fields. A final page may omit `nextCursor`, even without new events or heights.
 - The provider returns one event twice in a page with another direction or amount, such as a transfer of the address to itself sent as two rows.
+- The provider returns a cursor or checkpoint metadata that PostgreSQL cannot store: a NUL character, or metadata over `max-checkpoint-json-length` as PostgreSQL writes jsonb out, with a space after every `:` and `,` and numbers in full.
 - The provider returns events out of non-decreasing `(blockHeight, eventIndex, txHash)` order, or a page whose first event is behind the stored `last_processed_block_height` / `last_processed_event_index` checkpoint.
 - An event carries an amount that is negative or does not fit `numeric(38, 18)`, which PostgreSQL would otherwise round or reject, or a transaction hash that is blank, longer than 128 characters, or breaks the chain's format rules (`0x` and 64 hex digits on `eth-sepolia` and `eth-mainnet`, no whitespace, `/`, or `:` on `local-evm`, no control characters anywhere). Every event of the page is checked before the first one is written.
 - The Alchemy adapter meets a row it cannot map honestly: a `uniqueId` without the ERC-20 `:log:{n}` suffix or not matching the transaction hash, a non-hex `blockNum` or `rawContract.value`, a `rawContract.decimal` that disagrees with the registry, a missing address or contract, a category other than `erc20`, a row on the wrong side of the watched address, or a malformed provider cursor.
@@ -168,7 +169,7 @@ Expected behavior:
 - Classify the page as terminal provider data invalid.
 - Do not ingest any event from a page that fails validation.
 - An event that passes page validation but fails ingestion deterministically is terminal as well: an immutable-field conflict, a rejected ingest rule, or a broken domain invariant. Events of the page ingested before it stay committed, and the retry budget is not spent on attempts that would fail the same way.
-- An address disabled while its run syncs it, or whose chain is disabled meanwhile, is no provider error: its own run fails with that reason, and an account pass leaves the address out without an error.
+- An address disabled while its run syncs it, or whose chain is disabled meanwhile, is no provider error: the page being fetched is dropped, its own run fails with that reason, and an account pass leaves the address out without an error. An active address whose stored identity the provider's events do not match, such as one stored before its chain's identity rules, stays an error of that address.
 - In an account sync a terminal failure ends only that address. The pass continues with the other addresses and, once complete, marks the run `FAILED` with `<n> of <m> addresses failed terminally: <addressId>: <error>; ...` in `last_error`. An address that keeps failing is taken out of account syncs with `PATCH /api/v1/addresses/{addressId}` and `{"status":"DISABLED"}`.
 - Do not advance `sync_cursors`.
 - Mark the current sync run `FAILED` with bounded `last_error`.
@@ -337,7 +338,7 @@ Operational signal:
 
 Scenario:
 
-- The configured provider rejects the credentials (HTTP 401/403 or a JSON-RPC `-32600` envelope) or answers with a redirect (HTTP 3xx), which the client does not follow, an enabled chain with active watched addresses has no provider network mapping, active watched addresses lack an enabled asset config, `start-mode=configured-block` has no start block for the chain, one block holds more events for the watched address than `asset-sync.sync.pagination.page-size`, which the page contract cannot split, or the chain of a synced event was disabled after its addresses were registered.
+- The configured provider rejects the credentials (HTTP 401/403 or a JSON-RPC `-32600` envelope) or answers with a redirect (HTTP 3xx), which the client does not follow, an enabled chain with active watched addresses has no provider network mapping, active watched addresses lack an enabled asset config, `start-mode=configured-block` has no start block for the chain, or one block holds more events for the watched address than `asset-sync.sync.pagination.page-size`, which the page contract cannot split. A chain disabled after its addresses were registered is no configuration failure: syncs leave its addresses out (section 8).
 
 Expected behavior:
 
