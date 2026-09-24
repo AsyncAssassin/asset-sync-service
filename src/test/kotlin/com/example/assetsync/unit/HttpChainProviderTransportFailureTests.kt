@@ -6,6 +6,7 @@ import com.example.assetsync.config.ProviderConfiguration
 import com.example.assetsync.config.ProviderProperties
 import com.example.assetsync.infrastructure.provider.HttpChainProvider
 import com.example.assetsync.infrastructure.provider.HttpChainProviderHealthIndicator
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.time.Duration
 import java.util.UUID
@@ -32,7 +33,7 @@ class HttpChainProviderTransportFailureTests {
 
     @Test
     fun `a refused connection is named by its kind, without the url`(output: CapturedOutput) {
-        val closedPort = ServerSocket(0).use { it.localPort }
+        val closedPort = ServerSocket(0, 0, InetAddress.getLoopbackAddress()).use { it.localPort }
         val provider = HttpChainProvider(bridgeClient(closedPort))
 
         val failure = assertThrows<ChainProviderUnavailableException> { provider.fetchObservedEventsPage(pageRequest()) }
@@ -51,7 +52,7 @@ class HttpChainProviderTransportFailureTests {
     @Test
     fun `a read timeout is named by its kind`(output: CapturedOutput) {
         // Accepted by the kernel's backlog and never answered.
-        ServerSocket(0).use { silent ->
+        ServerSocket(0, 0, InetAddress.getLoopbackAddress()).use { silent ->
             val provider = HttpChainProvider(bridgeClient(silent.localPort, readTimeout = Duration.ofMillis(200)))
 
             val failure = assertThrows<ChainProviderUnavailableException> { provider.fetchObservedEventsPage(pageRequest()) }
@@ -65,7 +66,7 @@ class HttpChainProviderTransportFailureTests {
     fun `another http client is classified by the same direct cause`() {
         // The JDK HttpClient, RestClient's default, wraps the ConnectException around a
         // ClosedChannelException; the kind comes from the exception RestClient wraps.
-        val closedPort = ServerSocket(0).use { it.localPort }
+        val closedPort = ServerSocket(0, 0, InetAddress.getLoopbackAddress()).use { it.localPort }
         val provider = HttpChainProvider(RestClient.builder().baseUrl(secretBaseUrl(closedPort)).build())
 
         val failure = assertThrows<ChainProviderUnavailableException> { provider.fetchObservedEventsPage(pageRequest()) }

@@ -12,6 +12,7 @@ import com.example.assetsync.config.AlchemyProviderProperties
 import com.example.assetsync.config.ProviderProperties
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyJsonRpcClient
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.time.Instant
 import kotlin.test.AfterTest
@@ -159,7 +160,7 @@ class AlchemyJsonRpcClientTests {
 
     @Test
     fun `transport failures are retryable and named by their kind, without the url that carries the key`() {
-        val closedPort = ServerSocket(0).use { it.localPort }
+        val closedPort = ServerSocket(0, 0, InetAddress.getLoopbackAddress()).use { it.localPort }
         val client = client(
             authMode = AlchemyAuthMode.PATH,
             pathEndpointTemplate = "http://127.0.0.1:$closedPort/{network}/v2/{apiKey}",
