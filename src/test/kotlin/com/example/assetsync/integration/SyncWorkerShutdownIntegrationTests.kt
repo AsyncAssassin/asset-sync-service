@@ -80,6 +80,11 @@ class SyncWorkerShutdownIntegrationTests(
         assertEquals(1, singleInt("SELECT attempts FROM sync_runs WHERE id = ?", runId))
         assertEquals("FAILURE", singleString("SELECT last_requeue_reason FROM sync_runs WHERE id = ?", runId))
         assertTrue(singleString("SELECT last_error FROM sync_runs WHERE id = ?", runId).contains("interrupted"))
+        // Due again at once: the next instance picks it up right after the deploy.
+        assertEquals(
+            true,
+            jdbcTemplate.queryForObject("SELECT next_attempt_at <= now() + interval '2 seconds' FROM sync_runs WHERE id = ?", Boolean::class.java, runId),
+        )
         assertNull(nullableString("SELECT locked_by FROM sync_runs WHERE id = ?", runId))
         assertNull(nullableString("SELECT locked_by FROM sync_cursors WHERE watched_address_id = ?", watchedAddressId))
     }

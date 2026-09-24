@@ -460,7 +460,7 @@ Notes:
 - `sync_runs` are operational records and the durable queue for async sync.
 - They do not participate in observed transaction idempotency.
 - Healthy provider pagination continuations increment `continuation_count`, not `failure_attempts`. So do a busy cursor lease (`LEASE_BUSY`) and a full provider pool (`PROVIDER_BUSY`), both retried after `asset-sync.sync.pagination.cursor-lease-retry-delay` and bounded by `max-continuations-per-run`.
-- Requeues caused by a rejected worker pool submission or by a worker shutdown carry `last_requeue_reason = FAILURE` but leave `failure_attempts` unchanged; `last_error` names the cause.
+- Requeues caused by a rejected worker pool submission or by a worker shutdown carry `last_requeue_reason = FAILURE` but leave `failure_attempts` unchanged and are due again at once; `last_error` names the cause.
 - Retryable provider failures, 429 throttling, and expired `RUNNING` recovery increment `failure_attempts`.
 - The partial unique in-flight index intentionally excludes legacy `STARTED`.
 - No retention job removes finished runs, so every sync request adds a row for good. No other table references `sync_runs`, and a finished run is only read back by `GET /api/v1/sync-runs/{id}`, so old terminal runs can be deleted by hand:

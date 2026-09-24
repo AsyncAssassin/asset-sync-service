@@ -162,10 +162,15 @@ class SyncRunLifecycleService(
         return marked
     }
 
+    /**
+     * Returns a run to the queue without spending its retry budget: a run interrupted by a worker
+     * shutdown or one the full worker pool could not take. Neither says anything about the run, so
+     * it is due again at once instead of after a backoff that grew with every claim.
+     */
     @Transactional
     fun requeue(claim: ClaimedSyncRun, eventsSeen: Int, eventsChanged: Int, lastError: String): Boolean {
         val now = Instant.now(clock)
-        val nextAttemptAt = retryNextAttemptAtForClaimAttempts(now = now, attempts = claim.attempts, seed = claim.run.id)
+        val nextAttemptAt = now
         val requeued = syncRunRepository.requeueFenced(
             id = claim.run.id,
             lockedBy = claim.lockedBy,
@@ -403,9 +408,6 @@ class SyncRunLifecycleService(
         }
         return cleared
     }
-
-    fun retryNextAttemptAtForClaimAttempts(now: Instant, attempts: Int, seed: UUID): Instant =
-        now.plus(backoffDelay(attempts = attempts, seed = seed))
 
     fun retryNextAttemptAt(now: Instant, failureAttempts: Int, seed: UUID): Instant =
         now.plus(backoffDelay(attempts = failureAttempts, seed = seed))

@@ -1143,7 +1143,7 @@ Provider timeout:
 
 Process shutdown during sync:
 - The worker stops claiming, drains in-flight runs up to `worker.shutdown-timeout`, then interrupts the rest.
-- Interrupted runs return to `QUEUED` without consuming `failure_attempts`; already committed page events remain valid.
+- Interrupted runs return to `QUEUED` without consuming `failure_attempts` and are due again at once; already committed page events remain valid.
 
 App crashes after DB commit before publish:
 - Outbox poller resumes after restart and publishes pending events.
