@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- The HTTP bridge credential can travel in a request header: `ASSET_SYNC_PROVIDER_AUTH_HEADER_NAME` (`Authorization` by default) and `ASSET_SYNC_PROVIDER_AUTH_HEADER_VALUE`, which no log line, error, or health detail quotes. Since 0.4.1 refused a user name or password in `base-url`, a token could only live in its path or query. A header name that is not an HTTP token or a value with a line break stops startup.
+
 ### Fixed
 
 - A sync that finds the provider pool full is requeued without spending its retry budget, like one that finds the worker pool full. It spent a `failure_attempts` each time and failed after five, although the service's own capacity says nothing about the provider.

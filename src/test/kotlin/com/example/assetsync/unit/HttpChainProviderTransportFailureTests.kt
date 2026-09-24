@@ -22,10 +22,10 @@ import org.springframework.boot.test.system.OutputCaptureExtension
 import org.springframework.web.client.RestClient
 
 /**
- * The bridge has no credential setting of its own, so a token can only live in the path or the
- * query of `base-url`. A transport failure must describe itself without that URL: its text reaches
- * the health details and the `lastError` that `READ` callers see. The bridge client comes from
- * ProviderConfiguration, as in production.
+ * A bridge token may still live in the path or the query of `base-url`, although the credential
+ * header (`asset-sync.provider.auth-header-value`) is the place for it. A transport failure must
+ * describe itself without that URL: its text reaches the health details and the `lastError` that
+ * `READ` callers see. The bridge client comes from ProviderConfiguration, as in production.
  */
 @ExtendWith(OutputCaptureExtension::class)
 class HttpChainProviderTransportFailureTests {

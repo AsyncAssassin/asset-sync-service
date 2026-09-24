@@ -35,6 +35,12 @@ class ProviderConfiguration {
         return RestClient.builder()
             .baseUrl(properties.baseUrl)
             .requestFactory(ProviderHttpSupport.requestFactory(properties.connectTimeout, properties.readTimeout))
+            // RestClient.Builder.apply(Consumer), not Kotlin's apply: the builder is `it`.
+            .apply {
+                if (properties.authHeaderValue.isNotEmpty()) {
+                    it.defaultHeader(properties.authHeaderName, properties.authHeaderValue)
+                }
+            }
             .build()
     }
 }
@@ -50,6 +56,13 @@ data class ProviderProperties(
     val baseUrl: String = "",
     val connectTimeout: Duration = Duration.ofSeconds(2),
     val readTimeout: Duration = Duration.ofSeconds(5),
+    /** Header that carries the bridge credential, such as `Authorization` or `X-API-Key`. */
+    val authHeaderName: String = "Authorization",
+    /**
+     * The bridge credential, sent in [authHeaderName] on every bridge request when set. A secret:
+     * no message, log line, or health detail quotes it, and [toString] masks it.
+     */
+    val authHeaderValue: String = "",
 ) {
     init {
         require(!connectTimeout.isNegative && !connectTimeout.isZero) {
@@ -58,5 +71,22 @@ data class ProviderProperties(
         require(!readTimeout.isNegative && !readTimeout.isZero) {
             "asset-sync.provider.read-timeout must be positive."
         }
+        require(authHeaderName.isNotEmpty() && authHeaderName.all { it in HEADER_NAME_CHARACTERS }) {
+            "asset-sync.provider.auth-header-name must be an HTTP header name."
+        }
+        // The message leaves the value out: it is the credential.
+        require(authHeaderValue.none { it == '\r' || it == '\n' }) {
+            "asset-sync.provider.auth-header-value must not contain a line break."
+        }
+    }
+
+    override fun toString(): String =
+        "ProviderProperties(type=$type, baseUrl=${if (baseUrl.isBlank()) "<unset>" else "<set>"}, " +
+            "connectTimeout=$connectTimeout, readTimeout=$readTimeout, authHeaderName=$authHeaderName, " +
+            "authHeaderValue=${if (authHeaderValue.isEmpty()) "<unset>" else "***"})"
+
+    private companion object {
+        /** RFC 9110 token characters, which a header name consists of. */
+        val HEADER_NAME_CHARACTERS: Set<Char> = (('a'..'z') + ('A'..'Z') + ('0'..'9') + "!#$%&'*+-.^_`|~".toList()).toSet()
     }
 }

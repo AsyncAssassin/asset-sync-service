@@ -129,7 +129,7 @@ class HttpChainProvider @Autowired constructor(
                             statusCode.value() == HttpStatus.UNAUTHORIZED.value() || statusCode.value() == HttpStatus.FORBIDDEN.value() ->
                                 throw ProviderConfigurationException(
                                     "Provider rejected the service's credentials with HTTP ${statusCode.value()}; " +
-                                        "check the bridge credentials and asset-sync.provider.base-url.",
+                                        "check asset-sync.provider.auth-header-value and base-url.",
                                 )
                             // A bridge may not know an address (404) or refuse one request: that address's error.
                             statusCode.is4xxClientError ->
