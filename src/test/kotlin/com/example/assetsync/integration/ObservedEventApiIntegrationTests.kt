@@ -604,6 +604,54 @@ class ObservedEventApiIntegrationTests(
         }
     }
 
+    @Test
+    fun `concurrent confirmations of one transaction create one confirmed outbox event`() {
+        createWatchedAddress(address = "0xobserved-concurrent-confirm")
+        postObservedEvent(address = "0xobserved-concurrent-confirm", confirmations = 1).andExpect(status().isCreated)
+
+        assertOneTransitionUnderConcurrency(address = "0xobserved-concurrent-confirm", statusValue = "CONFIRMED")
+
+        assertEquals("CONFIRMED", singleString("SELECT status FROM observed_transactions"))
+        assertEquals(1, eventCount("TRANSACTION_CONFIRMED"))
+    }
+
+    @Test
+    fun `concurrent reorgs of one transaction create one reverted outbox event`() {
+        createWatchedAddress(address = "0xobserved-concurrent-reorg")
+        postObservedEvent(address = "0xobserved-concurrent-reorg", confirmations = 3).andExpect(status().isCreated)
+
+        assertOneTransitionUnderConcurrency(address = "0xobserved-concurrent-reorg", statusValue = "REVERTED")
+
+        assertEquals("REVERTED", singleString("SELECT status FROM observed_transactions"))
+        assertEquals(1, eventCount("TRANSACTION_REVERTED"))
+    }
+
+    /** Four requests report the same change at once: the row lock lets one change the row and the rest find it done. */
+    private fun assertOneTransitionUnderConcurrency(address: String, statusValue: String) {
+        val executor = Executors.newFixedThreadPool(4)
+        val start = CountDownLatch(1)
+        try {
+            val futures = (1..4).map {
+                executor.submit(
+                    Callable {
+                        start.await()
+                        val result = mockMvc.perform(
+                            post("/api/v1/observed-events")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(observedEventBody(address = address, confirmations = 1, statusValue = statusValue)),
+                        ).andReturn()
+                        objectMapper.readTree(result.response.contentAsString)["result"].asText()
+                    },
+                )
+            }
+            start.countDown()
+
+            assertEquals(listOf("NO_CHANGE", "NO_CHANGE", "NO_CHANGE", "UPDATED"), futures.map { it.get(10, TimeUnit.SECONDS) }.sorted())
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
     private fun createWatchedAddress(address: String, asset: String = "USDC", chainId: String = "local-evm"): JsonNode {
         val accountId = createAccount()
         val result = mockMvc.perform(
