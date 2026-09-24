@@ -65,7 +65,7 @@ Required cases:
 | Area | Cases |
 | --- | --- |
 | Migrations | Full Liquibase changelog applies on an empty PostgreSQL database |
-| Network binding | `local` and `demo` listen on `127.0.0.1`, and `SERVER_ADDRESS=0.0.0.0` opens them |
+| Network binding | `local` and `demo` listen on `127.0.0.1`, `SERVER_ADDRESS=0.0.0.0` opens them, and an empty `SERVER_ADDRESS` stops the start |
 | Accounts | `external_ref` uniqueness, valid statuses, nullable `external_ref` |
 | Watched addresses | FK to account, FK to chain config, unique `chain_id + address + asset` |
 | Observed transactions | natural key uniqueness, invalid enum checks, non-negative checks |

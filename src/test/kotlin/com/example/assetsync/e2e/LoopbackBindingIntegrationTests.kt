@@ -3,7 +3,9 @@ package com.example.assetsync.e2e
 import com.example.assetsync.AssetSyncServiceApplication
 import java.net.InetAddress
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 import org.springframework.boot.builder.SpringApplicationBuilder
 import org.springframework.boot.web.embedded.tomcat.TomcatWebServer
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext
@@ -13,12 +15,13 @@ import org.testcontainers.utility.DockerImageName
 
 /**
  * `local` has no authentication and `demo` has public passwords, so started on a host both listen
- * on loopback only. `SERVER_ADDRESS` opens them, as the Docker image does inside its container.
+ * on loopback only. `SERVER_ADDRESS` opens them, as `docker-compose.yml` does inside the container;
+ * an empty one would open every interface and is refused.
  */
 class LoopbackBindingIntegrationTests {
 
     @Test
-    fun `local and demo listen on loopback unless SERVER_ADDRESS opens them`() {
+    fun `local and demo listen on loopback unless SERVER_ADDRESS opens them, and an empty one is refused`() {
         val postgres = PostgreSQLContainer(DockerImageName.parse("postgres:17-alpine"))
             .withDatabaseName("asset_sync_binding")
             .withUsername("asset_sync")
@@ -31,6 +34,8 @@ class LoopbackBindingIntegrationTests {
             boot(postgres, "demo", "--SERVER_ADDRESS=0.0.0.0").use { context ->
                 assertEquals("0.0.0.0", boundAddress(context))
             }
+            val empty = assertThrows<IllegalStateException> { boot(postgres, "local", "--SERVER_ADDRESS=") }
+            assertTrue(empty.message!!.contains("server.address is set but empty"), empty.message)
         } finally {
             postgres.stop()
         }

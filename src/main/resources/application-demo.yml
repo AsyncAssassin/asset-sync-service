@@ -24,6 +24,7 @@ asset-sync:
     # the SERVER_PORT variable follows the configured port whichever way it is set (the variable,
     # `--server.port`, an IDE run configuration); the self-call needs a fixed port (not 0) and no
     # servlet context path. The call goes to 127.0.0.1, where the server listens by default and with
-    # SERVER_ADDRESS=0.0.0.0, never to `localhost`, which can resolve to ::1 first.
+    # SERVER_ADDRESS=0.0.0.0, never to `localhost`, which can resolve to ::1 first; a bind to one other
+    # interface needs ASSET_SYNC_PROVIDER_BASE_URL pointed at it.
     # Schedulers stay ON so demo shows the outbox publisher and recovery live.
     base-url: http://127.0.0.1:${server.port:8080}/simulator
