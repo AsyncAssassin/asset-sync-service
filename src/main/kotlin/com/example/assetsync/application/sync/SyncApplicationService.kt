@@ -656,6 +656,7 @@ class SyncApplicationService(
             asset = request.asset,
         )
         var previous: ChainProviderObservedEvent? = null
+        val eventsByKey = HashMap<Pair<String, Int>, ChainProviderObservedEvent>()
         page.events.forEach { event ->
             val actual = ChainIdentityNormalizer.normalize(
                 chainId = event.chainId,
@@ -670,11 +671,19 @@ class SyncApplicationService(
             }
             // Checked for every event before the first one is written, so a bad event later in
             // the page cannot leave the events before it committed behind a terminal failure.
-            ChainIdentityNormalizer.txHashViolation(
-                chainId = expected.chainId,
-                txHash = ChainIdentityNormalizer.normalizeTxHash(expected.chainId, event.txHash),
-            )?.let { violation ->
+            val txHash = ChainIdentityNormalizer.normalizeTxHash(expected.chainId, event.txHash)
+            ChainIdentityNormalizer.txHashViolation(chainId = expected.chainId, txHash = txHash)?.let { violation ->
                 throw ProviderDataInvalidException("Provider returned an event with a malformed transaction hash: $violation")
+            }
+            // One row per event. An exact repeat is harmless, ingest is idempotent; a repeat with
+            // another direction or amount, such as a transfer of the address to itself sent as
+            // INBOUND and OUTBOUND, would conflict with the row written just before it.
+            val sameKey = eventsByKey.putIfAbsent(txHash to event.eventIndex, event)
+            if (sameKey != null && (sameKey.direction != event.direction || sameKey.amount.compareTo(event.amount) != 0)) {
+                throw ProviderDataInvalidException(
+                    "Provider returned event index ${event.eventIndex} of transaction $txHash twice in one page with another " +
+                        "direction or amount; a page carries one row per event, and a transfer of the address to itself is left out.",
+                )
             }
             if (AmountPolicy.normalizedOrNull(event.amount) == null) {
                 throw ProviderDataInvalidException("Provider returned an amount that is negative or does not fit numeric(38,18).")

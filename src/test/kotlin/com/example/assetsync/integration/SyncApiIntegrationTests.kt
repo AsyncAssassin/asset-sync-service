@@ -424,6 +424,46 @@ class SyncApiIntegrationTests(
     }
 
     @Test
+    fun `a page with one event twice in two directions is rejected before anything is written`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-self-transfer")
+        val addressId = watchedAddress["id"].asText()
+        // A bridge that sends a transfer of the address to itself as two rows of one log.
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-self-transfer",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = listOf(
+                            providerEvent(txHash = "0xsync-before", address = "0xsync-self-transfer", blockHeight = 99),
+                            providerEvent(txHash = "0xsync-self", address = "0xsync-self-transfer", eventIndex = 7, direction = Direction.INBOUND),
+                            providerEvent(txHash = "0xsync-self", address = "0xsync-self-transfer", eventIndex = 7, direction = Direction.OUTBOUND),
+                        ),
+                        nextCursor = "self-next",
+                        hasMore = false,
+                        safeBlockHeight = 100,
+                    ),
+                ),
+            ),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(
+            "Provider returned event index 7 of transaction 0xsync-self twice in one page with another direction or amount; a page " +
+                "carries one row per event, and a transfer of the address to itself is left out.",
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId),
+        )
+        assertEquals(0, tableCount("observed_transactions"), "the page is refused before its first event is written")
+        assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+    }
+
+    @Test
     fun `has more page without next cursor is rejected without advancing checkpoint`() {
         val accountId = createAccount()
         val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-has-more-null-cursor")

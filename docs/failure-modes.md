@@ -156,6 +156,7 @@ Scenario:
 
 - The HTTP provider omits required `events` or `hasMore`.
 - The provider returns too many events, an oversized cursor/body/checkpoint, a page field string over 100 000 characters, `hasMore=true` without cursor progress, wrong address/asset, or invalid high-water fields. A final page may omit `nextCursor`, even without new events or heights.
+- The provider returns one event twice in a page with another direction or amount, such as a transfer of the address to itself sent as two rows.
 - The provider returns events out of non-decreasing `(blockHeight, eventIndex, txHash)` order, or a page whose first event is behind the stored `last_processed_block_height` / `last_processed_event_index` checkpoint.
 - An event carries an amount that is negative or does not fit `numeric(38, 18)`, which PostgreSQL would otherwise round or reject, or a transaction hash that is blank or breaks the chain's format rules (`0x` and 64 hex digits on `eth-sepolia` and `eth-mainnet`, no whitespace, `/`, or `:` on `local-evm`, no control characters anywhere). Every event of the page is checked before the first one is written.
 - The Alchemy adapter meets a row it cannot map honestly: a `uniqueId` without the ERC-20 `:log:{n}` suffix or not matching the transaction hash, a non-hex `blockNum` or `rawContract.value`, a `rawContract.decimal` that disagrees with the registry, a missing address or contract, a category other than `erc20`, a row on the wrong side of the watched address, or a malformed provider cursor.
