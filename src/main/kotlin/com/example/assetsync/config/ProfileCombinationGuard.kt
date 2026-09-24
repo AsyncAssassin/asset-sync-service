@@ -51,7 +51,7 @@ class ProfileCombinationGuard : EnvironmentPostProcessor {
          * conditions do.
          */
         fun providerViolation(profiles: List<String>, providerType: String?): String? =
-            if ("demo" in profiles && providerType.equals("alchemy", ignoreCase = true)) {
+            if ("demo" in profiles && providerType.equals(ProviderType.ALCHEMY.name, ignoreCase = true)) {
                 "The demo profile cannot run with $PROVIDER_TYPE_PROPERTY=alchemy: demo syncs through its bundled " +
                     "simulator behind the HTTP bridge and seeds a local-evm address that Alchemy cannot serve, so every " +
                     "start after the first would fail the Alchemy preflight. Run Alchemy under prod, as " +

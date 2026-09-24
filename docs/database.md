@@ -51,7 +51,7 @@ Changelog rules:
 - `db.changelog-master.yaml` includes files in deterministic order.
 - Each changeset has a stable author and id.
 - Migrations are forward-only during MVP development.
-- Seed data is configuration only: the `local-evm` chain for fake-provider tests and local runs (changeset 005), and the `eth-sepolia` and `eth-mainnet` chains with their `USDC` asset configs (changeset 015). No business rows are seeded outside the `demo` profile.
+- Seed data is configuration only: the `local-evm` chain for fake-provider tests and local runs (changeset 005), and the `eth-sepolia` and `eth-mainnet` chains and the `USDC` asset configs of all three chains (changeset 015). No business rows are seeded outside the `demo` profile.
 - No PostgreSQL enum types in the MVP; use text plus `CHECK` constraints to keep status evolution simple.
 - Data-normalization changesets must fail fast when existing rows would collide after normalization. Operators must manually clean up or backfill those rows before rerunning the migration; changesets must not silently merge or delete business rows.
 - Changeset `006` adds input-length constraints as `NOT VALID`, so new writes are protected immediately while pre-existing oversized rows are not scanned during that upgrade step. Changeset `011` validates those constraints; operators with legacy oversized rows must clean them before applying `011`.
@@ -408,7 +408,7 @@ Notes:
 
 ### `sync_runs`
 
-Purpose: durable queue and diagnostic record for sync execution. Runs are created only by `POST /api/v1/addresses/{addressId}/sync` and `POST /api/v1/accounts/{accountId}/sync`; nothing schedules a sync.
+Purpose: durable queue and diagnostic record for sync execution. Runs are created by `POST /api/v1/addresses/{addressId}/sync` and `POST /api/v1/accounts/{accountId}/sync`, and under `demo` one stale `STARTED` run is seeded for recovery to find; nothing schedules a sync.
 
 Key columns:
 

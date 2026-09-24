@@ -6,6 +6,7 @@ import com.example.assetsync.application.transaction.ObservedEventIngestionResul
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
 import com.example.assetsync.domain.policy.AmountPolicy
+import com.example.assetsync.domain.policy.ChainIdentityNormalizer
 import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import jakarta.validation.constraints.AssertTrue
@@ -17,8 +18,8 @@ import java.math.BigDecimal
 import java.util.UUID
 
 const val MAX_CHAIN_ID_LENGTH = 64
-const val MAX_TX_HASH_LENGTH = 128
-const val MAX_ADDRESS_LENGTH = 128
+const val MAX_TX_HASH_LENGTH = ChainIdentityNormalizer.MAX_IDENTITY_LENGTH
+const val MAX_ADDRESS_LENGTH = ChainIdentityNormalizer.MAX_IDENTITY_LENGTH
 const val MAX_ASSET_LENGTH = 32
 const val MAX_AMOUNT_LENGTH = 80
 

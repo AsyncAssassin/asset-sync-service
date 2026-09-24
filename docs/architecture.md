@@ -444,7 +444,7 @@ OutboxEvent:
 - Durable integration event created inside the same database transaction as the observed transaction change.
 
 SyncRun:
-- Durable queue and diagnostic record for sync execution. Runs are created only by the two sync endpoints; nothing schedules a sync.
+- Durable queue and diagnostic record for sync execution. Runs are created by the two sync endpoints, and under `demo` one stale run is seeded for recovery to find; nothing schedules a sync.
 - Not a source of truth for transaction state.
 
 ### Enums
@@ -1193,7 +1193,7 @@ API tests:
 
 Logs:
 - Use structured log messages in production-like configuration.
-- `X-Request-Id` is echoed to clients, attached to `ProblemDetail`, and stored in MDC for request logs. A sync runs later on a worker thread, outside the request that queued it, so its log lines carry the sync run and worker ids instead of a request id; the worker's MDC is copied into each provider fetch task, and executor threads restore their previous MDC state after each task.
+- `X-Request-Id` is echoed to clients, attached to `ProblemDetail`, and stored in MDC for request logs. A sync runs later on a worker thread, outside the request that queued it, so its log lines have no request id: the service's own sync lines name the sync run in their text, and a provider's lines name the chain, address, and asset. The worker's MDC is copied into each provider fetch task, and executor threads restore their previous MDC state after each task.
 - Include correlation and domain fields where available:
   - `syncRunId`
   - `accountId`
@@ -1208,7 +1208,7 @@ Metrics, as registered by `AssetSyncMetrics`:
 - `asset.sync.observed.events.ingested{result,status}`: counter per ingestion outcome (`CREATED`, `UPDATED`, `NO_CHANGE`, `CONFLICT`) and resulting status.
 - `asset.sync.observed.transaction.transitions{eventType,status}`: counter of lifecycle transitions that emitted an outbox event.
 - `asset.sync.observed.transaction.immutable.conflicts`: counter of rejected immutable-field conflicts.
-- `asset.sync.sync.runs{targetType,status}`: counter of runs created (`QUEUED`), claimed (`RUNNING`), and finished (`SUCCEEDED`, `FAILED`), a run failed at max attempts, by recovery, or by the continuation limit included. A requeue back to `QUEUED` is not counted again; continuations are in `asset.sync.sync.continuations`.
+- `asset.sync.sync.runs{targetType,status}`: counter of sync run events: a run created (`QUEUED`), a claim of a run (`RUNNING`, once per claim, so a run requeued five times counts six), and a run finished (`SUCCEEDED`, `FAILED`), a run failed at max attempts, by recovery, or by the continuation limit included. A requeue back to `QUEUED` is not counted; continuations are in `asset.sync.sync.continuations`.
 - `asset.sync.sync.continuations{reason,targetType}`: counter of healthy requeues (`CONTINUATION`, `LEASE_BUSY`, `PROVIDER_BUSY`, `ADDRESS_RETRY`) that do not consume retry budget.
 - `asset.sync.provider.fetches{targetType,status}`: counter of provider page fetches (`ATTEMPTED`, `SUCCEEDED`, `FAILED`).
 - `asset.sync.provider.fetch.duration{targetType,status}`: timer around one provider page fetch.

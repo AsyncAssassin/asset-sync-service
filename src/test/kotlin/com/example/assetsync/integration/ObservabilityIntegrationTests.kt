@@ -7,6 +7,7 @@ import com.example.assetsync.application.sync.ChainProviderObservedEvent
 import com.example.assetsync.application.sync.SyncApplicationService
 import com.example.assetsync.application.sync.SyncCursorRepository
 import com.example.assetsync.application.sync.SyncRunLifecycleService
+import com.example.assetsync.config.SyncProperties
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
 import com.example.assetsync.infrastructure.outbox.OutboxGaugeRefreshJob
@@ -67,6 +68,7 @@ class ObservabilityIntegrationTests(
     @Autowired private val syncApplicationService: SyncApplicationService,
     @Autowired private val assetSyncMetrics: AssetSyncMetrics,
     @Autowired private val syncCursorRepository: SyncCursorRepository,
+    @Autowired private val syncProperties: SyncProperties,
 ) {
 
     @BeforeEach
@@ -285,7 +287,7 @@ class ObservabilityIntegrationTests(
         syncCursorRepository.ensureCursor(watchedAddressId = addressId, now = now)
         syncCursorRepository.tryAcquireCursorLease(addressId, lockedBy = "other-worker", lockToken = UUID.randomUUID(), now = now, leaseUntil = now.plusSeconds(60))
         mockMvc.perform(post("/api/v1/addresses/$addressId/sync")).andExpect(status().isAccepted)
-        jdbcTemplate.update("UPDATE sync_runs SET continuation_count = ?", 1000)
+        jdbcTemplate.update("UPDATE sync_runs SET continuation_count = ?", syncProperties.pagination.maxContinuationsPerRun)
 
         runNextClaimedSync()
 
