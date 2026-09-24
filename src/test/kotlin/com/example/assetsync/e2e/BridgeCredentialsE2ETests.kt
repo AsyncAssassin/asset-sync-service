@@ -3,6 +3,7 @@ package com.example.assetsync.e2e
 import com.example.assetsync.TestcontainersConfiguration
 import com.example.assetsync.application.sync.SyncApplicationService
 import com.example.assetsync.application.sync.SyncRunLifecycleService
+import java.net.InetAddress
 import java.net.ServerSocket
 import java.util.UUID
 import kotlin.test.assertEquals
@@ -103,7 +104,7 @@ class BridgeCredentialsE2ETests(
         private val SECRETS = listOf(PATH_SECRET, QUERY_SECRET)
 
         /** A port nothing listens on, so every fetch is refused. */
-        private val closedPort = ServerSocket(0).use { it.localPort }
+        private val closedPort = ServerSocket(0, 0, InetAddress.getLoopbackAddress()).use { it.localPort }
 
         @JvmStatic
         @DynamicPropertySource

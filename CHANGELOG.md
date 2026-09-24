@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Added
+
+- The HTTP bridge credential can travel in a request header: `ASSET_SYNC_PROVIDER_AUTH_HEADER_NAME` (`Authorization` by default) and `ASSET_SYNC_PROVIDER_AUTH_HEADER_VALUE`, which no log line, error, or health detail quotes. Since 0.4.1 refused a user name or password in `base-url`, a token could only live in its path or query. With a credential set, a header name that is not an HTTP token or a value with a line break stops startup; an empty name means `Authorization`.
+
+### Fixed
+
+- A bridge cursor reaches the bridge byte for byte. It went into the request URL unencoded: a `+`, as in base64, arrived as a space, and a cursor in JSON failed before the request was sent, as a retryable provider outage.
+- A bridge page that ends a sync without a cursor, without new events, and at an unchanged safe block succeeds. It failed terminally with `Provider returned a final page without a durable resume cursor or high-water checkpoint`, even when the address had a stored cursor, so two syncs of one address within a finality epoch were enough. The stored cursor or the checkpoint resumes the next sync, as it did before the rule existed.
+- A bridge page that holds one event twice with another direction or amount, as a transfer of the address to itself sent as two rows, fails before anything is written, with a message that names the event. When the two rows fall on either side of a page boundary, the second one fails with the same kind of message and the first stays stored. Before, both cases failed as a conflict with stored fields, after the first row had been stored. An exact repeat stays harmless.
+- A bridge that answers `401` or `403` fails the run at once as a configuration error and turns provider health `DOWN`, as Alchemy does. It counted as bad data of one address: every address failed while health stayed `UP`, the regression 0.4.0 brought to monitoring. An account sync now ends at the first such answer, from the bridge or from Alchemy, instead of asking once per address. A `404` stays the error of that one address.
+- The bridge client no longer follows a redirect, which sent the request, and any token in `base-url`, to the new location. A `3xx` from the bridge or from Alchemy now fails the run at once as a configuration error and turns provider health `DOWN`; Alchemy's was retried as an outage, and a redirect answering the Alchemy startup probe now stops the process like a rejected key.
+- A page or JSON-RPC answer whose bytes are not JSON text, which Jackson rejects with a `CharConversionException`, is bad data of that address, from the bridge and from Alchemy. It counted as a transport failure: retried as an outage while provider health went `DOWN`.
+- A provider response that trickles in, runs over the byte limit, or carries an error status with an endless body no longer holds a provider thread. The thread kept reading after the provider timeout had given up, because a socket read ignores the interrupt and Spring drained the rest of the body when it closed the response: four such responses took the whole pool, and every other sync spent its retries on `SyncCapacityExceededException`. The read now stops at the cancel, within one read timeout, and the body is closed unread, for the bridge and for Alchemy.
+- A sync that finds the provider pool full is requeued as a continuation, like one that finds its cursor lease busy: `last_requeue_reason = PROVIDER_BUSY` (changeset 017), retried after `cursor-lease-retry-delay`, bounded by `max-continuations-per-run`, and an account sync resumes at that address. It spent a `failure_attempts` each time and failed after five, although the service's own capacity says nothing about the provider.
+
+### Security
+
+- An Alchemy transport failure is named by its kind, such as `Alchemy transport failure for network eth-sepolia: timeout (SocketTimeoutException).`, without the request URL, as the bridge's already is. The key was scrubbed from it, but whatever else a custom endpoint template holds reached `last_error`, health, and the logs.
+
 ## [0.4.1] - 2026-09-24
 
 ### Changed

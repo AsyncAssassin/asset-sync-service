@@ -31,3 +31,5 @@ databaseChangeLog:
       file: db/changelog/changes/015-add-asset-configs.yaml
   - include:
       file: db/changelog/changes/016-add-observed-transaction-source.yaml
+  - include:
+      file: db/changelog/changes/017-add-provider-busy-requeue-reason.yaml

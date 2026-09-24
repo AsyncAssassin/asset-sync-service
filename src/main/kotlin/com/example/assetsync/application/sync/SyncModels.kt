@@ -57,6 +57,9 @@ enum class SyncRunRequeueReason {
     FAILURE,
     CONTINUATION,
     LEASE_BUSY,
+
+    /** The provider pool had no free thread for the next page; retried like a busy cursor lease. */
+    PROVIDER_BUSY,
 }
 
 enum class SyncRunContinuationRequeueResult {

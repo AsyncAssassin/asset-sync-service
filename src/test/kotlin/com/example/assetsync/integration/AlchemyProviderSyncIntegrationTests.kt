@@ -168,8 +168,8 @@ class AlchemyProviderSyncIntegrationTests(
         assertEquals(0, transactions().size)
 
         // 2) A transport failure (the transfers response arrives after the 2s read timeout): path
-        //    auth mode puts the key into the request URL that RestClient embeds in its message, and
-        //    last_error must carry only the scrubbed form.
+        //    auth mode puts the key into the request URL that RestClient embeds in its message, so
+        //    last_error names the failure by its kind and leaves the URL out.
         stub.responder = { request ->
             val response = chain.responder()(request)
             if (request.method == "alchemy_getAssetTransfers") response.copy(delay = Duration.ofSeconds(3)) else response
@@ -180,8 +180,7 @@ class AlchemyProviderSyncIntegrationTests(
         assertEquals(SyncRunStatus.QUEUED, afterTransportFailure.status)
         assertEquals(2, afterTransportFailure.failureAttempts)
         val lastError = requireNotNull(afterTransportFailure.lastError)
-        assertTrue(lastError.startsWith("Alchemy request failed for network eth-sepolia"), lastError)
-        assertTrue(lastError.contains("***"), "the request url must be scrubbed: $lastError")
+        assertEquals("Alchemy transport failure for network eth-sepolia: timeout (SocketTimeoutException).", lastError)
         assertFalse(lastError.contains(INTEGRATION_API_KEY), lastError)
         assertEquals(cursor(901), cursorRow(addressId).providerCursor)
 

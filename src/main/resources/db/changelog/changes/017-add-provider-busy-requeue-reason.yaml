@@ -1,0 +1,21 @@
+databaseChangeLog:
+  - changeSet:
+      id: 017-add-provider-busy-requeue-reason
+      author: AsyncAssassin
+      changes:
+        - sql:
+            dbms: postgresql
+            splitStatements: true
+            stripComments: true
+            # A run whose next page finds the provider pool full is requeued as a continuation
+            # with its own reason, next to a busy cursor lease, instead of spending a retry.
+            sql: |
+              ALTER TABLE sync_runs
+                  DROP CONSTRAINT ck_sync_runs_last_requeue_reason;
+
+              ALTER TABLE sync_runs
+                  ADD CONSTRAINT ck_sync_runs_last_requeue_reason
+                      CHECK (
+                          last_requeue_reason IS NULL
+                          OR last_requeue_reason IN ('FAILURE', 'CONTINUATION', 'LEASE_BUSY', 'PROVIDER_BUSY')
+                      );

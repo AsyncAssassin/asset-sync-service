@@ -5,6 +5,7 @@ import com.example.assetsync.application.sync.ChainProviderEventsPageRequest
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
 import com.example.assetsync.application.sync.ChainProviderPort
 import com.example.assetsync.application.sync.ChainProviderUnavailableException
+import com.example.assetsync.application.sync.ProviderConfigurationException
 import com.example.assetsync.application.sync.ProviderDataInvalidException
 import com.example.assetsync.config.ConditionalOnHttpChainProvider
 import com.example.assetsync.config.SyncProperties
@@ -20,12 +21,7 @@ import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import java.io.IOException
 import java.io.InputStream
 import java.math.BigDecimal
-import java.net.ConnectException
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
-import java.net.http.HttpTimeoutException
 import java.time.Instant
-import javax.net.ssl.SSLException
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.context.annotation.Profile
@@ -74,20 +70,40 @@ class HttpChainProvider @Autowired constructor(
                 chainProviderRestClient
                     .get()
                     .uri { uriBuilder ->
+                        // Every value is a URI variable, which RestClient encodes strictly: an opaque
+                        // cursor, such as base64 or JSON, reaches the bridge byte for byte. Put into
+                        // the template itself, `+` came back as a space and braces as a variable.
+                        val variables = mutableMapOf<String, Any>(
+                            "chainId" to request.chainId,
+                            "address" to request.address,
+                            "asset" to request.asset,
+                            "limit" to request.limit,
+                        )
                         val builder = uriBuilder
                             .path("/v1/chains/{chainId}/addresses/{address}/events")
-                            .queryParam("asset", request.asset)
-                            .queryParam("limit", request.limit)
-                        if (request.cursor != null) {
-                            builder.queryParam("cursor", request.cursor)
+                            .queryParam("asset", "{asset}")
+                            .queryParam("limit", "{limit}")
+                        request.cursor?.let {
+                            builder.queryParam("cursor", "{cursor}")
+                            variables["cursor"] = it
                         }
                         // The durable checkpoint, so a bridge resumes from it when no cursor is sent.
-                        request.fromBlockHeight?.let { builder.queryParam("fromBlockHeight", it) }
-                        request.fromEventIndex?.let { builder.queryParam("fromEventIndex", it) }
-                        builder.build(request.chainId, request.address)
+                        request.fromBlockHeight?.let {
+                            builder.queryParam("fromBlockHeight", "{fromBlockHeight}")
+                            variables["fromBlockHeight"] = it
+                        }
+                        request.fromEventIndex?.let {
+                            builder.queryParam("fromEventIndex", "{fromEventIndex}")
+                            variables["fromEventIndex"] = it
+                        }
+                        builder.build(variables)
                     }
                     .exchange { _, response ->
                         val statusCode = response.statusCode
+                        if (!statusCode.is2xxSuccessful) {
+                            // Its body is never read, and Spring's close() would drain it first.
+                            ProviderHttpSupport.closeUnread { response.body }
+                        }
                         when {
                             statusCode.is2xxSuccessful -> parseSuccessfulResponse(request = request, body = response.body)
                             statusCode.value() == HttpStatus.REQUEST_TIMEOUT.value() ->
@@ -99,6 +115,18 @@ class HttpChainProvider @Autowired constructor(
                                 )
                             statusCode.is5xxServerError ->
                                 throw ChainProviderUnavailableException("Provider returned HTTP ${statusCode.value()}.")
+                            statusCode.is3xxRedirection ->
+                                throw ProviderConfigurationException(
+                                    "Provider answered with a redirect (HTTP ${statusCode.value()}); " +
+                                        "point asset-sync.provider.base-url at the final address.",
+                                )
+                            // The bridge refuses the service itself, so every address would fail the same way.
+                            statusCode.value() == HttpStatus.UNAUTHORIZED.value() || statusCode.value() == HttpStatus.FORBIDDEN.value() ->
+                                throw ProviderConfigurationException(
+                                    "Provider rejected the service's credentials with HTTP ${statusCode.value()}; " +
+                                        "check asset-sync.provider.auth-header-value and base-url.",
+                                )
+                            // A bridge may not know an address (404) or refuse one request: that address's error.
                             statusCode.is4xxClientError ->
                                 throw ProviderDataInvalidException("Provider returned HTTP ${statusCode.value()} for a watched address.")
                             else ->
@@ -125,9 +153,13 @@ class HttpChainProvider @Autowired constructor(
         } catch (exception: ChainProviderUnavailableException) {
             recordFailure(request = request, exception = exception)
             throw exception
+        } catch (exception: ProviderConfigurationException) {
+            // Wrong for every address, like an outage, but retries cannot fix it: the run fails at once.
+            recordFailure(request = request, exception = exception)
+            throw exception
         } catch (exception: RuntimeException) {
             val failure = ChainProviderUnavailableException(failureMessage(exception))
-            recordFailure(request = request, exception = failure, causes = exception.causeChainWithoutUrls())
+            recordFailure(request = request, exception = failure, causes = ProviderHttpSupport.causeChainWithoutUrls(exception))
             throw failure
         }
 
@@ -148,6 +180,10 @@ class HttpChainProvider @Autowired constructor(
                 "Provider returned malformed JSON."
             }
             throw ProviderDataInvalidException(reason, exception)
+        } catch (exception: IOException) {
+            // The bytes are already in memory, so this is no I/O failure: Jackson could not decode
+            // them as text (CharConversionException), which RestClient would report as transport.
+            throw ProviderDataInvalidException("Provider returned a body that is not JSON text.", exception)
         }
 
         val events = response.events?.let { listed ->
@@ -175,38 +211,24 @@ class HttpChainProvider @Autowired constructor(
     }
 
     private fun readBounded(body: InputStream, maxBytes: Int): ByteArray =
-        ProviderHttpSupport.readBounded(body, maxBytes) {
-            ProviderDataInvalidException("Provider response exceeded the configured byte limit.")
-        }
+        ProviderHttpSupport.readBounded(
+            body = body,
+            maxBytes = maxBytes,
+            onOverflow = { ProviderDataInvalidException("Provider response exceeded the configured byte limit.") },
+            onCancelled = { ChainProviderUnavailableException("Provider fetch was cancelled while its response was being read.") },
+        )
 
     private fun parseRetryAfter(value: String?): Instant? = ProviderHttpSupport.parseRetryAfter(value)
 
     /**
-     * A fixed description of a failure the bridge did not report itself: a transport failure is
-     * named by the kind of the I/O error RestClient wraps, anything else by its class. The
-     * exception's own text is never used: Spring's `ResourceAccessException` quotes the request URL,
-     * whose path or query may carry the bridge credentials, and this text reaches the health
+     * A fixed description of a failure the bridge did not report itself, by its transport kind or
+     * its class, never its text (see ProviderHttpSupport.transportKind): it reaches the health
      * details and the `lastError` of sync runs that `READ` callers see. The cause is not attached
      * for the same reason; the WARN log gets the cause chain with every URL cut out.
      */
-    private fun failureMessage(exception: RuntimeException): String {
-        val cause = exception.cause as? IOException
-            ?: return "Provider request failed (${exception.javaClass.simpleName})."
-        val kind = when (cause) {
-            is SocketTimeoutException, is HttpTimeoutException -> "timeout"
-            // Refused, unreachable, or an operating-system connect timeout: the text tells them apart.
-            is ConnectException -> "cannot connect"
-            is UnknownHostException -> "unknown host"
-            is SSLException -> "TLS failure"
-            else -> "I/O error"
-        }
-        return "Provider transport failure: $kind (${cause.javaClass.simpleName})."
-    }
-
-    private fun Throwable.causeChainWithoutUrls(): String =
-        generateSequence(this) { it.cause }
-            .take(MAX_CAUSE_DEPTH)
-            .joinToString(" <- ") { "${it.javaClass.simpleName}: ${it.message?.replace(URL_PATTERN, "<url>")}" }
+    private fun failureMessage(exception: RuntimeException): String =
+        ProviderHttpSupport.transportKind(exception)?.let { "Provider transport failure: $it." }
+            ?: "Provider request failed (${exception.javaClass.simpleName})."
 
     private fun recordFailure(request: ChainProviderEventsPageRequest, exception: RuntimeException, causes: String? = null) {
         lastFetchHealthy = false
@@ -239,12 +261,6 @@ class HttpChainProvider @Autowired constructor(
         )
     }
 
-    private companion object {
-        const val MAX_CAUSE_DEPTH = 16
-
-        /** A URL up to the first whitespace or quote, so the quote Spring puts around it survives. */
-        val URL_PATTERN = Regex("[A-Za-z][A-Za-z0-9+.-]*://[^\\s\"'<>]+")
-    }
 }
 
 // Unknown properties are skipped as they are read instead of buffered until the known ones are

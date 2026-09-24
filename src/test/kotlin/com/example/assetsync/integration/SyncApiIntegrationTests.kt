@@ -3,8 +3,10 @@ package com.example.assetsync.integration
 import com.example.assetsync.TestcontainersConfiguration
 import com.example.assetsync.api.dto.MAX_TX_HASH_LENGTH
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
+import com.example.assetsync.application.sync.ProviderConfigurationException
 import com.example.assetsync.application.sync.SyncCursorRepository
 import com.example.assetsync.application.sync.SyncApplicationService
+import com.example.assetsync.application.sync.SyncCapacityExceededException
 import com.example.assetsync.application.sync.SyncRunLifecycleService
 import com.example.assetsync.domain.model.Direction
 import com.example.assetsync.domain.model.TransactionStatus
@@ -341,7 +343,59 @@ class SyncApiIntegrationTests(
     }
 
     @Test
-    fun `empty final page without cursor or high water is rejected without advancing checkpoint`() {
+    fun `idle final pages without cursor at an unchanged height succeed and keep the stored cursor`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-idle-same-height")
+        val addressId = watchedAddress["id"].asText()
+        // A bridge that answers "nothing new" without repeating its cursor, twice within one
+        // finality epoch: the safe block has not moved since the page that stored the cursor.
+        val idle = FakeChainProviderStep.Page(
+            FakeChainProviderPage(
+                expectedCursor = "bridge-c1",
+                events = emptyList(),
+                nextCursor = null,
+                hasMore = false,
+                latestBlockHeight = 110,
+                safeBlockHeight = 100,
+            ),
+        )
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-idle-same-height",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = listOf(providerEvent(txHash = "0xsync-idle-same-height-1", address = "0xsync-idle-same-height", blockHeight = 95)),
+                        nextCursor = "bridge-c1",
+                        hasMore = false,
+                        latestBlockHeight = 110,
+                        safeBlockHeight = 100,
+                    ),
+                ),
+                idle,
+                idle,
+            ),
+        )
+
+        val runIds = (1..3).map {
+            submitAddressSync(addressId).also { runNextClaimedSyncs() }
+        }
+
+        runIds.forEach { runId -> assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", runId)) }
+        val id = UUID.fromString(addressId)
+        assertEquals("bridge-c1", singleString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", id))
+        assertEquals(95L, singleLong("SELECT last_processed_block_height FROM sync_cursors WHERE watched_address_id = ?", id))
+        assertEquals(100L, singleLong("SELECT last_finalized_block_height FROM sync_cursors WHERE watched_address_id = ?", id))
+        assertEquals(
+            listOf(null, "bridge-c1", "bridge-c1"),
+            fakeChainProvider.requestedPageRequests().filter { it.key.address == "0xsync-idle-same-height" }.map { it.cursor },
+        )
+    }
+
+    @Test
+    fun `an empty final page without cursor or high water succeeds for a new address`() {
         val accountId = createAccount()
         val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-empty-no-progress")
         val addressId = watchedAddress["id"].asText()
@@ -365,13 +419,96 @@ class SyncApiIntegrationTests(
         val syncRunId = submitAddressSync(addressId)
         runNextClaimedSyncs()
 
-        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
-        assertTrue(
-            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId)
-                .contains("final page without a durable resume cursor or high-water checkpoint"),
-        )
-        assertEquals(0L, singleLong("SELECT version FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        // Nothing is stored yet, so the next request starts where this one did.
+        assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
         assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+        assertNull(nullableLong("SELECT last_finalized_block_height FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+    }
+
+    @Test
+    fun `a page with one event twice in two directions is rejected before anything is written`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-self-transfer")
+        val addressId = watchedAddress["id"].asText()
+        // A bridge that sends a transfer of the address to itself as two rows of one log.
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-self-transfer",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = listOf(
+                            providerEvent(txHash = "0xsync-before", address = "0xsync-self-transfer", blockHeight = 99),
+                            providerEvent(txHash = "0xsync-self", address = "0xsync-self-transfer", eventIndex = 7, direction = Direction.INBOUND),
+                            providerEvent(txHash = "0xsync-self", address = "0xsync-self-transfer", eventIndex = 7, direction = Direction.OUTBOUND),
+                        ),
+                        nextCursor = "self-next",
+                        hasMore = false,
+                        safeBlockHeight = 100,
+                    ),
+                ),
+            ),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(
+            "Provider returned transaction 0xsync-self event 7 twice with another direction or amount; one row per event, " +
+                "and a transfer of the address to itself is left out.",
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId),
+        )
+        assertEquals(0, tableCount("observed_transactions"), "the page is refused before its first event is written")
+        assertNull(nullableString("SELECT provider_cursor FROM sync_cursors WHERE watched_address_id = ?", UUID.fromString(addressId)))
+    }
+
+    @Test
+    fun `an event repeated across a page boundary with another direction names the event`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-split-self")
+        val addressId = watchedAddress["id"].asText()
+        // The two rows of a transfer to the address itself, on either side of a page boundary.
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-split-self",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = null,
+                        events = listOf(providerEvent(txHash = "0xsync-split", address = "0xsync-split-self", eventIndex = 7)),
+                        nextCursor = "split-p2",
+                        hasMore = true,
+                        safeBlockHeight = 100,
+                    ),
+                ),
+                FakeChainProviderStep.Page(
+                    FakeChainProviderPage(
+                        expectedCursor = "split-p2",
+                        events = listOf(
+                            providerEvent(txHash = "0xsync-split", address = "0xsync-split-self", eventIndex = 7, direction = Direction.OUTBOUND),
+                        ),
+                        nextCursor = "split-p3",
+                        hasMore = false,
+                        safeBlockHeight = 100,
+                    ),
+                ),
+            ),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(
+            "Provider returned transaction 0xsync-split event 7 with another direction than the stored row; one row per event, " +
+                "and a transfer of the address to itself is left out.",
+            singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId),
+        )
+        assertEquals(1, tableCount("observed_transactions"), "the first row was stored with its page")
     }
 
     @Test
@@ -711,6 +848,94 @@ class SyncApiIntegrationTests(
         assertEquals(1, singleInt("SELECT events_changed FROM sync_runs WHERE id = ?", syncRunId))
         assertEquals(1, tableCount("observed_transactions"))
         assertEquals(1, tableCount("outbox_events"))
+    }
+
+    @Test
+    fun `a full provider pool requeues the run as a continuation without spending its retry budget`() {
+        val accountId = createAccount()
+        val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-pool-full")
+        val addressId = watchedAddress["id"].asText()
+        // The same exception fetchProviderPageWithTimeout throws when the pool rejects the fetch.
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-pool-full",
+            asset = "USDC",
+            steps = listOf(FakeChainProviderStep.ThrowableFailure(SyncCapacityExceededException(2))),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("QUEUED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(0, singleInt("SELECT failure_attempts FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(1, singleInt("SELECT continuation_count FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals("PROVIDER_BUSY", singleString("SELECT last_requeue_reason FROM sync_runs WHERE id = ?", syncRunId))
+        // Retried after the busy-lease delay, not after a backoff that grows with every claim.
+        val nextAttemptAt = requireNotNull(nullableTimestamp("SELECT next_attempt_at FROM sync_runs WHERE id = ?", syncRunId)).toInstant()
+        assertTrue(nextAttemptAt.isBefore(Instant.now().plusSeconds(10)), "next attempt at $nextAttemptAt")
+    }
+
+    @Test
+    fun `an account sync that finds the provider pool full resumes at that address on the next claim`() {
+        val accountId = createAccount()
+        registerAddress(accountId = accountId, address = "0xsync-busy-one")
+        registerAddress(accountId = accountId, address = "0xsync-busy-two")
+        fakeChainProvider.setEvents(
+            chainId = "local-evm",
+            address = "0xsync-busy-one",
+            asset = "USDC",
+            events = listOf(providerEvent(txHash = "0xsync-busy-one", address = "0xsync-busy-one")),
+        )
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-busy-two",
+            asset = "USDC",
+            steps = listOf(FakeChainProviderStep.ThrowableFailure(SyncCapacityExceededException(2))),
+        )
+
+        val syncRunId = submitAccountSync(accountId)
+        runNextClaimedSyncs()
+
+        assertEquals("QUEUED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals("PROVIDER_BUSY", singleString("SELECT last_requeue_reason FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(0, singleInt("SELECT failure_attempts FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(1, tableCount("observed_transactions"))
+
+        fakeChainProvider.setEvents(
+            chainId = "local-evm",
+            address = "0xsync-busy-two",
+            asset = "USDC",
+            events = listOf(providerEvent(txHash = "0xsync-busy-two", address = "0xsync-busy-two")),
+        )
+        jdbcTemplate.update("UPDATE sync_runs SET next_attempt_at = now() WHERE id = ?", syncRunId)
+        runNextClaimedSyncs()
+
+        assertEquals("SUCCEEDED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(2, tableCount("observed_transactions"))
+        // The pass resumed at the busy address instead of starting over.
+        assertEquals(1, fakeChainProvider.requestedKeys().count { it.address == "0xsync-busy-one" })
+    }
+
+    @Test
+    fun `a configuration failure of the whole provider ends an account sync at the first address`() {
+        val accountId = createAccount()
+        val rejected = "Provider rejected the service's credentials with HTTP 401; check asset-sync.provider.auth-header-value and base-url."
+        listOf("0xsync-denied-one", "0xsync-denied-two").forEach { address ->
+            registerAddress(accountId = accountId, address = address)
+            fakeChainProvider.setScript(
+                chainId = "local-evm",
+                address = address,
+                asset = "USDC",
+                steps = listOf(FakeChainProviderStep.ThrowableFailure(ProviderConfigurationException(rejected))),
+            )
+        }
+
+        val syncRunId = submitAccountSync(accountId)
+        runNextClaimedSyncs()
+
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(rejected, singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(1, fakeChainProvider.requestedKeys().size, "one request, not one per address")
     }
 
     @Test

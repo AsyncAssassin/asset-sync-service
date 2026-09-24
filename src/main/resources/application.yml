@@ -87,6 +87,9 @@ asset-sync:
     type: ${ASSET_SYNC_PROVIDER_TYPE:http}
     connect-timeout: ${ASSET_SYNC_PROVIDER_CONNECT_TIMEOUT:2s}
     read-timeout: ${ASSET_SYNC_PROVIDER_READ_TIMEOUT:5s}
+    # The HTTP bridge credential, sent as a request header; the value is a secret, env only.
+    auth-header-name: ${ASSET_SYNC_PROVIDER_AUTH_HEADER_NAME:Authorization}
+    auth-header-value: ${ASSET_SYNC_PROVIDER_AUTH_HEADER_VALUE:}
     alchemy:
       # Secret: env only, never a default; it is redacted from logs, errors, and health details.
       api-key: ${ASSET_SYNC_PROVIDER_ALCHEMY_API_KEY:}

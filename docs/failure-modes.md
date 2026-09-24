@@ -133,8 +133,10 @@ Expected behavior:
 - Provider call is outside a database transaction and outside the request thread.
 - `asset-sync.sync.provider-timeout` is the deadline for one provider page fetch.
 - HTTP provider responses are bounded by `asset-sync.sync.pagination.max-provider-page-bytes` before JSON parsing.
+- A response that is still arriving when the deadline cancels the fetch stops being read within one `asset-sync.provider.read-timeout`, and a body over the limit or behind an error status is closed unread, so the provider thread returns to the pool; a trickling response cannot hold it for the length of its body.
 - Retryable provider failures requeue the current `sync_run` as `QUEUED` with bounded backoff.
 - HTTP 429 is retryable provider backpressure, increments `failure_attempts`, and uses valid `Retry-After` values capped by the configured max backoff.
+- A fetch the full provider pool (`asset-sync.sync.provider-max-threads`) cannot take requeues the run as a continuation (`PROVIDER_BUSY`) after `cursor-lease-retry-delay`, like a busy cursor lease: the service's own capacity says nothing about the provider, so `failure_attempts` stays, and `max-continuations-per-run` bounds the retries.
 - At max attempts, the current `sync_run` is marked `FAILED` in a short fenced transaction.
 - Events already committed before the timeout remain valid.
 - The cursor checkpoint is not advanced for the failed page.
@@ -142,7 +144,7 @@ Expected behavior:
 - Under the Alchemy provider, a repeated `pageKey`, a restarted continuation page, a row outside the requested block window, a safe frontier above the latest block, and an exhausted per-fetch RPC or time budget before the first block was drained are all retryable: the cursor stays on its block boundary and the next attempt rescans from it. A budget exhausted after at least one drained block returns that prefix instead.
 - The local token bucket waits for a token only within the fetch deadline; a wait that cannot be met is a retryable outage rather than a provider 429.
 - An Alchemy that is unavailable when the service starts is the same case: the startup probe leaves the provider in the `probe-failed` state instead of stopping the process, and sync runs against it retry as above.
-- These availability failures, and for Alchemy rejected credentials, turn the provider health indicator `DOWN` until the next successful fetch. A data error or a configuration gap of one address (a `4xx`, malformed JSON, an oversized body, an unmappable Alchemy row; under Alchemy also its chain without a network or a start block, its asset without an enabled config, or a block larger than a page) keeps the indicator's state and appears as its `lastDataError` detail until the next successful fetch of any address; the run's `last_error` keeps it.
+- These availability failures, and rejected credentials or a redirect from either provider, turn the provider health indicator `DOWN` until the next successful fetch. A data error or a configuration gap of one address (a `4xx`, malformed JSON, an oversized body, an unmappable Alchemy row; under Alchemy also its chain without a network or a start block, its asset without an enabled config, or a block larger than a page) keeps the indicator's state and appears as its `lastDataError` detail until the next successful fetch of any address; the run's `last_error` keeps it.
 
 Operational signal:
 
@@ -154,7 +156,8 @@ Operational signal:
 Scenario:
 
 - The HTTP provider omits required `events` or `hasMore`.
-- The provider returns too many events, an oversized cursor/body/checkpoint, a page field string over 100 000 characters, `hasMore=true` without cursor progress, wrong address/asset, invalid high-water fields, or insufficient final resume state. A final empty page may omit `nextCursor` only when it supplies durable block high-water such as `safeBlockHeight` or `latestBlockHeight`.
+- The provider returns too many events, an oversized cursor/body/checkpoint, a page field string over 100 000 characters, `hasMore=true` without cursor progress, wrong address/asset, or invalid high-water fields. A final page may omit `nextCursor`, even without new events or heights.
+- The provider returns one event twice in a page with another direction or amount, such as a transfer of the address to itself sent as two rows.
 - The provider returns events out of non-decreasing `(blockHeight, eventIndex, txHash)` order, or a page whose first event is behind the stored `last_processed_block_height` / `last_processed_event_index` checkpoint.
 - An event carries an amount that is negative or does not fit `numeric(38, 18)`, which PostgreSQL would otherwise round or reject, or a transaction hash that is blank or breaks the chain's format rules (`0x` and 64 hex digits on `eth-sepolia` and `eth-mainnet`, no whitespace, `/`, or `:` on `local-evm`, no control characters anywhere). Every event of the page is checked before the first one is written.
 - The Alchemy adapter meets a row it cannot map honestly: a `uniqueId` without the ERC-20 `:log:{n}` suffix or not matching the transaction hash, a non-hex `blockNum` or `rawContract.value`, a `rawContract.decimal` that disagrees with the registry, a missing address or contract, a category other than `erc20`, a row on the wrong side of the watched address, or a malformed provider cursor.
@@ -332,15 +335,15 @@ Operational signal:
 
 Scenario:
 
-- The configured provider rejects the credentials (HTTP 401/403 or a JSON-RPC `-32600` envelope), an enabled chain with active watched addresses has no provider network mapping, active watched addresses lack an enabled asset config, `start-mode=configured-block` has no start block for the chain, one block holds more events for the watched address than `asset-sync.sync.pagination.page-size`, which the page contract cannot split, or the chain of a synced event was disabled after its addresses were registered.
+- The configured provider rejects the credentials (HTTP 401/403 or a JSON-RPC `-32600` envelope) or answers with a redirect (HTTP 3xx), which the client does not follow, an enabled chain with active watched addresses has no provider network mapping, active watched addresses lack an enabled asset config, `start-mode=configured-block` has no start block for the chain, one block holds more events for the watched address than `asset-sync.sync.pagination.page-size`, which the page contract cannot split, or the chain of a synced event was disabled after its addresses were registered.
 
 Expected behavior:
 
-- At startup with `asset-sync.provider.type=alchemy`, the preflight fails the process before the sync worker starts: static validation (key, auth mode, templates, numeric caps, `max-rpc-calls-per-fetch >= 4`), the registry rules, and one `eth_blockNumber` probe per required network that Alchemy rejects (HTTP 401/403, JSON-RPC `-32600`, or an answer that is not a block number). The failure is a `ProviderConfigurationException` whose message names the chains or `(chain_id, asset)` pairs and the operator action, never the key or the endpoint.
+- At startup with `asset-sync.provider.type=alchemy`, the preflight fails the process before the sync worker starts: static validation (key, auth mode, templates, numeric caps, `max-rpc-calls-per-fetch >= 4`), the registry rules, and one `eth_blockNumber` probe per required network that Alchemy rejects (HTTP 401/403, JSON-RPC `-32600`, or an answer that is not a block number), and one answered with a redirect, which points at a wrong endpoint template. The failure is a `ProviderConfigurationException` whose message names the chains or `(chain_id, asset)` pairs and the operator action, never the key or the endpoint.
 - A probe that meets an outage (`5xx`, `429`, a timeout, a transport error) does not fail startup: the provider starts in the `probe-failed` state with health `DOWN` and the scrubbed error, and the first successful fetch clears it (section 7). An enabled chain without a mapping and without active watched addresses, such as the seeded `local-evm` on a fresh database, is only logged; registering an address there, or enabling one again, answers `404 Unsupported chain`.
 - During a sync run, `ProviderConfigurationException` is terminal: the run is marked `FAILED` at once, `failure_attempts` is not spent on retries that cannot succeed, and the checkpoint does not move.
 - A configuration gap of one address (its chain without a mapping or, under `configured-block`, without a start block, its asset without an enabled config, a block with more events than a page) fails only that address's runs: provider health stays `UP` with the gap as `lastDataError`, while rejected credentials turn it `DOWN`. The startup preflight still refuses the first three at the next start, so disable such an address or fix its configuration before restarting.
-- `sync_runs.last_error`, log lines, health details, and exception messages are scrubbed of the API key; transport failures that embed a request URL are rethrown with a bounded scrubbed message and without their cause.
+- `sync_runs.last_error`, log lines, health details, and exception messages are scrubbed of the API key; a transport failure is named by its kind, such as `Alchemy transport failure for network eth-sepolia: timeout (SocketTimeoutException).`, without the request URL and without its cause, and the WARN line carries the cause chain with every URL cut out.
 
 Operational signal:
 

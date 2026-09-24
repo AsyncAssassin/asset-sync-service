@@ -9,7 +9,7 @@ import org.springframework.stereotype.Component
 /**
  * Reflects the HTTP bridge provider's last observed connectivity rather than a constant UP.
  * Before any fetch it reports UP (nothing known yet); a transport failure (timeout, 5xx, 429, a
- * connection error) reports DOWN with the error. A data error for one address, such as a 4xx or
+ * connection error) or a configuration failure (a rejected credential, a redirect) reports DOWN with the error. A data error for one address, such as a 4xx or
  * malformed JSON, keeps the state and shows up as `lastDataError`, so one bad address cannot turn
  * the aggregate health into 503; `asset.sync.provider.pages` counts those pages as `MALFORMED`.
  * It contributes to the aggregate `/actuator/health` but is intentionally not in the readiness

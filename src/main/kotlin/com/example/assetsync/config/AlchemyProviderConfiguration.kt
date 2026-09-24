@@ -2,6 +2,7 @@ package com.example.assetsync.config
 
 import com.example.assetsync.application.account.AssetConfigRepository
 import com.example.assetsync.application.observability.AssetSyncMetrics
+import com.example.assetsync.infrastructure.provider.ProviderHttpSupport
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProvider
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProviderHealthIndicator
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyJsonRpcClient
@@ -17,7 +18,6 @@ import org.springframework.boot.sql.init.dependency.DependsOnDatabaseInitializat
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Profile
-import org.springframework.http.client.SimpleClientHttpRequestFactory
 import org.springframework.web.client.RestClient
 
 /**
@@ -35,12 +35,8 @@ class AlchemyProviderConfiguration {
 
     @Bean
     fun alchemyRestClient(providerProperties: ProviderProperties): RestClient {
-        val requestFactory = SimpleClientHttpRequestFactory().apply {
-            setConnectTimeout(providerProperties.connectTimeout)
-            setReadTimeout(providerProperties.readTimeout)
-        }
         return RestClient.builder()
-            .requestFactory(requestFactory)
+            .requestFactory(ProviderHttpSupport.requestFactory(providerProperties.connectTimeout, providerProperties.readTimeout))
             .build()
     }
 
