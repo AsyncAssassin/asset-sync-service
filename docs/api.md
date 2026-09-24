@@ -10,7 +10,7 @@ All MVP endpoints are exposed under `/api/v1`. The version is part of the URL be
 
 Conventions:
 
-- Request and response bodies use JSON; a body of any other content type, YAML included, gets `415`. A string longer than 100 000 characters in a request field fails the request with `400 invalid-request` while the body is read, before any field rule runs. Unknown fields are ignored, whatever their size. A number with a fraction in an integer field, such as an `eventIndex` of `1.9`, fails the request with `400 invalid-request` instead of losing the fraction.
+- Request and response bodies use JSON; a body of any other content type, YAML included, gets `415`. A string longer than 100 000 characters in a request field fails the request with `400 invalid-request` while the body is read, before any field rule runs. Unknown fields are ignored, whatever their size. A number with a fraction in an integer field, such as an `eventIndex` of `1.9`, fails the request with `400 invalid-request` instead of losing the fraction. A whole number written as a float, such as `1.0` or `1e3`, is read as that integer.
 - Timestamps use UTC ISO-8601 strings.
 - Identifiers use UUID strings.
 - Monetary amounts are encoded as decimal strings and stored with `numeric(38, 18)` precision.
@@ -183,7 +183,7 @@ Validation:
 - `address` is required and must be non-blank.
 - `address` must be well formed for the chain once normalized: `0x` followed by 40 hex digits, in any casing, on `eth-sepolia` and `eth-mainnet`; no whitespace, `/`, or `:` on `local-evm`, which keeps accepting synthetic identifiers such as `0xdemoaddr`; no control characters on any chain. A malformed address returns `400` with `invalid-request` and the `chainId`, after the chain and asset checks.
 - `asset` is required and must be non-blank.
-- `chainId` and `asset` must not contain control characters (U+0000 to U+001F and U+007F).
+- `chainId` and `asset` must not contain control characters, U+0000 to U+001F and U+007F to U+009F, once surrounding whitespace is trimmed.
 - `label` is optional; if provided, it must be non-blank after trimming and must not contain control characters other than tabs and line breaks.
 - Duplicate canonical `chainId + address + asset` registrations are rejected with `409 Conflict`.
 
@@ -332,7 +332,7 @@ HTTP/1.1 200 OK
 
 Validation:
 
-- `chainId`, `txHash`, `address`, and `asset` are required and must be non-blank. `chainId`, `address`, and `asset` must not contain control characters (U+0000 to U+001F and U+007F).
+- `chainId`, `txHash`, `address`, and `asset` are required and must be non-blank. `chainId`, `address`, and `asset` must not contain control characters, U+0000 to U+001F and U+007F to U+009F, once surrounding whitespace is trimmed.
 - `txHash` follows the address format rules of its chain, with 64 hex digits instead of 40 on `eth-sepolia` and `eth-mainnet`; a malformed hash returns `400` with `invalid-request`.
 - `eventIndex` is required and must be `>= 0`.
 - `amount` is required, must parse as a non-negative decimal, exponent notation such as `1e2` included, and must fit `numeric(38, 18)`: at most 20 integer and 18 fraction digits. It is stored at scale 18. A value longer than 80 characters is refused by its length alone, before it is parsed.

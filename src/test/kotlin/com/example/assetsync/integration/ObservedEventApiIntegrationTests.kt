@@ -322,10 +322,25 @@ class ObservedEventApiIntegrationTests(
         }
         assertEquals(0, tableCount("observed_transactions"))
 
+        // A whole number written as a float is that integer.
+        val whole = observedEventPayload(address = "0xobserved-fraction").apply {
+            this["eventIndex"] = 2.0
+            this["blockHeight"] = 1e3
+        }
+        mockMvc.perform(post("/api/v1/observed-events").contentType(MediaType.APPLICATION_JSON).content(objectMapper.writeValueAsString(whole)))
+            .andExpect(status().isCreated)
+        assertEquals(2, singleInt("SELECT event_index FROM observed_transactions"))
+        assertEquals(1000L, singleLong("SELECT block_height FROM observed_transactions"))
+
         // The HTTP bridge adapter reads its pages with this mapper too.
-        val page = """{"hasMore":false,"events":[{"txHash":"0x1","eventIndex":1.5,"address":"0xa","asset":"USDC","amount":"1",""" +
-            """"blockHeight":1,"confirmations":1,"direction":"INBOUND","status":"SEEN"}]}"""
-        assertThrows<MismatchedInputException> { objectMapper.readValue(page, ProviderEventsPageResponse::class.java) }
+        fun page(eventIndex: String) =
+            """{"hasMore":false,"events":[{"txHash":"0x1","eventIndex":$eventIndex,"address":"0xa","asset":"USDC","amount":"1",""" +
+                """"blockHeight":1.85E7,"confirmations":1,"direction":"INBOUND","status":"SEEN"}],"latestBlockHeight":18500000.0}"""
+        assertThrows<MismatchedInputException> { objectMapper.readValue(page("1.5"), ProviderEventsPageResponse::class.java) }
+        val read = objectMapper.readValue(page("2.0"), ProviderEventsPageResponse::class.java)
+        assertEquals(2, read.events!!.single()!!.eventIndex)
+        assertEquals(18_500_000L, read.events!!.single()!!.blockHeight)
+        assertEquals(18_500_000L, read.latestBlockHeight)
     }
 
     @Test

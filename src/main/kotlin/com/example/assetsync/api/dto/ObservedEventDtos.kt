@@ -12,7 +12,6 @@ import jakarta.validation.constraints.AssertTrue
 import jakarta.validation.constraints.Min
 import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.NotNull
-import jakarta.validation.constraints.Pattern
 import jakarta.validation.constraints.Size
 import java.math.BigDecimal
 import java.util.UUID
@@ -23,13 +22,6 @@ const val MAX_ADDRESS_LENGTH = 128
 const val MAX_ASSET_LENGTH = 32
 const val MAX_AMOUNT_LENGTH = 80
 
-// Control characters, U+0000 to U+001F and U+007F, belong in no identifier, and PostgreSQL cannot
-// store U+0000 in text at all, so without these rules such a value failed only at the database.
-// Each pattern is one character class, so the match stays linear whatever the length.
-const val NO_CONTROL_CHARACTERS = "[^\\p{Cntrl}]*"
-
-// Free text, such as a label, may keep tabs and line breaks.
-const val NO_CONTROL_CHARACTERS_BUT_LINE_BREAKS = "[^\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]*"
 
 // Unknown properties are skipped as they are read, not buffered until the known ones are complete,
 // so extra fields cost neither memory nor the JSON string cap; the same holds for the other
@@ -38,7 +30,7 @@ const val NO_CONTROL_CHARACTERS_BUT_LINE_BREAKS = "[^\\x00-\\x08\\x0B\\x0C\\x0E-
 data class IngestObservedEventRequest(
     @field:NotBlank(message = "chainId is required")
     @field:Size(max = MAX_CHAIN_ID_LENGTH, message = "chainId must be at most $MAX_CHAIN_ID_LENGTH characters")
-    @field:Pattern(regexp = NO_CONTROL_CHARACTERS, message = "chainId must not contain control characters")
+    @field:NoControlCharacters(message = "chainId must not contain control characters")
     val chainId: String = "",
     @field:NotBlank(message = "txHash is required")
     @field:Size(max = MAX_TX_HASH_LENGTH, message = "txHash must be at most $MAX_TX_HASH_LENGTH characters")
@@ -48,11 +40,11 @@ data class IngestObservedEventRequest(
     val eventIndex: Int? = null,
     @field:NotBlank(message = "address is required")
     @field:Size(max = MAX_ADDRESS_LENGTH, message = "address must be at most $MAX_ADDRESS_LENGTH characters")
-    @field:Pattern(regexp = NO_CONTROL_CHARACTERS, message = "address must not contain control characters")
+    @field:NoControlCharacters(message = "address must not contain control characters")
     val address: String = "",
     @field:NotBlank(message = "asset is required")
     @field:Size(max = MAX_ASSET_LENGTH, message = "asset must be at most $MAX_ASSET_LENGTH characters")
-    @field:Pattern(regexp = NO_CONTROL_CHARACTERS, message = "asset must not contain control characters")
+    @field:NoControlCharacters(message = "asset must not contain control characters")
     val asset: String = "",
     @field:NotBlank(message = "amount is required")
     @field:Size(max = MAX_AMOUNT_LENGTH, message = "amount must be at most $MAX_AMOUNT_LENGTH characters")

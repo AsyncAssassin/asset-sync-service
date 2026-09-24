@@ -108,6 +108,19 @@ class OpenApiDocumentIntegrationTests(
         }
     }
 
+    @Test
+    fun `request patterns stay portable, and a field keeps its one pattern`() {
+        val schemas = apiDocs().path("components").path("schemas")
+
+        // The control character rule is a validator of its own: no Java-only regex reaches the document.
+        listOf("IngestObservedEventRequest", "RegisterWatchedAddressRequest", "CreateAccountRequest").forEach { name ->
+            val patterns = schemas.path(name).path("properties").properties().mapNotNull { (_, property) -> property.path("pattern").textValue() }
+            assertTrue(patterns.none { "\\p{" in it }, "$name: $patterns")
+        }
+        assertEquals("(?s).*\\S.*", schemas.path("CreateAccountRequest").path("properties").path("externalRef").path("pattern").asText())
+        assertEquals("(?s).*\\S.*", schemas.path("RegisterWatchedAddressRequest").path("properties").path("label").path("pattern").asText())
+    }
+
     private fun apiDocs(): JsonNode {
         val body = mockMvc.perform(get("/v3/api-docs").headers(HttpHeaders().apply { setBasicAuth("demo-reader", "demo-reader-pw") }))
             .andExpect(status().isOk)

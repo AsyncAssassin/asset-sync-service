@@ -170,6 +170,16 @@ class HttpChainProviderHealthIndicatorTests {
     }
 
     @Test
+    fun `a value of the wrong type names where it is in the page`() {
+        responseStatus.set(200)
+        responseBody.set("""{"events":[{"txHash":"0x1","eventIndex":"first","address":"0xa","asset":"USDC","amount":"1","blockHeight":1,"confirmations":1,"direction":"INBOUND","status":"SEEN"}],"hasMore":false}""")
+
+        val failure = assertThrows<ProviderDataInvalidException> { provider.fetchObservedEventsPage(pageRequest()) }
+
+        assertEquals("Provider returned a page with a value of the wrong type at events[0].eventIndex.", failure.message)
+    }
+
+    @Test
     fun `a null event is a data error for the address, not an outage`() {
         responseStatus.set(200)
         responseBody.set("""{"events":[null],"hasMore":false,"nextCursor":"null-event"}""")
