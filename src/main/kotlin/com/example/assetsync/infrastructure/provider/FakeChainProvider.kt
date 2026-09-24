@@ -170,6 +170,10 @@ class FakeChainProvider : ChainProviderPort {
                     sleep(step.duration)
                     index += 1
                 }
+                is FakeChainProviderStep.Action -> {
+                    step.action()
+                    index += 1
+                }
                 is FakeChainProviderStep.Failure -> {
                     if (events.isEmpty()) {
                         throw ChainProviderUnavailableException(step.message)
@@ -302,5 +306,10 @@ sealed interface FakeChainProviderStep {
 
     data class Delay(
         val duration: Duration,
+    ) : FakeChainProviderStep
+
+    /** Runs a side effect while the page is being fetched, such as a change a test needs mid-sync. */
+    data class Action(
+        val action: () -> Unit,
     ) : FakeChainProviderStep
 }

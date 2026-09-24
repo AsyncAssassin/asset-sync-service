@@ -1222,6 +1222,31 @@ class SyncApiIntegrationTests(
     }
 
     @Test
+    fun `an address disabled while its run syncs it fails the run with that reason`() {
+        val accountId = createAccount()
+        val addressId = registerAddress(accountId = accountId, address = "0xsync-disabled-mid-page")["id"].asText()
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = "0xsync-disabled-mid-page",
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Action {
+                    jdbcTemplate.update("UPDATE watched_addresses SET status = 'DISABLED' WHERE id = ?", UUID.fromString(addressId))
+                },
+                FakeChainProviderStep.Event(providerEvent(txHash = "0xsync-disabled-mid-page-1", address = "0xsync-disabled-mid-page")),
+            ),
+        )
+
+        val syncRunId = submitAddressSync(addressId)
+        runNextClaimedSyncs()
+
+        assertEquals("FAILED", singleString("SELECT status FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals("Watched address was disabled during the sync.", singleString("SELECT last_error FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(1, singleInt("SELECT attempts FROM sync_runs WHERE id = ?", syncRunId))
+        assertEquals(0, tableCount("observed_transactions"))
+    }
+
+    @Test
     fun `a run queued before its chain was disabled fails without calling the provider`() {
         val accountId = createAccount()
         val watchedAddress = registerAddress(accountId = accountId, address = "0xsync-disabled-chain")

@@ -15,6 +15,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- An address disabled through the API while it syncs, or whose chain is disabled meanwhile, no longer counts as bad provider data. Its next page failed with `Provider returned an event for an address that is not watched`, and an account sync recorded that as an address failure and ended `FAILED`. The address's own run now fails with `Watched address was disabled during the sync.`, and an account pass leaves the address out without an error.
 - A provider event whose transaction hash is longer than 128 characters fails its page before anything is written, like the other hash rules. The database refused it only after the events before it on the page were stored, and every later sync of the address failed on it again.
 - A control character in `externalRef`, `label`, `chainId`, `asset`, or an ingested `address` fails validation with a `400 validation-failed` that names the field; `externalRef` and `label` may still hold tabs and line breaks. A NUL byte used to reach PostgreSQL, which cannot store it, and came back as `400 database-constraint-violation` with a WARN line.
 - A number with a fraction in an integer field fails the request with `400 invalid-request`. Jackson dropped the fraction, so an `eventIndex` of `1.9` was stored as `1`. A bridge page with such a number is now bad data of that address.

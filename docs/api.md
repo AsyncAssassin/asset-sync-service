@@ -468,6 +468,7 @@ Failure behavior:
 - HTTP 429 throttling is retryable provider backpressure. A valid `Retry-After` value influences the next attempt delay.
 - Every HTTP bridge request carries the address's durable checkpoint as `fromBlockHeight` and `fromEventIndex`, so a bridge that returned a final page without a cursor resumes from there instead of from the start of its history. See the HTTP bridge page contract in `docs/architecture.md`.
 - Events committed before a provider failure remain valid.
+- An address disabled while its run syncs it, or whose chain is disabled meanwhile, fails the run with that reason, such as `Watched address was disabled during the sync.`; the provider is not blamed.
 - The API must not report provider completion from POST; clients poll `GET /api/v1/sync-runs/{id}`.
 
 ## 12. Start Account Sync
@@ -514,6 +515,7 @@ Behavior:
 - A retryable provider failure of one address that is no throttling, such as a timeout or a `5xx`, puts that address on a retry list, and the pass goes on with the others. The address gets the attempts and backoff of a run: `asset-sync.sync.worker.max-attempts` in all, the second after `retry-backoff-base-delay` and each later one after twice the previous delay, up to `retry-backoff-max-delay` (30 s, 1, 2, and 4 minutes by default). The retries that are due go first in each claim, and while any address waits the run's `lastError` says how many and the last error. An address whose last attempt fails too is recorded as failed with `failed <n> times: <error>`. Pages an address commits before it fails count as progress: its count starts over. None of this spends the run's `failure_attempts`.
 - Retryable failures of three addresses in a row, with no page committed between them, are a provider outage: the claim fails, the run is retried with backoff and spends one `failure_attempts` unless max attempts has been reached, and the failures of the streak do not count against their addresses. So does throttling, a `429` or a rate limit with or without `Retry-After`, which concerns every address, and so do a database failure and a lost claim or cursor lease. The retried run resumes the pass where the failed claim stopped. At most 50 addresses wait for a retry; with the list full, the scan waits at the next failing address until due retries free a place.
 - A configuration failure of the whole provider, such as rejected credentials or a redirect, fails the run at once.
+- An address disabled while the pass syncs it, or whose chain is disabled meanwhile, leaves the pass without an error, as if it had been disabled before the pass reached it.
 - A terminal failure of one address (provider data invalid, a configuration gap of that address, a database constraint) ends only that address; the pass goes on with the others. When the pass completes, a run with such failures is `FAILED` and its `lastError` reads `<n> of <m> addresses failed terminally: <addressId>: <error>; ...`, capped at the stored error length. Disable an address that keeps failing with `PATCH /api/v1/addresses/{addressId}`.
 - Accounts over the configured address cap are terminal `FAILED` during worker execution.
 

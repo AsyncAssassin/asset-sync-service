@@ -403,6 +403,43 @@ class AccountSyncIntegrationTests(
         )
     }
 
+    @Test
+    fun `an address disabled while the pass syncs it leaves the pass instead of failing the run`() {
+        val accountId = createAccount()
+        registerAddress(accountId, "0xleave-one")
+        val leavingAddressId = registerAddress(accountId, "0xleave-disabled")
+        registerAddress(accountId, "0xleave-three")
+        scriptOneEvent("0xleave-one")
+        scriptDisabledWhileFetched("0xleave-disabled") {
+            jdbcTemplate.update("UPDATE watched_addresses SET status = 'DISABLED' WHERE id = ?", UUID.fromString(leavingAddressId))
+        }
+        scriptOneEvent("0xleave-three")
+
+        val syncRunId = submitAccountSync(accountId)
+        runNextClaim()
+
+        assertEquals("SUCCEEDED", runStatus(syncRunId))
+        assertEquals(2, tableCount("observed_transactions"))
+        assertEquals(0, singleInt("SELECT count(*) FROM observed_transactions WHERE address = '0xleave-disabled'"))
+    }
+
+    @Test
+    fun `addresses whose chain is disabled while the pass syncs them leave the pass`() {
+        val accountId = createAccount()
+        registerAddress(accountId, "0xleave-chain-one")
+        registerAddress(accountId, "0xleave-chain-two")
+        scriptDisabledWhileFetched("0xleave-chain-one") {
+            jdbcTemplate.update("UPDATE chain_configs SET enabled = false WHERE chain_id = 'local-evm'")
+        }
+        scriptOneEvent("0xleave-chain-two")
+
+        val syncRunId = submitAccountSync(accountId)
+        runNextClaim()
+
+        assertEquals("SUCCEEDED", runStatus(syncRunId))
+        assertEquals(0, tableCount("observed_transactions"))
+    }
+
     /** An address the provider fails on every fetch, as with a timeout that no retry fixes. */
     private fun scriptTimeout(address: String) {
         fakeChainProvider.setScript(
@@ -410,6 +447,19 @@ class AccountSyncIntegrationTests(
             address = address,
             asset = "USDC",
             steps = listOf(FakeChainProviderStep.Failure(TIMEOUT)),
+        )
+    }
+
+    /** One event, fetched after [change] has taken the address out of the syncs. */
+    private fun scriptDisabledWhileFetched(address: String, change: () -> Unit) {
+        fakeChainProvider.setScript(
+            chainId = "local-evm",
+            address = address,
+            asset = "USDC",
+            steps = listOf(
+                FakeChainProviderStep.Action(change),
+                FakeChainProviderStep.Event(providerEvent(txHash = "$address-1", address = address)),
+            ),
         )
     }
 

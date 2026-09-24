@@ -167,7 +167,8 @@ Expected behavior:
 
 - Classify the page as terminal provider data invalid.
 - Do not ingest any event from a page that fails validation.
-- An event that passes page validation but fails ingestion deterministically is terminal as well: an immutable-field conflict, an address that is not watched, a rejected ingest rule, or a broken domain invariant. Events of the page ingested before it stay committed, and the retry budget is not spent on attempts that would fail the same way.
+- An event that passes page validation but fails ingestion deterministically is terminal as well: an immutable-field conflict, a rejected ingest rule, or a broken domain invariant. Events of the page ingested before it stay committed, and the retry budget is not spent on attempts that would fail the same way.
+- An address disabled while its run syncs it, or whose chain is disabled meanwhile, is no provider error: its own run fails with that reason, and an account pass leaves the address out without an error.
 - In an account sync a terminal failure ends only that address. The pass continues with the other addresses and, once complete, marks the run `FAILED` with `<n> of <m> addresses failed terminally: <addressId>: <error>; ...` in `last_error`. An address that keeps failing is taken out of account syncs with `PATCH /api/v1/addresses/{addressId}` and `{"status":"DISABLED"}`.
 - Do not advance `sync_cursors`.
 - Mark the current sync run `FAILED` with bounded `last_error`.

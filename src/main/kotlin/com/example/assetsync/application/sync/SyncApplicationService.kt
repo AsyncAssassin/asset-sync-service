@@ -242,6 +242,10 @@ class SyncApplicationService(
                     } else {
                         outages.failed(watchedAddressId, outcome)
                     }
+                AccountAddressOutcome.LeftPass -> {
+                    outages.progressed()
+                    pass.retryDone(watchedAddressId)
+                }
             }
         }
 
@@ -296,6 +300,10 @@ class SyncApplicationService(
                             outages.failed(watchedAddress.id, outcome)
                         }
                     }
+                    AccountAddressOutcome.LeftPass -> {
+                        outages.progressed()
+                        pass.advancePast(watchedAddress)
+                    }
                 }
             }
         }
@@ -337,6 +345,10 @@ class SyncApplicationService(
                     } else {
                         outages.failed(watchedAddressId, outcome)
                     }
+                }
+                AccountAddressOutcome.LeftPass -> {
+                    outages.progressed()
+                    pass.revisitDone(watchedAddressId)
                 }
             }
         }
@@ -389,7 +401,8 @@ class SyncApplicationService(
      * throttling, such as a timeout on a heavy address or a `5xx`, may concern this address only,
      * so the address is retried later. A configuration failure of the whole provider, such as a
      * rejected credential or a redirect, would fail every address the same way, so it fails the run
-     * at once. Throttling (a `429` or a rate limit, with or without `Retry-After`), a database
+     * at once. An address disabled while it syncs, or one whose chain is, leaves the pass without
+     * an error. Throttling (a `429` or a rate limit, with or without `Retry-After`), a database
      * failure, a lost claim or lease, and shutdown interrupts fail the whole claim.
      */
     private fun processAccountAddress(
@@ -409,6 +422,16 @@ class SyncApplicationService(
             // A shutdown, even one that reached only the provider thread, requeues the claim as interrupted.
             if (Thread.currentThread().isInterrupted || exception.causedByInterruption()) {
                 throw exception
+            }
+            if (exception is WatchedAddressLeftSyncException) {
+                logger.info(
+                    "account_sync_address_left_pass syncRunId={} accountId={} watchedAddressId={} reason={}",
+                    claim.run.id,
+                    watchedAddress.accountId,
+                    watchedAddress.id,
+                    exception.message,
+                )
+                return AccountAddressOutcome.LeftPass
             }
             // Throttling concerns the whole provider, so it fails the claim like Retry-After does.
             if (exception is ChainProviderUnavailableException && exception.retryAfter == null && !exception.throttled) {
@@ -527,7 +550,7 @@ class SyncApplicationService(
                 }
 
                 cursorHeartbeat.throwIfFailed()
-                val pageChanges = ingestWholePage(page.events, progress)
+                val pageChanges = ingestWholePage(watchedAddress, page.events, progress)
                 addressEventsSeenThisClaim += page.events.size
 
                 cursorHeartbeat.throwIfFailed()
@@ -734,7 +757,7 @@ class SyncApplicationService(
         }
     }
 
-    private fun ingestWholePage(events: List<ChainProviderObservedEvent>, progress: SyncProgress): Int {
+    private fun ingestWholePage(watchedAddress: WatchedAddress, events: List<ChainProviderObservedEvent>, progress: SyncProgress): Int {
         var changed = 0
         events.forEach { event ->
             progress.eventsSeen += 1
@@ -744,7 +767,8 @@ class SyncApplicationService(
             val result = try {
                 observedEventApplicationService.ingest(event.toIngestCommand(source = "provider:${chainProviderPort.providerName}"))
             } catch (exception: WatchedAddressNotFoundException) {
-                throw ProviderDataInvalidException("Provider returned an event for an address that is not watched.", exception)
+                // validatePage matched every event to the watched address, so it was disabled since.
+                throw WatchedAddressLeftSyncException(watchedAddress.id, "Watched address was disabled during the sync.", exception)
             } catch (exception: ObservedTransactionConflictException) {
                 // The natural key has no direction: a transfer of the address to itself sent as two
                 // rows on either side of a page boundary ends here, after the first row was stored.
@@ -760,7 +784,11 @@ class SyncApplicationService(
             } catch (exception: DomainInvariantException) {
                 throw ProviderDataInvalidException("Provider returned an event that breaks a domain invariant: ${exception.message}", exception)
             } catch (exception: UnsupportedChainException) {
-                throw AddressConfigurationException("Chain ${exception.chainId} is not enabled, so its events cannot be ingested.", exception)
+                throw WatchedAddressLeftSyncException(
+                    watchedAddress.id,
+                    "Chain ${exception.chainId} is not enabled, so its events cannot be ingested.",
+                    exception,
+                )
             }
             if (result.result == TransitionOutcome.CREATED || result.result == TransitionOutcome.UPDATED) {
                 changed += 1
@@ -1104,6 +1132,7 @@ class SyncApplicationService(
             is ProviderDataInvalidException,
             is ProviderConfigurationException,
             is DataIntegrityViolationException,
+            is WatchedAddressLeftSyncException,
             -> true
             is ChainProviderUnavailableException,
             is SyncCapacityExceededException,
@@ -1151,6 +1180,7 @@ class SyncApplicationService(
                 is SyncCapacityExceededException,
                 is CursorCheckpointAdvanceStaleException,
                 is SyncRunClaimLostException,
+                is WatchedAddressLeftSyncException,
                 -> conciseMessage()
                 else -> "Unexpected error (${javaClass.simpleName})."
             }
@@ -1283,6 +1313,9 @@ class SyncApplicationService(
 
         /** A retryable provider failure: the address is retried in a later claim. */
         data class RetryLater(val error: String, val exception: ChainProviderUnavailableException) : AccountAddressOutcome
+
+        /** The address, or its chain, was disabled while the pass synced it: it is no longer part of the pass. */
+        data object LeftPass : AccountAddressOutcome
     }
 
     private companion object {
@@ -1305,6 +1338,17 @@ class SyncCapacityExceededException(
 class CursorCheckpointAdvanceStaleException(
     val watchedAddressId: UUID,
 ) : RuntimeException("Cursor checkpoint could not be advanced because the lease or version is stale.")
+
+/**
+ * The watched address left the syncs while its run worked on it: the address was disabled, or its
+ * chain was. The run of that address fails with this message; an account pass leaves the address
+ * out, as it would have had the change come before the pass reached it.
+ */
+class WatchedAddressLeftSyncException(
+    val watchedAddressId: UUID,
+    message: String,
+    cause: Throwable,
+) : RuntimeException(message, cause)
 
 class SyncRunClaimLostException(
     val syncRunId: UUID,
