@@ -1,5 +1,6 @@
 package com.example.assetsync.config
 
+import com.example.assetsync.infrastructure.provider.ProviderHttpSupport
 import java.net.URI
 import java.time.Duration
 import org.springframework.boot.context.properties.ConfigurationProperties
@@ -7,7 +8,6 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Profile
-import org.springframework.http.client.SimpleClientHttpRequestFactory
 import org.springframework.web.client.RestClient
 
 /**
@@ -32,13 +32,9 @@ class ProviderConfiguration {
         require(runCatching { URI(properties.baseUrl).rawUserInfo }.getOrNull() == null) {
             "asset-sync.provider.base-url must not carry a user name or password: the HTTP client never sends them."
         }
-        val requestFactory = SimpleClientHttpRequestFactory().apply {
-            setConnectTimeout(properties.connectTimeout)
-            setReadTimeout(properties.readTimeout)
-        }
         return RestClient.builder()
             .baseUrl(properties.baseUrl)
-            .requestFactory(requestFactory)
+            .requestFactory(ProviderHttpSupport.requestFactory(properties.connectTimeout, properties.readTimeout))
             .build()
     }
 }

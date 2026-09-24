@@ -199,7 +199,7 @@ Response body, at most `max-provider-page-bytes`, with no string longer than 100
 - `latestBlockHeight`, `safeBlockHeight`: block high-water, optional; `safeBlockHeight` must not exceed `latestBlockHeight`.
 - `metadata`: an optional JSON object stored as the address checkpoint, at most `max-checkpoint-json-length` bytes.
 
-Status handling: `2xx` is parsed as above; `408`, `429` (honoring `Retry-After`), and `5xx` are retryable and spend the run's retry budget; any other `4xx`, malformed JSON, a `null` element in `events`, and an oversized body are terminal provider data invalid for that address. Only the retryable class turns the `httpChainProvider` health indicator `DOWN`.
+Status handling: `2xx` is parsed as above; `408`, `429` (honoring `Retry-After`), and `5xx` are retryable and spend the run's retry budget; any other `4xx`, malformed JSON, a `null` element in `events`, and an oversized body are terminal provider data invalid for that address. A redirect (`3xx`) is not followed: it is a terminal provider configuration failure, because the operator configures `base-url` and retries cannot fix it. Only the retryable class and configuration failures turn the `httpChainProvider` health indicator `DOWN`.
 
 Healthy limits such as page count, event count, run duration, or a busy cursor lease requeue the run as a continuation and do not increment `failure_attempts`. Retryable provider failures, including 429 throttling, increment `failure_attempts`. Provider configuration failures (`ProviderConfigurationException`: rejected credentials, a chain without a provider network mapping, a fetch the configured provider cannot serve) are terminal like malformed pages, so they never burn the retry budget on attempts that cannot succeed.
 

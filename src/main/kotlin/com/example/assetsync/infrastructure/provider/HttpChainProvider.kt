@@ -5,6 +5,7 @@ import com.example.assetsync.application.sync.ChainProviderEventsPageRequest
 import com.example.assetsync.application.sync.ChainProviderObservedEvent
 import com.example.assetsync.application.sync.ChainProviderPort
 import com.example.assetsync.application.sync.ChainProviderUnavailableException
+import com.example.assetsync.application.sync.ProviderConfigurationException
 import com.example.assetsync.application.sync.ProviderDataInvalidException
 import com.example.assetsync.config.ConditionalOnHttpChainProvider
 import com.example.assetsync.config.SyncProperties
@@ -115,6 +116,11 @@ class HttpChainProvider @Autowired constructor(
                                 )
                             statusCode.is5xxServerError ->
                                 throw ChainProviderUnavailableException("Provider returned HTTP ${statusCode.value()}.")
+                            statusCode.is3xxRedirection ->
+                                throw ProviderConfigurationException(
+                                    "Provider answered with a redirect (HTTP ${statusCode.value()}); " +
+                                        "point asset-sync.provider.base-url at the final address.",
+                                )
                             statusCode.is4xxClientError ->
                                 throw ProviderDataInvalidException("Provider returned HTTP ${statusCode.value()} for a watched address.")
                             else ->
@@ -139,6 +145,10 @@ class HttpChainProvider @Autowired constructor(
             recordDataError(request = request, exception = exception)
             throw exception
         } catch (exception: ChainProviderUnavailableException) {
+            recordFailure(request = request, exception = exception)
+            throw exception
+        } catch (exception: ProviderConfigurationException) {
+            // Wrong for every address, like an outage, but retries cannot fix it: the run fails at once.
             recordFailure(request = request, exception = exception)
             throw exception
         } catch (exception: RuntimeException) {

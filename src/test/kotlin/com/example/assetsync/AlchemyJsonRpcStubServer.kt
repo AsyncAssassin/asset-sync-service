@@ -31,6 +31,7 @@ class AlchemyJsonRpcStubServer : AutoCloseable {
         val retryAfter: String? = null,
         /** Held back before the response is written, to trigger the client's read timeout. */
         val delay: Duration? = null,
+        val headers: Map<String, String> = emptyMap(),
     )
 
     val requests = CopyOnWriteArrayList<RecordedRequest>()
@@ -67,6 +68,7 @@ class AlchemyJsonRpcStubServer : AutoCloseable {
             val bytes = response.body.toByteArray(StandardCharsets.UTF_8)
             exchange.responseHeaders.add("Content-Type", "application/json")
             response.retryAfter?.let { exchange.responseHeaders.add("Retry-After", it) }
+            response.headers.forEach { (name, value) -> exchange.responseHeaders.add(name, value) }
             response.delay?.let { Thread.sleep(it.toMillis()) }
             runCatching {
                 exchange.sendResponseHeaders(response.status, bytes.size.toLong())

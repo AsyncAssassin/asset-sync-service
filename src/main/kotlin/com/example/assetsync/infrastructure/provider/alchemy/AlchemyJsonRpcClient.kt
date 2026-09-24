@@ -174,6 +174,10 @@ class AlchemyJsonRpcClient(
                 )
             code == HttpStatus.REQUEST_TIMEOUT.value() || status.is5xxServerError ->
                 throw ChainProviderUnavailableException("Alchemy returned HTTP $code for network $network.")
+            status.is3xxRedirection ->
+                throw ProviderConfigurationException(
+                    "Alchemy answered with a redirect (HTTP $code) for network $network; check the endpoint template.",
+                )
             status.is4xxClientError ->
                 throw ProviderDataInvalidException("Alchemy returned HTTP $code for $method on network $network.")
             else ->

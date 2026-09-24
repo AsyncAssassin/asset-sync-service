@@ -1,10 +1,12 @@
 package com.example.assetsync.unit
 
 import com.example.assetsync.application.sync.ChainProviderEventsPageRequest
+import com.example.assetsync.application.sync.ProviderConfigurationException
 import com.example.assetsync.config.ProviderConfiguration
 import com.example.assetsync.config.ProviderProperties
 import com.example.assetsync.config.SyncProperties
 import com.example.assetsync.infrastructure.provider.HttpChainProvider
+import com.example.assetsync.infrastructure.provider.HttpChainProviderHealthIndicator
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
@@ -18,6 +20,8 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import org.junit.jupiter.api.assertThrows
+import org.springframework.boot.actuate.health.Status
 
 /**
  * The HTTP bridge contract as the adapter speaks it (`docs/architecture.md`, HTTP Bridge Page
@@ -59,6 +63,26 @@ class HttpBridgeContractTests {
             assertEquals("/v1/chains/local-evm/addresses/0xbridge/events", received.path)
             assertEquals(mapOf("asset" to "USDC", "limit" to "100", "cursor" to cursor, "fromBlockHeight" to "100", "fromEventIndex" to "3"), received.query)
         }
+    }
+
+    @Test
+    fun `a redirect is not followed and fails as a configuration error with health down`() {
+        handler.set { exchange ->
+            if (exchange.requestURI.rawPath.startsWith("/moved")) {
+                respond(exchange, 200, IDLE_PAGE)
+            } else {
+                respond(exchange, 302, "", mapOf("Location" to "http://127.0.0.1:${server.address.port}/moved"))
+            }
+        }
+        val provider = provider()
+
+        val failure = assertThrows<ProviderConfigurationException> { provider.fetchObservedEventsPage(pageRequest()) }
+
+        assertEquals("Provider answered with a redirect (HTTP 302); point asset-sync.provider.base-url at the final address.", failure.message)
+        assertEquals(1, requests.size, "the redirect must not be followed")
+        val health = HttpChainProviderHealthIndicator(provider).health()
+        assertEquals(Status.DOWN, health.status)
+        assertEquals(failure.message, health.details["error"])
     }
 
     private fun provider(properties: ProviderProperties = ProviderProperties(baseUrl = "http://127.0.0.1:${server.address.port}")): HttpChainProvider =

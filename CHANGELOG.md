@@ -6,6 +6,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
+- The bridge client no longer follows a redirect, which sent the request, and any token in `base-url`, to the new location. A `3xx` from the bridge or from Alchemy now fails the run at once as a configuration error and turns provider health `DOWN`; Alchemy's was retried as an outage.
 - A bridge cursor reaches the bridge byte for byte. It went into the request URL unencoded: a `+`, as in base64, arrived as a space, and a cursor in JSON failed before the request was sent, as a retryable provider outage.
 
 ## [0.4.1] - 2026-09-24

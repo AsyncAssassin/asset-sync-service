@@ -7,7 +7,9 @@ import com.example.assetsync.application.sync.ChainProviderUnavailableException
 import com.example.assetsync.application.sync.ProviderConfigurationException
 import com.example.assetsync.application.sync.ProviderDataInvalidException
 import com.example.assetsync.config.AlchemyAuthMode
+import com.example.assetsync.config.AlchemyProviderConfiguration
 import com.example.assetsync.config.AlchemyProviderProperties
+import com.example.assetsync.config.ProviderProperties
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyJsonRpcClient
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry
 import java.net.ServerSocket
@@ -21,7 +23,6 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.assertThrows
 import org.mockito.Mockito
-import org.springframework.web.client.RestClient
 
 /**
  * Locks the JSON-RPC client contract against a stub endpoint: how the key travels in each auth
@@ -174,6 +175,19 @@ class AlchemyJsonRpcClientTests {
         assertEquals(1.0, rpcCount("UNAVAILABLE"))
     }
 
+    @Test
+    fun `a redirect is not followed and is a configuration failure`() {
+        stub.responder = {
+            AlchemyJsonRpcStubServer.StubResponse(body = "", status = 302, headers = mapOf("Location" to "http://127.0.0.1:${stub.port}/moved/v2/"))
+        }
+
+        val exception = assertThrows<ProviderConfigurationException> { client().blockNumber("eth-sepolia") }
+
+        assertEquals("Alchemy answered with a redirect (HTTP 302) for network eth-sepolia; check the endpoint template.", exception.message)
+        assertEquals(1, stub.requests.size, "the redirect must not be followed")
+        assertEquals(1.0, rpcCount("CONFIGURATION"))
+    }
+
     private fun rpcCount(result: String): Double =
         meterRegistry.find("asset.sync.provider.alchemy.rpc").tag("result", result).counters().sumOf { it.count() }
 
@@ -183,7 +197,8 @@ class AlchemyJsonRpcClientTests {
         maxResponseBytes: Int = AlchemyJsonRpcClient.DEFAULT_MAX_RESPONSE_BYTES,
     ): AlchemyJsonRpcClient =
         AlchemyJsonRpcClient(
-            restClient = RestClient.builder().build(),
+            // The production client: its request factory and timeouts are part of the contract.
+            restClient = AlchemyProviderConfiguration().alchemyRestClient(ProviderProperties()),
             properties = AlchemyProviderProperties(
                 apiKey = apiKey,
                 authMode = authMode,
