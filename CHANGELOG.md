@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file. The format is b
 
 ## [Unreleased]
 
+### Fixed
+
+- A bridge cursor reaches the bridge byte for byte. It went into the request URL unencoded: a `+`, as in base64, arrived as a space, and a cursor in JSON failed before the request was sent, as a retryable provider outage.
+
 ## [0.4.1] - 2026-09-24
 
 ### Changed

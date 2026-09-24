@@ -189,7 +189,7 @@ On shutdown the worker acts as a Spring `SmartLifecycle` in the web server's gra
 
 `HttpChainProvider` speaks to a normalized HTTP bridge: an indexer in `prod`, the bundled simulator in `demo`.
 
-Request: `GET {base-url}/v1/chains/{chainId}/addresses/{address}/events` with the query parameters `asset`, `limit` (the page size), `cursor` (the stored resume token, absent before the first page), and, once the address has a checkpoint, `fromBlockHeight` and `fromEventIndex` of its last processed event. A bridge resumes from `cursor` when one is sent, otherwise from the first event at or after `(fromBlockHeight, fromEventIndex)`, and from the start of its history when neither is sent. Serving the checkpoint event itself again is harmless; serving anything before it fails the page.
+Request: `GET {base-url}/v1/chains/{chainId}/addresses/{address}/events` with the query parameters `asset`, `limit` (the page size), `cursor` (the stored resume token, absent before the first page), and, once the address has a checkpoint, `fromBlockHeight` and `fromEventIndex` of its last processed event. Every path and query value is percent-encoded as a whole, so an opaque cursor reaches the bridge exactly as the bridge sent it, `+`, `/`, `=`, `&`, and braces included. A bridge resumes from `cursor` when one is sent, otherwise from the first event at or after `(fromBlockHeight, fromEventIndex)`, and from the start of its history when neither is sent. Serving the checkpoint event itself again is harmless; serving anything before it fails the page.
 
 Response body, at most `max-provider-page-bytes`, with no string longer than 100 000 characters in the fields below; other fields are ignored:
 

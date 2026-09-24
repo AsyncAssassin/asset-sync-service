@@ -74,17 +74,33 @@ class HttpChainProvider @Autowired constructor(
                 chainProviderRestClient
                     .get()
                     .uri { uriBuilder ->
+                        // Every value is a URI variable, which RestClient encodes strictly: an opaque
+                        // cursor, such as base64 or JSON, reaches the bridge byte for byte. Put into
+                        // the template itself, `+` came back as a space and braces as a variable.
+                        val variables = mutableMapOf<String, Any>(
+                            "chainId" to request.chainId,
+                            "address" to request.address,
+                            "asset" to request.asset,
+                            "limit" to request.limit,
+                        )
                         val builder = uriBuilder
                             .path("/v1/chains/{chainId}/addresses/{address}/events")
-                            .queryParam("asset", request.asset)
-                            .queryParam("limit", request.limit)
-                        if (request.cursor != null) {
-                            builder.queryParam("cursor", request.cursor)
+                            .queryParam("asset", "{asset}")
+                            .queryParam("limit", "{limit}")
+                        request.cursor?.let {
+                            builder.queryParam("cursor", "{cursor}")
+                            variables["cursor"] = it
                         }
                         // The durable checkpoint, so a bridge resumes from it when no cursor is sent.
-                        request.fromBlockHeight?.let { builder.queryParam("fromBlockHeight", it) }
-                        request.fromEventIndex?.let { builder.queryParam("fromEventIndex", it) }
-                        builder.build(request.chainId, request.address)
+                        request.fromBlockHeight?.let {
+                            builder.queryParam("fromBlockHeight", "{fromBlockHeight}")
+                            variables["fromBlockHeight"] = it
+                        }
+                        request.fromEventIndex?.let {
+                            builder.queryParam("fromEventIndex", "{fromEventIndex}")
+                            variables["fromEventIndex"] = it
+                        }
+                        builder.build(variables)
                     }
                     .exchange { _, response ->
                         val statusCode = response.statusCode
