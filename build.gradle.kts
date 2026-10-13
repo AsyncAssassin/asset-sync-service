@@ -1,6 +1,6 @@
 plugins {
-    kotlin("jvm") version "2.4.20"
-    kotlin("plugin.spring") version "2.4.20"
+    kotlin("jvm") version "2.4.21"
+    kotlin("plugin.spring") version "2.4.21"
     id("org.springframework.boot") version "3.5.16"
     id("io.spring.dependency-management") version "1.1.7"
 }
@@ -10,33 +10,31 @@ version = "0.4.2"
 description = "Asset sync backend service"
 
 // Jackson: Spring Boot 3.5.16 (like 3.5.15) manages jackson-bom 2.21.4, which sits inside the vulnerable range of
-// GHSA-5jmj-h7xm-6q6v (CVE-2026-54515, ">= 2.19.0, < 2.21.5"). Pin the BOM to the latest 2.21.x
-// patch instead (all modules used here are published at 2.21.7; verified on Maven Central
-// 2026-09-22). `jackson-bom.version` is the property Boot's dependency management honors; the
+// GHSA-5jmj-h7xm-6q6v (CVE-2026-54515, ">= 2.19.0, < 2.21.5"). Pin the BOM to a current
+// Jackson 2 release instead (BOM 2.22.3; verified on Maven Central 2026-10-14).
+// `jackson-bom.version` is the property Boot's dependency management honors; the
 // `jackson.version` property is ignored. Drop the override once Spring Boot manages >= 2.21.5,
 // which the 3.5 line no longer will (see the pins below).
-// No exploit path exists in this codebase either way (no @JsonIgnoreProperties, no @JsonFormat
-// case-insensitive properties, no default/polymorphic typing).
-extra["jackson-bom.version"] = "2.21.7"
+extra["jackson-bom.version"] = "2.22.3"
 // Security pins over the Boot BOM. Spring Boot 3.5.16 is the last open-source 3.5.x release
 // (open-source support ended 2026-06-30), so no Boot bump will move these, and Dependabot does not
-// update BOM properties: they are maintained by hand until the Boot 4 migration. None of the
-// advisories is reachable from this codebase, but every scanner reports them (verified on Maven
-// Central 2026-09-23).
+// update BOM properties: they are maintained by hand until the Boot 4 migration.
+// Versions below were checked on Maven Central on 2026-10-14.
 // Tomcat 10.1.55: CVE-2026-65905, CVE-2026-65182, CVE-2026-68525 (Tomcat's own DIGEST and FORM
 // authenticators and security-constraint ordering; the service uses Spring Security Basic).
-extra["tomcat.version"] = "10.1.60"
+extra["tomcat.version"] = "10.1.61"
 // pgjdbc 42.7.11: CVE-2026-54291 (`channelBinding=require` silently downgraded; no URL here sets it).
-extra["postgresql.version"] = "42.7.13"
+// 42.7.14 also fixes CVE-2026-107314 (requireAuth) and CVE-2026-107315 (statement padding).
+extra["postgresql.version"] = "42.7.14"
 // log4j-api 2.24.3: CVE-2026-49844 (MapMessage JSON serialization; logging goes through Logback).
 extra["log4j2.version"] = "2.25.5"
 // commons-lang3 3.17.0, which the Boot BOM forces below swagger-core's 3.20.0: CVE-2025-48924
 // (recursion in ClassUtils.getClass; never called with request input).
-extra["commons-lang3.version"] = "3.20.0"
+extra["commons-lang3.version"] = "3.21.0"
 // Kotlin: the Boot BOM manages kotlin-stdlib/kotlin-reflect at its own Kotlin version (1.9.25 for
 // Boot 3.5.x), which would leave the runtime library behind the 2.4 compiler. Pin the BOM's
 // property to the plugin version so compiler, stdlib, and reflect move together.
-extra["kotlin.version"] = "2.4.20"
+extra["kotlin.version"] = "2.4.21"
 
 java {
     toolchain {

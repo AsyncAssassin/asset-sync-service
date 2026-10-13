@@ -186,12 +186,12 @@ CI scans the Docker image with Trivy and fails on HIGH and CRITICAL vulnerabilit
 ```bash
 docker build -t asset-sync-service:ci .
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/workspace:ro" -w /workspace \
-  aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
-  image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress \
+  aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa \
+  image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --show-suppressed --exit-code 1 --no-progress \
   --timeout 15m asset-sync-service:ci
 ```
 
-The first run downloads the vulnerability and Java databases, about 1.4 GB each unpacked; the timeout covers that download. A finding that does not apply goes to `.trivyignore` with its id and the reason, so the exception stays reviewable.
+The first run downloads the vulnerability and Java databases, about 1.4 GB each unpacked; the timeout covers that download. A finding that does not apply goes to `.trivyignore` with its id, reason, and expiration date. The scan displays suppressed findings. `RealBootStartupSmokeTest` checks the DTO-only controller responses and absence of XSLT views/resolvers on which the current Spring MVC exceptions rely; reassess those exceptions before introducing view rendering or SSE.
 
 If jOOQ generation is configured as a separate task:
 

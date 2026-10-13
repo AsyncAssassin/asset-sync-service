@@ -41,7 +41,7 @@ jobs:
           java-version: '21'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       - name: Ensure Gradle wrapper is executable
         run: chmod +x ./gradlew
@@ -52,15 +52,19 @@ jobs:
       - name: Build boot jar
         run: ./gradlew bootJar
 
-      - name: Boot smoke (real java -jar — catches startup regressions the MOCK-env tests miss)
+      - name: Boot smoke (real java -jar catches startup regressions the MOCK-env tests miss)
         run: |
-          JAR=$(ls build/libs/asset-sync-service-*.jar | grep -v plain | head -1)
+          JARS=(build/libs/asset-sync-service-*.jar)
+          if [ "${#JARS[@]}" -ne 1 ] || [ ! -f "${JARS[0]}" ]; then
+            echo "Expected exactly one boot jar in build/libs."
+            exit 1
+          fi
           SPRING_PROFILES_ACTIVE=local SERVER_PORT=8080 \
           ASSET_SYNC_DB_HOST=localhost ASSET_SYNC_DB_PORT=5432 ASSET_SYNC_DB_NAME=asset_sync \
           ASSET_SYNC_DB_USER=asset_sync ASSET_SYNC_DB_PASSWORD=asset_sync \
-          java -jar "$JAR" > boot-smoke.log 2>&1 &
+          java -jar "${JARS[0]}" > boot-smoke.log 2>&1 &
           JPID=$!
-          for i in $(seq 1 60); do
+          for _attempt in {1..60}; do
             if curl -sf http://localhost:8080/actuator/health >/dev/null 2>&1; then
               echo "Boot smoke OK: application became healthy under a real servlet container."
               kill "$JPID" 2>/dev/null || true
@@ -92,8 +96,8 @@ jobs:
           docker run --rm
           -v /var/run/docker.sock:/var/run/docker.sock
           -v "$PWD:/workspace:ro" -w /workspace
-          aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
-          image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress
+          aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+          image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --show-suppressed --exit-code 1 --no-progress
           --timeout 15m asset-sync-service:ci
 
       - name: Validate Docker Compose config
