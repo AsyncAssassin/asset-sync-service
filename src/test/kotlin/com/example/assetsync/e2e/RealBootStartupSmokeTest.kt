@@ -7,6 +7,7 @@ import com.example.assetsync.infrastructure.provider.HttpChainProvider
 import com.example.assetsync.infrastructure.provider.alchemy.AlchemyChainProvider
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
@@ -15,8 +16,17 @@ import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.web.client.TestRestTemplate
 import org.springframework.context.ApplicationContext
 import org.springframework.context.annotation.Import
+import org.springframework.core.ResolvableType
+import org.springframework.core.annotation.AnnotatedElementUtils
+import org.springframework.http.HttpEntity
 import org.springframework.http.HttpStatus
 import org.springframework.test.context.ActiveProfiles
+import org.springframework.web.bind.annotation.RestController
+import org.springframework.web.servlet.View
+import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping
+import org.springframework.web.servlet.mvc.method.annotation.ResponseBodyEmitter
+import org.springframework.web.servlet.view.xslt.XsltView
+import org.springframework.web.servlet.view.xslt.XsltViewResolver
 
 /**
  * Real-servlet boot smoke: boots an actual embedded Tomcat via RANDOM_PORT with metrics export
@@ -46,6 +56,32 @@ class RealBootStartupSmokeTest(
     @Autowired private val restTemplate: TestRestTemplate,
     @Autowired private val context: ApplicationContext,
 ) {
+
+    @Test
+    fun `Spring security scan exceptions require DTO responses without XSLT or SSE`() {
+        // Reassess the two CVEs in .trivyignore before adding view rendering or streaming responses.
+        assertTrue(context.getBeansOfType(XsltView::class.java).isEmpty())
+        assertTrue(context.getBeansOfType(XsltViewResolver::class.java).isEmpty())
+        val mapping = context.getBean("requestMappingHandlerMapping", RequestMappingHandlerMapping::class.java)
+        val handlers = mapping.handlerMethods.values.filter {
+            it.beanType.packageName.startsWith("com.example.assetsync.")
+        }
+        assertTrue(handlers.isNotEmpty())
+        handlers.forEach { handler ->
+            val message = "Reassess .trivyignore for ${handler.beanType.simpleName}.${handler.method.name}"
+            assertTrue(AnnotatedElementUtils.hasAnnotation(handler.beanType, RestController::class.java), message)
+            val returnType = ResolvableType.forMethodReturnType(handler.method)
+            val bodyType = if (HttpEntity::class.java.isAssignableFrom(handler.returnType.parameterType)) {
+                returnType.getGeneric(0).resolve()
+            } else {
+                returnType.resolve()
+            }
+            assertNotNull(bodyType, message)
+            assertTrue(bodyType.packageName.startsWith("com.example.assetsync.") && bodyType.kotlin.isData, message)
+            assertFalse(View::class.java.isAssignableFrom(bodyType), message)
+            assertFalse(ResponseBodyEmitter::class.java.isAssignableFrom(bodyType), message)
+        }
+    }
 
     @Test
     fun `application boots under a real servlet container and serves actuator endpoints`() {
