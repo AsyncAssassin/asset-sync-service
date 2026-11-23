@@ -1,6 +1,6 @@
 # The explicit `-noble` suffix keeps Ubuntu 24.04: the suffix-less tags have moved to Ubuntu 26.04.
 # Dependabot (package-ecosystem "docker") proposes newer Java 21 tags and digests.
-FROM eclipse-temurin:21.0.12.1_1-jre-noble@sha256:000fd431958bc81a24abe1e8e5f0f0fd3ae365a594bd50aadb20696805f9408c
+FROM eclipse-temurin:21.0.13.1_2-jre-noble@sha256:48c8fa59c875b31be10ca14343c1992cabdaf15164a5ace3d823fe4341a14573
 
 WORKDIR /app
 
